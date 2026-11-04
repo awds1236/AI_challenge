@@ -8,3 +8,6 @@ dist/
 *.spec
 *.egg-info/
 .seomu_ai/
+engine/
+models/
+wheels/

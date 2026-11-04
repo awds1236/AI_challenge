@@ -328,6 +328,10 @@
         <div class="group">
           <div class="group-title">AI 모델</div>
           <div class="group-body pad">
+            <div class="engine-row">
+              <div><b>AI 엔진</b><div class="muted small" id="engine-status">확인 중…</div></div>
+              <div class="segmented" id="engine-seg"><button data-v="auto">자동</button><button data-v="builtin">내장 엔진</button><button data-v="ollama">Ollama</button></div>
+            </div>
             <div class="pc-box" id="pc-box"><div class="muted small">PC 사양 확인 중…</div></div>
             <div class="model-grid" id="model-grid"></div>
             <div class="gguf-box hidden" id="gguf-box">

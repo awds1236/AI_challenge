@@ -170,7 +170,9 @@ async function refreshAI() {
     const st = await api("llm_status");
     chip.classList.toggle("ok", st.ok && !!st.chat_model);
     chip.classList.toggle("bad", !(st.ok && st.chat_model));
-    $(".ai-chip-text", chip).textContent = st.ok && st.chat_model ? `로컬 AI · ${st.chat_model}` : "AI 엔진 미연결 (검색 모드)";
+    $(".ai-chip-text", chip).textContent = st.ok && st.chat_model
+      ? `${st.engine === "builtin" ? "내장 AI" : "로컬 AI"} · ${st.chat_model}`
+      : (st.engine === "builtin" ? "모델 파일 없음 (검색 모드)" : "AI 엔진 미연결 (검색 모드)");
     chip.title = st.ok ? `모델: ${st.models.join(", ") || "없음"}` : st.error || "";
     const dl = $("#model-list");
     dl.innerHTML = (st.models || []).map((m) => `<option value="${esc(m)}">`).join("");
@@ -572,8 +574,15 @@ async function loadModels() {
     GPU ${si.gpu ? esc(si.gpu.split(",")[0]) + (si.gpu_usable ? " (AI 가속 가능)" : " (AI 가속 불가)") : "AI 가속 불가 · CPU 사용"}</div>
     <div class="rec"><span class="badge green">추천</span> <b>${esc(recName)}</b><div class="muted small">${esc(rec.reason)}</div>
     ${rec.warn ? `<div class="small" style="color:var(--orange);margin-top:4px">⚠ ${esc(rec.warn)}</div>` : ""}</div>`;
-  if (!c.engine_ok) {
-    $("#model-grid").innerHTML = `<div class="muted">로컬 AI 엔진(Ollama)이 실행 중이 아닙니다. Ollama를 설치·실행한 뒤 '다시 확인'을 눌러 주세요.<br><span class="small">${esc(c.engine_error)}</span></div>`;
+  const eng = c.engine || {};
+  state.engine = eng.kind;
+  $$("#engine-seg button").forEach((b) => b.classList.toggle("on", b.dataset.v === (eng.setting || "auto")));
+  $("#engine-status").innerHTML = eng.kind === "builtin"
+    ? `내장 엔진 사용 중 (Ollama 불필요·인터넷 불필요) · 모델 폴더: <a data-open="${esc(eng.model_dir)}">${esc(eng.model_dir)}</a>`
+    : `Ollama 사용 중` + (eng.server ? "" : " · 내장 엔진 파일 없음 (engine 폴더에 llama-server를 넣으면 Ollama 없이 동작)");
+  const builtin = eng.kind === "builtin";
+  if (!c.engine_ok && !builtin) {
+    $("#model-grid").innerHTML = `<div class="muted">로컬 AI 엔진(Ollama)이 실행 중이 아닙니다. Ollama를 실행하거나, 위에서 '내장 엔진'을 선택하세요.<br><span class="small">${esc(c.engine_error)}</span></div>`;
     return;
   }
   $("#model-grid").innerHTML = c.models.map((m) => `
@@ -589,6 +598,9 @@ async function loadModels() {
         ${m.installed
           ? (m.active ? `<span class="badge green">${m.kind === "embed" ? "검색에 사용 중" : "사용 중"}</span>` : `<button class="btn primary sm" data-use="${esc(m.installed_id)}">사용</button>`) +
             `<button class="btn ghost sm danger" data-mdel="${esc(m.installed_id)}" title="${esc(m.installed_id)} 삭제">${svg("trash")}</button>`
+          : builtin
+            ? (m.ollama_blob ? `<button class="btn sm" data-oimport="${esc(m.id)}" title="Ollama로 받아 둔 ${esc(m.ollama_blob)}를 복사">Ollama에서 가져오기</button>` : "") +
+              `<button class="btn sm" data-gguf="${esc(m.id)}">${svg("download")} 파일 추가</button>`
           : m.install === "gguf"
             ? `<button class="btn sm" data-gguf="${esc(m.id)}">${svg("download")} GGUF 등록</button>`
             : `<button class="btn sm" data-pull="${esc(m.id)}">${svg("download")} 받기</button>`}
@@ -801,6 +813,8 @@ function bind() {
   $("#set-ai-check").addEventListener("click", () => { refreshAI(); loadModels(); });
   $("#model-grid").addEventListener("click", async (e) => {
     const u = e.target.closest("[data-use]"), p = e.target.closest("[data-pull]"), d = e.target.closest("[data-mdel]"), g = e.target.closest("[data-gguf]");
+    const oi = e.target.closest("[data-oimport]");
+    if (oi) return modelJob("import_from_ollama", [oi.dataset.oimport], "Ollama의 모델 파일을 내장 엔진으로 옮겼습니다. '사용'을 눌러 적용하세요.");
     if (u) { await api("use_model", u.dataset.use); toast(`${u.dataset.use} 모델을 사용합니다`, "ok"); loadModels(); refreshAI(); }
     if (p) modelJob("pull_model", [p.dataset.pull], `${p.dataset.pull} 모델을 받았습니다. '사용'을 눌러 적용하세요.`);
     if (d && confirm(`${d.dataset.mdel} 모델을 PC에서 삭제할까요? (다시 받을 수 있습니다)`)) {
@@ -816,6 +830,11 @@ function bind() {
       $("#gguf-path").focus();
     }
   });
+  segmented($("#engine-seg"), async (v) => {
+    try { await api("set_engine", v); toast(v === "builtin" ? "내장 엔진을 사용합니다" : v === "ollama" ? "Ollama를 사용합니다" : "엔진을 자동으로 선택합니다", "ok"); }
+    catch (er) { toast(er.message, "err"); }
+    loadModels(); refreshAI();
+  });
   $("#gguf-hf").addEventListener("click", (e) => { e.preventDefault(); window.open(e.target.dataset.href, "_blank"); });
   $("#gguf-pick").addEventListener("click", async () => {
     if (!state.info.native) return toast("브라우저 모드에서는 파일 경로를 직접 입력해 주세요", "info");
@@ -824,6 +843,7 @@ function bind() {
   $("#gguf-go").addEventListener("click", () => {
     const v = $("#gguf-path").value.trim();
     if (!v || !ggufTarget) return toast("GGUF 파일 경로를 입력하세요", "info");
+    if (/^hf\.co\//i.test(v) && state.engine === "builtin") return toast("내장 엔진은 파일 경로(.gguf)를 입력해 주세요", "info");
     if (/^hf\.co\//i.test(v)) return modelJob("pull_model", [v, ggufTarget], `${ggufTarget} 모델을 받았습니다. '사용'을 눌러 적용하세요.`);
     modelJob("import_gguf", [v, ggufTarget], `${ggufTarget} 모델을 등록했습니다. '사용'을 눌러 적용하세요.`);
   });

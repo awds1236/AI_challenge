@@ -77,7 +77,7 @@ class OllamaClient:
 
     # ---------- 상태 ----------
     def list_models(self) -> list[str]:
-        data = self._json("/api/tags", timeout=5)
+        data = self._json("/api/tags", timeout=10)
         return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
 
     def status(self) -> dict:

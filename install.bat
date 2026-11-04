@@ -25,13 +25,19 @@ if exist .venv\Scripts\python.exe (
   %PY% -m venv .venv || (echo [오류] 가상환경을 만들지 못했습니다. & pause & exit /b 1)
 )
 call .venv\Scripts\activate.bat
-python -m pip install --upgrade pip
+if exist wheels (
+  echo [오프라인] wheels 폴더의 패키지로 설치합니다.
+  set "PIPX=--no-index --find-links wheels"
+) else (
+  set "PIPX="
+  python -m pip install --upgrade pip
+)
 rem 패키지를 하나씩 설치: 일부가 실패해도 프로그램은 실행됩니다
 set "FAILED="
 for %%P in (pypdf olefile openpyxl uiautomation pywebview playwright) do (
   echo.
   echo [패키지] %%P 설치 중...
-  python -m pip install "%%P" || set "FAILED=!FAILED! %%P"
+  python -m pip install !PIPX! "%%P" || set "FAILED=!FAILED! %%P"
 )
 echo.
 if defined FAILED (
@@ -44,10 +50,22 @@ echo        - uiautomation 실패: 열린 창 수집에서 버튼 자동 누르�
   echo [완료] 모든 패키지를 설치했습니다.
 )
 echo.
+rem 내장 AI 엔진과 모델 파일이 있으면 Ollama 없이 동작
+set "BUILTIN="
+if exist "engine\llama-server.exe" set "BUILTIN=1"
+for /d %%D in (engine\*) do if exist "%%D\llama-server.exe" set "BUILTIN=1"
+if defined BUILTIN if exist "models\*.gguf" (
+  echo [AI] 내장 AI 엔진과 모델 파일이 있습니다. Ollama 없이 동작합니다.
+  echo.
+  echo 설치 완료. run.bat 을 실행하세요.
+  pause
+  exit /b 0
+)
 where ollama > nul 2>&1
 if errorlevel 1 (
-  echo [안내] 로컬 AI 엔진^(Ollama^)이 설치되어 있지 않습니다.
-  echo        https://ollama.com/download/windows 에서 설치한 뒤 이 파일을 다시 실행하세요.
+  echo [안내] AI 엔진이 없습니다. 둘 중 하나를 준비하세요:
+  echo        1^) 업무망: 인터넷 PC에서 tools\prepare_offline.ps1 로 engine·models 폴더를 만들어 복사
+  echo        2^) 인터넷 PC: https://ollama.com/download/windows 에서 Ollama 설치 후 다시 실행
   start "" https://ollama.com/download/windows
   pause
   exit /b 0

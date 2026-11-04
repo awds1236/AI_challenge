@@ -16,6 +16,8 @@ CATALOG: list[dict] = [
         "install": "pull", "download_gb": 4.5, "min_ram_gb": 8, "license": "Apache 2.0",
         "badge": "기본 · 추천", "korean": "다국어", "variant": "QAT 경량판",
         "alt": ["gemma4:e2b", "gemma4:e2b-it-q4_K_M"],
+        "gguf": ["gemma-4-e2b", "gemma4-e2b", "gemma-4-2b"],
+        "hf": "https://huggingface.co/models?search=gemma-4-E2B-it%20gguf",
         "desc": "일반 사무용 PC(RAM 8GB 이상)용 기본 모델. 품질 손실을 줄인 4비트 경량판(QAT)으로 "
                 "같은 4비트 크기에서 품질 손실이 가장 적습니다. 라이선스가 명확해 기관 배포에 적합합니다. "
                 "(일반판 gemma4:e2b를 받아도 사용할 수 있습니다)",
@@ -25,6 +27,8 @@ CATALOG: list[dict] = [
         "install": "pull", "download_gb": 6.1, "min_ram_gb": 16, "license": "Apache 2.0",
         "badge": "고성능", "korean": "다국어", "variant": "QAT 경량판",
         "alt": ["gemma4:e4b", "gemma4:latest", "gemma4:e4b-it-q4_K_M"],
+        "gguf": ["gemma-4-e4b", "gemma4-e4b", "gemma-4-4b"],
+        "hf": "https://huggingface.co/models?search=gemma-4-E4B-it%20gguf",
         "desc": "답변 품질이 더 좋은 상위 모델(QAT 경량판). 여유 메모리 8GB 이상 권장. "
                 "구형 CPU에서는 답변이 느릴 수 있습니다.",
     },
@@ -33,6 +37,7 @@ CATALOG: list[dict] = [
         "install": "gguf", "download_gb": 2.0, "min_ram_gb": 6, "license": "Kanana Open License",
         "badge": "국산 · 한국어 특화", "korean": "한국어 특화",
         "hf": "https://huggingface.co/models?search=kanana-2-3b-instruct%20gguf",
+        "gguf": ["kanana-2-3b"],
         "desc": "한국어 대화 성능이 높은 국산 경량 모델. GGUF 파일(Q4_K_M)을 받아 등록합니다. "
                 "기관 배포 전 라이선스 원문을 확인하세요.",
     },
@@ -41,12 +46,14 @@ CATALOG: list[dict] = [
         "install": "gguf", "download_gb": 1.0, "min_ram_gb": 4, "license": "Kanana Open License",
         "badge": "국산 · 초경량", "korean": "한국어 특화",
         "hf": "https://huggingface.co/models?search=kanana-2-1.3b-instruct%20gguf",
+        "gguf": ["kanana-2-1.3b", "kanana-2-1_3b"],
         "desc": "가장 가벼운 한국어 모델. 저사양 PC에서 빠르게 동작합니다.",
     },
     {
         "id": "embeddinggemma", "name": "EmbeddingGemma", "vendor": "Google", "kind": "embed",
         "install": "pull", "download_gb": 0.6, "min_ram_gb": 2, "license": "Gemma Terms",
-        "badge": "검색 보조", "korean": "다국어",
+        "badge": "검색 보조", "korean": "다국어", "gguf": ["embeddinggemma"],
+        "hf": "https://huggingface.co/models?search=embeddinggemma-300m%20gguf",
         "desc": "규정 검색 정확도를 높이는 의미 검색용 모델 (선택). 설치 후 '전체 재색인'을 실행하세요.",
     },
 ]
@@ -67,9 +74,15 @@ def names(entry: dict) -> list[str]:
 
 
 def installed_id(entry: dict, installed: list[str]) -> str:
-    """설치된 이름을 돌려준다 (기본 이름 우선). 없으면 빈 문자열."""
+    """설치된 이름을 돌려준다 (기본 이름 우선). 없으면 빈 문자열.
+    내장 엔진은 GGUF 파일 이름(예: gemma-4-E2B-it-QAT-Q4_0)에 패턴이 들어 있으면 같은 모델로 본다."""
     for n in names(entry):
         if n in installed:
+            return n
+    pats = [p.lower() for p in entry.get("gguf", [])]
+    for n in installed:
+        low = n.lower().replace("_", "-")
+        if any(p in low for p in pats):
             return n
     return ""
 

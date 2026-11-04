@@ -125,6 +125,20 @@
    ```
    > 주소창·탭이 없는 **독립 프로그램 창**으로 열립니다(pywebview, 없으면 Edge/Chrome 앱 모드). 창을 닫으면 프로그램도 종료됩니다.
 
+### 인터넷이 없는 업무망 PC에 설치 (Ollama 불필요)
+서무비서 AI에는 **내장 AI 엔진(llama.cpp)** 이 들어갈 수 있어, Ollama 없이도 모델 파일만 있으면 동작합니다.
+
+1. **인터넷 PC**에서 프로그램 폴더를 열고 아래 명령을 한 번 실행합니다.
+   ```bash
+   powershell -ExecutionPolicy Bypass -File tools\prepare_offline.ps1
+   ```
+   `engine\`(내장 AI 엔진), `models\`(Gemma 4 E2B·EmbeddingGemma `.gguf`), `wheels\`(Python 패키지)가 만들어집니다.
+2. 프로그램 폴더 전체와 Python 설치 파일을 USB 등으로 **업무망 PC**에 복사합니다.
+3. 업무망 PC에서 `install.bat` → `run.bat`을 실행합니다. 인터넷 연결 없이 설치·실행됩니다.
+
+> 이미 Ollama로 받아 둔 모델은 **설정 → AI 모델 → [Ollama에서 가져오기]** 로 내장 엔진용 파일로 옮길 수 있습니다.
+> 설정의 **AI 엔진**에서 자동 / 내장 엔진 / Ollama 를 고를 수 있습니다 (자동: 내장 엔진과 모델 파일이 있으면 내장 엔진 사용).
+
 ### 처음 사용할 때
 1. **설정**에서 내 정보(이름, 부서, 연락처)를 입력합니다. 메일 서명에 쓰입니다.
 2. **규정 저장소**에 조례·법령·내규 파일을 끌어다 놓습니다. 기존 폴더를 저장소로 추가해도 됩니다.
@@ -142,16 +156,21 @@
 │  ├─ app.py          실행 진입점 (네이티브 창 / 브라우저 모드)
 │  ├─ api.py          화면에서 호출하는 기능 API, 작업(job) 관리
 │  ├─ server.py       127.0.0.1 전용 HTTP 브리지 (토큰 인증)
+│  ├─ engine.py       내장 AI 엔진(llama.cpp) 실행·관리, GGUF 모델 파일 관리
 │  ├─ llm.py          로컬 Ollama 클라이언트 (루프백 강제, 프록시 우회, 모델 받기·GGUF 등록)
 │  ├─ models.py       지원 모델 목록, PC 사양 확인과 모델 추천
 │  ├─ rag.py          조문 단위 분할, BM25와 임베딩 하이브리드 검색, 근거 기반 답변
 │  ├─ parsers.py      HWP, HWPX, PDF, DOCX, XLSX, HTML, TXT 텍스트 추출
+│  ├─ attach.py       붙임 목록 해석·이름 일치도·PC 안 파일 찾기 (범용 붙임 수집)
+│  ├─ winwindow.py    열린 창 수집 (본문 읽기, 버튼 누르기, OCR, 폴더 감시)
+│  ├─ notice_text.py  공문 서식 정리(인사말·결재란 제거), 항목 해석, 규칙 기반 요약
 │  ├─ collector.py    공문 수집 (Playwright 브라우저 연동, URL, 파일), 붙임 다운로드
 │  ├─ deadlines.py    공문식 날짜, 기한, 제출물, 연락처 규칙 기반 추출
 │  ├─ analyzer.py     로컬 AI와 규칙을 합친 공문 분석, 요약.md 생성
 │  ├─ mail.py         메일 양식 변수 치환, 기본 양식, ICS 내보내기
 │  ├─ storage.py      SQLite 로컬 저장소
 │  └─ ui/             Apple 스타일 화면 (HTML, CSS, JS, 외부 의존성 없음)
+├─ tools/prepare_offline.ps1  업무망 설치 묶음 만들기 (엔진·모델·패키지)
 ├─ sample_data/       시연용 예시 내규와 공문
 └─ tests/             단위·통합 테스트 (pytest)
 ```

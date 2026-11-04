@@ -33,6 +33,10 @@ def default_downloads() -> Path:
 
 @dataclass
 class Settings:
+    # 로컬 AI 엔진: auto(내장 엔진+모델 파일이 있으면 내장, 없으면 Ollama) / builtin / ollama
+    engine: str = "auto"
+    threads: int = 0              # 내장 엔진 CPU 스레드 수 (0 = 자동)
+
     # 로컬 LLM (Ollama) 설정
     ollama_url: str = "http://127.0.0.1:11434"
     chat_model: str = ""          # 비워두면 설치된 gemma 계열 모델을 자동 선택

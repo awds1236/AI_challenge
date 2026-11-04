@@ -26,6 +26,7 @@ from .collector import (BrowserWorker, Captured, collect_from_files, collect_fro
                         make_notice_folder, safe_name, save_body, unique_path)
 from .config import Config
 from .deadlines import dday
+from .engine import LocalClient, LocalEngine, add_model_file, ollama_model_blob
 from .llm import LLMError, OllamaClient
 from . import models as model_catalog
 from . import attach, winwindow
@@ -55,6 +56,7 @@ class Job:
 class Api:
     def __init__(self, home: Path | None = None):
         self._cfg = Config(home)
+        self._engine = LocalEngine(self._cfg.home)
         self._store = Store(self._cfg.db_path)
         self._rag = RAGEngine(self._store, self._client, lambda: self._cfg.settings)
         self._jobs: dict[str, Job] = {}
@@ -65,9 +67,22 @@ class Api:
                 self._store.save_template(t["name"], t["subject"], t["body"])
 
     # ------------------------------------------------------------ 내부 유틸
-    def _client(self) -> OllamaClient:
+    def _engine_kind(self) -> str:
+        e = self._cfg.settings.engine
+        if e in ("builtin", "ollama"):
+            return e
+        return "builtin" if self._engine.available() else "ollama"
+
+    def _client(self):
         s = self._cfg.settings
+        if self._engine_kind() == "builtin":
+            return LocalClient(self._engine, ctx=s.num_ctx, threads=s.threads)
         return OllamaClient(s.ollama_url, allow_remote=s.allow_remote_llm)
+
+    def engine_info(self) -> dict:
+        return {"kind": self._engine_kind(), "setting": self._cfg.settings.engine,
+                "server": self._engine.server_path(), "models": list(self._engine.models()),
+                "model_dir": str(self._engine.writable_model_dir()), "running": self._engine.running()}
 
     def _run_job(self, kind: str, fn: Callable[[Job], object]) -> dict:
         job = Job(kind)
@@ -133,7 +148,8 @@ class Api:
                 st["chat_model"] = ""
                 st["error"] = str(e)
             st["embed_model"] = c.pick_embed_model(s.embed_model)
-        st["local_only"] = not s.allow_remote_llm
+        st["local_only"] = not s.allow_remote_llm or self._engine_kind() == "builtin"
+        st["engine"] = self._engine_kind()
         return st
 
     # ------------------------------------------------------------ 모델 관리
@@ -155,10 +171,16 @@ class Api:
             known.update(all_names)
             d["installed_id"] = model_catalog.installed_id(m, installed)
             d["installed"] = bool(d["installed_id"])
-            d["active"] = any(n in (active_chat, active_embed) for n in all_names)
+            d["active"] = any(n in (active_chat, active_embed) for n in all_names) or \
+                (bool(d["installed_id"]) and d["installed_id"] in (active_chat, active_embed))
             d["fits"] = info["ram_total_gb"] == 0 or info["ram_total_gb"] >= m["min_ram_gb"] * 0.9
             items.append(d)
+        if self._engine_kind() == "builtin":
+            for d in items:            # Ollama에 받아 둔 모델이면 내장 엔진으로 옮겨올 수 있다
+                d["ollama_blob"] = next((n for n in model_catalog.names(d) if ollama_model_blob(n)), "")
+        known.update(n for d in items if d["installed_id"] for n in [d["installed_id"]])
         return {"engine_ok": st["ok"], "engine_error": st.get("error", ""), "models": items,
+                "engine": self.engine_info(),
                 "others": [m for m in installed if m not in known], "active_chat": active_chat,
                 "active_embed": active_embed, "system": info, "recommend": model_catalog.recommend(info)}
 
@@ -199,11 +221,35 @@ class Api:
         if not p.is_file() or p.suffix.lower() != ".gguf":
             raise ValueError("GGUF(.gguf) 파일을 선택하세요")
         name = (model_id or p.stem).strip().lower()
+        if self._engine_kind() == "builtin":
+            entry = model_catalog.find(model_id) or {}
+            keep = model_catalog.installed_id(entry, [p.stem]) if entry else p.stem
+            name = keep or (model_id or p.stem).replace(":", "-")
 
         def work(job: Job):
             self._client().create_from_gguf(name, str(p), self._progress(job))
             return self.model_catalog()
         return self._run_job("import", work)
+
+    def import_from_ollama(self, model_id: str) -> dict:
+        """Ollama로 받아 둔 모델 파일을 내장 엔진 models 폴더로 복사 (Ollama가 꺼져 있어도 됨)."""
+        entry = model_catalog.find(model_id) or {"id": model_id}
+        src_name = next((n for n in model_catalog.names(entry) if ollama_model_blob(n)), "")
+        if not src_name:
+            raise ValueError("Ollama에 받아 둔 이 모델을 찾을 수 없습니다.")
+        blob = ollama_model_blob(src_name)
+
+        def work(job: Job):
+            add_model_file(self._engine, str(blob), src_name.replace(":", "-"), self._progress(job))
+            return self.model_catalog()
+        return self._run_job("import", work)
+
+    def set_engine(self, kind: str) -> dict:
+        if kind not in ("auto", "builtin", "ollama"):
+            raise ValueError("엔진 종류가 올바르지 않습니다")
+        self._engine.stop()
+        self.save_settings({"engine": kind})
+        return self.model_catalog()
 
     def delete_model(self, model_id: str) -> dict:
         self._client().delete(model_id)
@@ -733,6 +779,10 @@ class Api:
 
     # ------------------------------------------------------------ 종료
     def shutdown(self) -> None:
+        try:
+            self._engine.stop()
+        except Exception:
+            pass
         try:   # 앱을 닫으면 AI 모델이 차지하던 메모리를 바로 돌려준다
             c = self._client()
             c.unload(c.pick_chat_model(self._cfg.settings.chat_model))
