@@ -1,0 +1,12 @@
+# 필수: 없음 (Python 3.10+ 표준 라이브러리만으로 실행 가능)
+
+# 권장 - 네이티브 창(Windows: Edge WebView2)
+pywebview>=5.0
+
+# 문서 형식 지원
+pypdf>=4.0        # PDF
+olefile>=0.47     # HWP(한글 5.0)
+openpyxl>=3.1     # XLSX
+
+# 브라우저 연동 공문 수집 (로그인이 필요한 업무포털)
+playwright>=1.40

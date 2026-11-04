@@ -1,0 +1,126 @@
+"""설정 및 로컬 데이터 경로 관리.
+
+모든 데이터는 사용자 PC 안(앱 데이터 폴더, 다운로드 폴더)에만 저장된다.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import threading
+from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
+
+
+def default_home() -> Path:
+    env = os.environ.get("SEOMU_HOME")
+    if env:
+        return Path(env).expanduser()
+    if sys.platform.startswith("win"):
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / "SeomuAI"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "SeomuAI"
+    return Path.home() / ".seomu_ai"
+
+
+def default_downloads() -> Path:
+    env = os.environ.get("SEOMU_DOWNLOADS")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / "Downloads"
+
+
+@dataclass
+class Settings:
+    # 로컬 LLM (Ollama) 설정
+    ollama_url: str = "http://127.0.0.1:11434"
+    chat_model: str = ""          # 비워두면 설치된 gemma 계열 모델을 자동 선택
+    embed_model: str = ""         # 비워두면 키워드(BM25) 검색만 사용
+    temperature: float = 0.2
+    num_ctx: int = 8192
+    allow_remote_llm: bool = False  # True가 아니면 루프백(127.0.0.1/localhost) 주소만 허용
+
+    # 저장소
+    regulation_dirs: list[str] = field(default_factory=list)
+    download_root: str = ""       # 비워두면 <다운로드>/서무비서
+    top_k: int = 6
+
+    # 공문 수집
+    browser_channel: str = ""     # "msedge" / "chrome" / "" (내장 Chromium)
+    browser_headless: bool = False
+
+    # 사용자 정보 (메일 서명 등)
+    user_name: str = ""
+    user_dept: str = ""
+    user_phone: str = ""
+    user_email: str = ""
+
+    theme: str = "system"         # system / light / dark
+
+    def resolved_download_root(self) -> Path:
+        if self.download_root:
+            return Path(self.download_root).expanduser()
+        return default_downloads() / "서무비서"
+
+
+class Config:
+    """settings.json 읽기/쓰기 (스레드 안전)."""
+
+    def __init__(self, home: Path | None = None):
+        self.home = Path(home) if home else default_home()
+        self.home.mkdir(parents=True, exist_ok=True)
+        self.path = self.home / "settings.json"
+        self.db_path = self.home / "seomu.db"
+        self.browser_profile = self.home / "browser_profile"
+        self._lock = threading.Lock()
+        self.settings = self._load()
+
+    def _load(self) -> Settings:
+        s = Settings()
+        if self.path.exists():
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                names = {f.name for f in fields(Settings)}
+                for k, v in data.items():
+                    if k in names:
+                        setattr(s, k, v)
+            except (OSError, json.JSONDecodeError):
+                pass
+        if not s.regulation_dirs:
+            default_repo = self.home / "regulations"
+            default_repo.mkdir(parents=True, exist_ok=True)
+            s.regulation_dirs = [str(default_repo)]
+        return s
+
+    def save(self) -> None:
+        with self._lock:
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(asdict(self.settings), ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self.path)
+
+    def update(self, values: dict) -> Settings:
+        names = {f.name: f for f in fields(Settings)}
+        for k, v in values.items():
+            if k not in names:
+                continue
+            cur = getattr(self.settings, k)
+            if isinstance(cur, bool):
+                v = bool(v)
+            elif isinstance(cur, int) and not isinstance(cur, bool):
+                v = int(v)
+            elif isinstance(cur, float):
+                v = float(v)
+            elif isinstance(cur, list):
+                v = [str(x) for x in (v or []) if str(x).strip()]
+            else:
+                v = "" if v is None else str(v)
+            setattr(self.settings, k, v)
+        self.save()
+        return self.settings
+
+    def as_dict(self) -> dict:
+        d = asdict(self.settings)
+        d["_home"] = str(self.home)
+        d["_download_root"] = str(self.settings.resolved_download_root())
+        return d

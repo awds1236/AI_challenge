@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>서무비서 AI</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 24 24%27%3E%3Crect width=%2724%27 height=%2724%27 rx=%276%27 fill=%27%23007aff%27/%3E%3Cpath d=%27M8 6h5l3 3v8a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1z%27 fill=%27none%27 stroke=%27white%27 stroke-width=%271.6%27/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<!--SEOMU_BOOT-->
+</head>
+<body>
+<div class="app">
+  <!-- ============ 사이드바 ============ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24"><path d="M7 3h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/></svg>
+      </div>
+      <div>
+        <div class="brand-name">서무비서 AI</div>
+        <div class="brand-sub">로컬 전용 · 오프라인</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <div class="nav-label">업무</div>
+      <button class="nav-item active" data-page="home"><i data-icon="sun"></i><span>오늘</span></button>
+      <button class="nav-item" data-page="ask"><i data-icon="chat"></i><span>규정 Q&amp;A</span></button>
+      <button class="nav-item" data-page="collect"><i data-icon="tray"></i><span>공문 수집</span><em class="nav-badge" id="badge-notices"></em></button>
+      <button class="nav-item" data-page="tasks"><i data-icon="check"></i><span>할 일·일정</span><em class="nav-badge red" id="badge-tasks"></em></button>
+      <button class="nav-item" data-page="mail"><i data-icon="mail"></i><span>메일 양식</span></button>
+      <div class="nav-label">관리</div>
+      <button class="nav-item" data-page="library"><i data-icon="books"></i><span>규정 저장소</span></button>
+      <button class="nav-item" data-page="settings"><i data-icon="gear"></i><span>설정</span></button>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div class="ai-chip" id="ai-chip" title="로컬 AI 엔진 상태">
+        <span class="dot"></span><span class="ai-chip-text">AI 확인 중…</span>
+      </div>
+      <div class="privacy-note"><i data-icon="lock"></i>모든 데이터는 이 PC에만 저장됩니다</div>
+    </div>
+  </aside>
+
+  <!-- ============ 본문 ============ -->
+  <main class="main">
+
+    <!-- 오늘 -->
+    <section class="page active" id="page-home">
+      <header class="page-head">
+        <div>
+          <div class="eyebrow" id="home-date"></div>
+          <h1 id="home-greet">안녕하세요</h1>
+        </div>
+        <button class="btn primary" data-goto="collect"><i data-icon="plus"></i>공문 수집</button>
+      </header>
+      <div class="stats">
+        <div class="stat red"><div class="stat-num" id="st-overdue">0</div><div class="stat-label">기한 지남</div></div>
+        <div class="stat orange"><div class="stat-num" id="st-today">0</div><div class="stat-label">오늘 마감</div></div>
+        <div class="stat blue"><div class="stat-num" id="st-week">0</div><div class="stat-label">7일 이내</div></div>
+        <div class="stat gray"><div class="stat-num" id="st-open">0</div><div class="stat-label">진행 중 할 일</div></div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h3>다가오는 기한</h3><button class="link" data-goto="tasks">모두 보기</button></div>
+          <ul class="list" id="home-tasks"></ul>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>최근 수집한 공문</h3><button class="link" data-goto="collect">모두 보기</button></div>
+          <ul class="list" id="home-notices"></ul>
+        </div>
+      </div>
+      <div class="card quick-ask">
+        <div class="card-head"><h3>규정에 대해 물어보세요</h3><span class="muted small" id="home-docs"></span></div>
+        <form class="ask-inline" id="home-ask-form">
+          <i data-icon="search"></i>
+          <input id="home-ask" placeholder="예) 출장 여비 정산은 언제까지 해야 하나요?" autocomplete="off">
+          <button class="btn primary sm">질문</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- 규정 Q&A -->
+    <section class="page" id="page-ask">
+      <header class="page-head">
+        <div><div class="eyebrow">RAG 검색 · 근거 기반 답변</div><h1>규정 Q&amp;A</h1></div>
+        <div class="head-actions">
+          <div class="segmented" id="ask-cat">
+            <button class="on" data-v="">전체</button><button data-v="조례">조례</button><button data-v="법령">법령</button><button data-v="내규">내규</button>
+          </div>
+          <button class="btn ghost" id="ask-clear" title="대화 지우기"><i data-icon="trash"></i></button>
+        </div>
+      </header>
+      <div class="chat" id="chat">
+        <div class="chat-empty" id="chat-empty">
+          <div class="chat-empty-icon"><i data-icon="chat"></i></div>
+          <h2>저장된 조례·법령·내규를 근거로 답합니다</h2>
+          <p class="muted">답변에는 근거 조문이 [번호]로 표시되며, 근거가 없으면 추측하지 않습니다.</p>
+          <div class="chips" id="ask-suggest">
+            <button class="chip">연가 사용 절차를 알려줘</button>
+            <button class="chip">출장 후 복명서는 언제까지 제출해?</button>
+            <button class="chip">물품 구매 시 필요한 서류는?</button>
+            <button class="chip">시간외근무 인정 기준은?</button>
+          </div>
+        </div>
+      </div>
+      <form class="composer" id="ask-form">
+        <textarea id="ask-input" rows="1" placeholder="질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
+        <button class="send" id="ask-send" title="전송"><i data-icon="up"></i></button>
+      </form>
+    </section>
+
+    <!-- 공문 수집 -->
+    <section class="page" id="page-collect">
+      <header class="page-head">
+        <div><div class="eyebrow">본문 · 붙임 자동 다운로드 → 폴더 정리 → 기한 분석</div><h1>공문 수집</h1></div>
+        <button class="btn" id="open-root"><i data-icon="folder"></i>다운로드 폴더</button>
+      </header>
+
+      <div class="card">
+        <div class="segmented wide" id="collect-mode">
+          <button class="on" data-v="browser"><i data-icon="globe"></i>브라우저 연동</button>
+          <button data-v="url"><i data-icon="link"></i>주소로 수집</button>
+          <button data-v="file"><i data-icon="doc"></i>파일 가져오기</button>
+        </div>
+
+        <div class="mode-pane on" data-mode="browser">
+          <ol class="steps">
+            <li><b>브라우저 열기</b> — 프로그램 전용 브라우저가 열립니다. 업무포털(온나라 등)에 로그인하세요. 로그인 상태는 이 PC에 저장됩니다.</li>
+            <li><b>공문 열기</b> — 수집할 공문 페이지를 화면에 띄웁니다.</li>
+            <li><b>현재 페이지 수집</b> — 본문과 붙임파일을 내려받아 폴더로 정리하고 기한을 분석합니다.</li>
+          </ol>
+          <div class="row">
+            <input class="input grow" id="br-url" placeholder="시작 주소 (선택) 예) 업무포털 주소">
+            <button class="btn" id="br-open"><i data-icon="globe"></i>브라우저 열기</button>
+          </div>
+          <div class="row">
+            <select class="input grow" id="br-pages"><option value="">가장 최근에 연 페이지</option></select>
+            <button class="btn ghost" id="br-refresh" title="열린 페이지 새로고침"><i data-icon="refresh"></i></button>
+            <button class="btn primary" id="br-capture"><i data-icon="download"></i>현재 페이지 수집</button>
+          </div>
+          <p class="muted small" id="br-hint"></p>
+        </div>
+
+        <div class="mode-pane" data-mode="url">
+          <p class="muted">로그인이 필요 없는 공개 페이지(홈페이지 공지·고시 등)는 주소만으로 수집할 수 있습니다.</p>
+          <div class="row">
+            <input class="input grow" id="url-input" placeholder="https://">
+            <button class="btn primary" id="url-collect"><i data-icon="download"></i>수집</button>
+          </div>
+        </div>
+
+        <div class="mode-pane" data-mode="file">
+          <div class="dropzone" id="drop-notice">
+            <i data-icon="doc"></i>
+            <div><b>공문 본문과 붙임 파일을 여기로 끌어다 놓으세요</b></div>
+            <div class="muted small">첫 번째 파일을 본문으로 사용합니다 · HWP, HWPX, PDF, DOCX, HTML, TXT</div>
+            <button class="btn sm" id="pick-notice-files">파일 선택</button>
+          </div>
+          <ul class="file-list" id="notice-files"></ul>
+          <div class="row end"><button class="btn primary" id="file-collect" disabled><i data-icon="download"></i>정리 및 분석</button></div>
+        </div>
+
+        <div class="row options">
+          <input class="input grow" id="collect-title" placeholder="폴더 이름 직접 지정 (비워두면 AI가 공문 제목으로 지정)">
+          <label class="switch-row"><span>로컬 AI로 분석</span><input type="checkbox" class="switch" id="collect-ai" checked></label>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>수집한 공문</h3><span class="muted small" id="notice-count"></span></div>
+        <ul class="list notices" id="notice-list"></ul>
+      </div>
+    </section>
+
+    <!-- 할 일 -->
+    <section class="page" id="page-tasks">
+      <header class="page-head">
+        <div><div class="eyebrow">공문에서 찾은 제출 기한이 자동으로 등록됩니다</div><h1>할 일·일정</h1></div>
+        <div class="head-actions">
+          <div class="segmented" id="task-filter">
+            <button class="on" data-v="open">진행 중</button><button data-v="all">전체</button><button data-v="done">완료</button>
+          </div>
+          <button class="btn" id="export-ics" title="달력 앱(Outlook 등)으로 가져올 수 있는 파일"><i data-icon="calendar"></i>일정 파일(.ics)</button>
+        </div>
+      </header>
+      <div class="grid-tasks">
+        <div class="card">
+          <form class="task-add" id="task-form">
+            <span class="circle"></span>
+            <input id="task-title" placeholder="새로운 할 일" autocomplete="off">
+            <input type="date" id="task-due" class="input date">
+            <button class="btn primary sm">추가</button>
+          </form>
+          <ul class="tasks" id="task-list"></ul>
+        </div>
+        <div class="card calendar-card">
+          <div class="cal-head">
+            <button class="btn ghost sm" id="cal-prev"><i data-icon="left"></i></button>
+            <h3 id="cal-title"></h3>
+            <button class="btn ghost sm" id="cal-next"><i data-icon="right"></i></button>
+          </div>
+          <div class="cal" id="cal"></div>
+          <div class="cal-day" id="cal-day"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 메일 양식 -->
+    <section class="page" id="page-mail">
+      <header class="page-head">
+        <div><div class="eyebrow">자주 쓰는 양식 + 공문 내용 = 메일 초안</div><h1>메일 양식</h1></div>
+        <div class="segmented" id="mail-mode">
+          <button class="on" data-v="compose">메일 만들기</button><button data-v="edit">양식 관리</button>
+        </div>
+      </header>
+
+      <div class="mail-pane on" data-mode="compose">
+        <div class="grid-mail">
+          <div class="card">
+            <label class="field"><span>양식</span><select class="input" id="mc-template"></select></label>
+            <label class="field"><span>관련 공문</span><select class="input" id="mc-notice"></select></label>
+            <button class="btn primary full" id="mc-make"><i data-icon="sparkle"></i>메일 초안 만들기</button>
+            <div class="missing" id="mc-missing"></div>
+            <div class="attach-box" id="mc-attach"></div>
+          </div>
+          <div class="card mail-preview">
+            <label class="field"><span>제목</span><input class="input" id="mc-subject"></label>
+            <label class="field grow"><span>본문</span><textarea class="input" id="mc-body" rows="16"></textarea></label>
+            <div class="row end wrap">
+              <button class="btn ghost" id="mc-polish"><i data-icon="sparkle"></i>AI로 다듬기</button>
+              <button class="btn" id="mc-save"><i data-icon="download"></i>초안 저장</button>
+              <button class="btn" id="mc-mailto"><i data-icon="mail"></i>메일 앱으로</button>
+              <button class="btn primary" id="mc-copy"><i data-icon="copy"></i>전체 복사</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mail-pane" data-mode="edit">
+        <div class="grid-mail">
+          <div class="card">
+            <div class="card-head"><h3>양식 목록</h3><button class="btn sm" id="tpl-new"><i data-icon="plus"></i>새 양식</button></div>
+            <ul class="list selectable" id="tpl-list"></ul>
+          </div>
+          <div class="card">
+            <label class="field"><span>양식 이름</span><input class="input" id="tpl-name"></label>
+            <label class="field"><span>메일 제목</span><input class="input" id="tpl-subject"></label>
+            <label class="field"><span>메일 본문</span><textarea class="input" id="tpl-body" rows="14"></textarea></label>
+            <div class="muted small">변수를 눌러 커서 위치에 넣을 수 있습니다</div>
+            <div class="chips small" id="tpl-vars"></div>
+            <div class="row end">
+              <button class="btn danger ghost" id="tpl-delete"><i data-icon="trash"></i>삭제</button>
+              <button class="btn primary" id="tpl-save">저장</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 규정 저장소 -->
+    <section class="page" id="page-library">
+      <header class="page-head">
+        <div><div class="eyebrow">AI가 답변 근거로 사용하는 자료</div><h1>규정 저장소</h1></div>
+        <div class="head-actions">
+          <button class="btn" id="lib-reindex-force" title="모든 파일 다시 색인">전체 재색인</button>
+          <button class="btn primary" id="lib-reindex"><i data-icon="refresh"></i>색인 갱신</button>
+        </div>
+      </header>
+      <div class="progress-card card hidden" id="lib-progress">
+        <div class="row"><span id="lib-progress-text">색인 중…</span><span class="muted small" id="lib-progress-count"></span></div>
+        <div class="bar"><div id="lib-bar"></div></div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h3>저장소 폴더</h3></div>
+          <ul class="list" id="lib-dirs"></ul>
+          <div class="row">
+            <input class="input grow" id="lib-dir-input" placeholder="폴더 경로 추가 (예: D:\규정자료)">
+            <button class="btn" id="lib-dir-pick" title="폴더 선택"><i data-icon="folder"></i></button>
+            <button class="btn primary" id="lib-dir-add">추가</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="dropzone tall" id="drop-lib">
+            <i data-icon="books"></i>
+            <div><b>조례·법령·내규 파일을 끌어다 놓으세요</b></div>
+            <div class="muted small">첫 번째 저장소 폴더로 복사 후 자동 색인 · HWP, HWPX, PDF, DOCX, XLSX, TXT, HTML</div>
+            <button class="btn sm" id="lib-pick-files">파일 선택</button>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>색인된 문서</h3><span class="muted small" id="lib-count"></span></div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>문서</th><th>분류</th><th>조문/단락</th><th>색인 일시</th><th></th></tr></thead>
+            <tbody id="lib-docs"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 설정 -->
+    <section class="page" id="page-settings">
+      <header class="page-head"><div><div class="eyebrow">서무비서 AI</div><h1>설정</h1></div>
+        <button class="btn primary" id="set-save">저장</button></header>
+
+      <div class="settings">
+        <div class="group">
+          <div class="group-title">로컬 AI 엔진</div>
+          <div class="group-body">
+            <div class="set-row"><div><b>엔진 상태</b><div class="muted small" id="set-ai-status">확인 중…</div></div>
+              <button class="btn sm" id="set-ai-check">다시 확인</button></div>
+            <div class="set-row"><div><b>Ollama 주소</b><div class="muted small">PC 안에서 동작하는 AI 엔진 주소</div></div>
+              <input class="input w-260" id="set-ollama_url"></div>
+            <div class="set-row"><div><b>답변 모델</b><div class="muted small">비워두면 설치된 Gemma 계열 모델 자동 선택</div></div>
+              <input class="input w-260" id="set-chat_model" list="model-list" placeholder="자동 (예: gemma3:4b)"></div>
+            <div class="set-row"><div><b>임베딩 모델</b><div class="muted small">선택 사항 · 의미 검색 정확도 향상 (예: bge-m3)</div></div>
+              <input class="input w-260" id="set-embed_model" list="model-list" placeholder="자동 / 키워드 검색만"></div>
+            <datalist id="model-list"></datalist>
+            <div class="set-row"><div><b>근거 문단 수</b><div class="muted small">답변 시 참고할 조문 개수</div></div>
+              <input class="input w-80" type="number" min="2" max="12" id="set-top_k"></div>
+            <div class="set-row"><div><b>창의성(temperature)</b><div class="muted small">낮을수록 규정에 충실한 답변</div></div>
+              <input class="input w-80" type="number" min="0" max="1" step="0.1" id="set-temperature"></div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">보안</div>
+          <div class="group-body">
+            <div class="set-row"><div><b>외부 AI 주소 허용</b><div class="muted small">끄면 127.0.0.1(이 PC)의 AI 엔진만 사용하여 문서가 외부로 나가지 않습니다. <b>끄기 권장</b></div></div>
+              <input type="checkbox" class="switch" id="set-allow_remote_llm"></div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">공문 수집</div>
+          <div class="group-body">
+            <div class="set-row"><div><b>저장 폴더</b><div class="muted small" id="set-root-hint"></div></div>
+              <div class="row tight"><input class="input w-260" id="set-download_root" placeholder="기본: 다운로드\서무비서">
+              <button class="btn sm" id="set-root-pick"><i data-icon="folder"></i></button></div></div>
+            <div class="set-row"><div><b>브라우저</b><div class="muted small">업무포털 호환을 위해 Edge 권장</div></div>
+              <select class="input w-260" id="set-browser_channel">
+                <option value="">자동 (Edge → Chrome → 내장)</option><option value="msedge">Microsoft Edge</option>
+                <option value="chrome">Google Chrome</option></select></div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">내 정보 (메일 서명)</div>
+          <div class="group-body">
+            <div class="set-row"><b>이름</b><input class="input w-260" id="set-user_name" placeholder="홍길동 주무관"></div>
+            <div class="set-row"><b>부서</b><input class="input w-260" id="set-user_dept" placeholder="○○과 ○○팀"></div>
+            <div class="set-row"><b>연락처</b><input class="input w-260" id="set-user_phone" placeholder="02-000-0000"></div>
+            <div class="set-row"><b>메일</b><input class="input w-260" id="set-user_email" placeholder="name@korea.kr"></div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">화면</div>
+          <div class="group-body">
+            <div class="set-row"><b>테마</b>
+              <div class="segmented" id="set-theme"><button data-v="system">자동</button><button data-v="light">라이트</button><button data-v="dark">다크</button></div></div>
+            <div class="set-row"><div><b>데이터 폴더</b><div class="muted small" id="set-home"></div></div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- 공문 상세 시트 -->
+<div class="sheet-backdrop hidden" id="sheet">
+  <div class="sheet">
+    <div class="sheet-head">
+      <div><div class="eyebrow" id="nd-date"></div><h2 id="nd-title"></h2></div>
+      <button class="btn ghost round" id="nd-close"><i data-icon="close"></i></button>
+    </div>
+    <div class="sheet-body" id="nd-body"></div>
+    <div class="sheet-foot">
+      <button class="btn danger ghost" id="nd-delete"><i data-icon="trash"></i>삭제</button>
+      <div class="spacer"></div>
+      <button class="btn" id="nd-reanalyze"><i data-icon="sparkle"></i>다시 분석</button>
+      <button class="btn" id="nd-folder"><i data-icon="folder"></i>폴더 열기</button>
+      <button class="btn primary" id="nd-mail"><i data-icon="mail"></i>메일 작성</button>
+    </div>
+  </div>
+</div>
+
+<!-- 진행 HUD -->
+<div class="hud hidden" id="hud"><div class="spinner"></div><div id="hud-text">처리 중…</div></div>
+<div class="toasts" id="toasts"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
