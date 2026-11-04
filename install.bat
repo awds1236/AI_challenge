@@ -1,4 +1,5 @@
 @echo off
+setlocal EnableDelayedExpansion
 chcp 65001 > nul
 cd /d "%~dp0"
 echo [서무비서 AI] 설치를 시작합니다.
@@ -25,7 +26,22 @@ if exist .venv\Scripts\python.exe (
 )
 call .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt || (echo [오류] 패키지 설치에 실패했습니다. 위 오류 메시지를 확인하세요. & pause & exit /b 1)
+rem 패키지를 하나씩 설치: 일부가 실패해도 프로그램은 실행됩니다
+set "FAILED="
+for %%P in (pypdf olefile openpyxl pywebview playwright) do (
+  echo.
+  echo [패키지] %%P 설치 중...
+  python -m pip install "%%P" || set "FAILED=!FAILED! %%P"
+)
+echo.
+if defined FAILED (
+  echo [경고] 설치하지 못한 패키지:%FAILED%
+  echo        - pywebview 실패: 프로그램이 기본 브라우저 창으로 열립니다.
+  echo        - playwright 실패: 공문 '브라우저 연동' 수집만 사용할 수 없습니다.
+  echo        모든 기능을 쓰려면 Python 3.13 설치 후 ^(py install 3.13^) .venv 폴더를 지우고 다시 실행하세요.
+) else (
+  echo [완료] 모든 패키지를 설치했습니다.
+)
 echo.
 where ollama > nul 2>&1
 if errorlevel 1 (
