@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .deadlines import best_deadlines, find_contacts, find_methods, find_submissions
 from .llm import LLMError, OllamaClient, extract_json
+from .notice_text import clean_body, clean_what, extract_fields, rule_summary, _get
 from .parsers import SUPPORTED, ParseError, parse_file
 
 SCHEMA = {
@@ -32,14 +33,19 @@ PROMPT = """다음은 공공기관에서 받은 공문 본문과 붙임 문서 �
 담당 서무 직원이 놓치지 않도록 아래 항목을 JSON으로 정리하세요. 오늘 날짜: {today}
 
 - folder_name: 폴더 이름으로 쓸 짧은 제목 (예: "OO행사 참여 요청", 25자 이내, 특수문자 금지)
-- summary: 공문 핵심 요약 2~3문장
+- summary: 이 공문이 '무엇을 요청·안내하는지'를 중심으로 2문장. 무엇을, 언제까지, 어떻게 해야 하는지 포함.
+  기관 슬로건, 인사말('귀 기관의 무궁한 발전을…'), 수신·경유·발신 명의는 절대 넣지 마세요.
 - event: 행사/교육이 있으면 이름(name), 일시(date), 장소(place)
-- deadlines: 우리 기관(수신자)이 지켜야 할 제출·회신·신청 기한. date는 YYYY-MM-DD, time은 HH:MM(없으면 빈 문자열), what은 무엇을 해야 하는지
+- deadlines: 우리 기관(수신자)이 지켜야 할 제출·회신·신청 기한. date는 YYYY-MM-DD, time은 HH:MM(없으면 빈 문자열),
+  what은 '조사표 회신', '참가신청서 제출'처럼 짧은 할 일 문장 (항목 번호·'회신기한 :' 같은 표기 제외)
 - submissions: 제출해야 할 문서/자료. item(서류명), how(제출 방법: 공문, 전자우편 등), to(제출처)
 - actions: 담당자가 해야 할 일을 순서대로 (짧은 문장)
 - contact: 문의처 (부서, 전화, 메일)
 
 본문에 없는 내용은 만들지 말고 빈 값으로 두세요. 날짜에 연도가 없으면 오늘 기준으로 가장 가까운 미래 연도를 쓰세요.
+
+[규칙으로 먼저 찾은 항목 (참고)]
+{hints}
 
 [공문 본문]
 {body}
@@ -93,20 +99,46 @@ def _norm_date(s: str) -> str | None:
 
 
 def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | None = None) -> dict:
+    clean = clean_body(body, title)
+    fields = extract_fields(clean)
     deadlines = []
-    for d in best_deadlines(body, ref):
-        deadlines.append({"date": d["date"], "time": d["time"] or "", "what": d["context"][:120], "source": "규칙"})
-    subs = [{"item": s, "how": "", "to": ""} for s in find_submissions(body)]
-    first_lines = [l.strip() for l in body.splitlines() if len(l.strip()) > 15][:3]
+    for d in best_deadlines(clean, ref):
+        deadlines.append({"date": d["date"], "time": d["time"] or "",
+                          "what": clean_what(d["context"], d["raw"], fields, title), "source": "규칙"})
+    _ml, method = _get(fields, "회신방법", "제출방법", "신청방법", "접수방법")
+    _tl, to = _get(fields, "제출처", "회신처", "접수처", "신청처")
+    subs, seen = [], set()
+    _il, item = _get(fields, "회신자료", "제출서류", "제출자료", "신청서류", "제출물")
+    if item:
+        subs.append({"item": item, "how": method, "to": to})
+        seen.add(re.sub(r"\s", "", item))
+    for s in find_submissions(clean):
+        key = re.sub(r"\s", "", s)
+        if key in seen or any(key.endswith(k) or k.endswith(key) for k in seen) or re.search(r"[:：]", s):
+            continue
+        # '회신자료 : 붙임 조사표 1부'와 '[붙임] ○○ 조사표'는 같은 서류 → 붙임 정식 이름으로 합친다
+        core = re.sub(r"(붙\s*임|첨\s*부|\s|\d+\s*부|각)", "", subs[0]["item"]) if subs else ""
+        if core and s.startswith("[붙임]") and core in key:
+            subs[0]["item"] = s.replace("[붙임] ", "") + " (붙임 서식)"
+            continue
+        seen.add(key)
+        subs.append({"item": s, "how": method if not subs else "", "to": ""})
+    actions = [f"{d['what']} ({int(d['date'][5:7])}/{int(d['date'][8:10])}까지)" for d in deadlines][:5]
+    if method:
+        actions.append(f"제출 방법: {method}")
+    contacts = [c for c in find_contacts(clean) if not re.search(r"(회신|제출|신청)\s*방\s*법", c)]
+    _ql, ask = _get(fields, "문의처", "문의", "담당자", "연락처")
     return {
         "folder_name": title,
-        "summary": " ".join(first_lines)[:300],
-        "event": {},
+        "summary": rule_summary(title, clean, fields),
+        "event": {k: v for k, v in (("name", _get(fields, "행사명", "교육명", "회의명")[1]),
+                                    ("date", _get(fields, "일시")[1]), ("place", _get(fields, "장소")[1])) if v},
         "deadlines": deadlines,
         "submissions": subs,
-        "actions": [f"{d['date']}까지 {d['what'][:60]}" for d in deadlines][:5],
-        "contact": " / ".join(find_contacts(body)[:2]),
-        "methods": find_methods(body),
+        "actions": actions,
+        "contact": ask or " / ".join(contacts[:2]),
+        "methods": [method] if method else find_methods(clean),
+        "fields": fields,
         "attachments_read": [a["name"] for a in attach_texts],
         "mode": "rule",
     }
@@ -123,7 +155,10 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
         model = client.pick_chat_model(chat_model)
         attach_txt = "\n\n".join(f"<{a['name']}>\n{a['text']}" for a in attach) or "(없음)"
         # CPU에서는 '입력 읽기'가 가장 오래 걸리므로 본문 핵심과 붙임 발췌만 넣는다
-        prompt = PROMPT.format(today=ref.isoformat(), body=trim_body(body, 3000), attach=attach_txt[:1400])
+        hints = "\n".join([f"- {k}: {v}" for k, v in list(base.get("fields", {}).items())[:12]] +
+                          [f"- 기한 후보: {d['date']} {d['what']}" for d in base["deadlines"][:5]]) or "(없음)"
+        prompt = PROMPT.format(today=ref.isoformat(), body=trim_body(clean_body(body, title), 3000),
+                               attach=attach_txt[:1400], hints=hints)
         raw = client.chat([{"role": "user", "content": prompt}], model, temperature=0.1,
                           num_ctx=min(num_ctx, 6144), fmt=SCHEMA)
         data = extract_json(raw)

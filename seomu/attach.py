@@ -1,0 +1,218 @@
+"""붙임파일 자동 인식 (시스템에 상관없는 범용 방식).
+
+공문서는 본문 끝에 '붙임 1. ○○○ 1부. 2. △△△ 1부. 끝.' 형식으로 붙임 목록을 적는다.
+이 목록으로 '모아야 할 파일'을 먼저 알아낸 뒤, PC 안에 이미 생긴 파일(다운로드·임시·캐시 폴더,
+최근 문서 목록)에서 이름이 비슷한 파일을 찾아 모은다. 뷰어·그룹웨어 종류와 무관하게 동작한다.
+"""
+from __future__ import annotations
+
+import hashlib
+import ntpath
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+DOC_EXT = {".hwp", ".hwpx", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".txt",
+           ".csv", ".jpg", ".jpeg", ".png", ".odt", ".ods", ".odp", ".show", ".cell", ".egg", ".7z", ".gul",
+           ".hwt", ".hml"}
+SKIP_DIRS = {"microsoft", "google", "mozilla", "packages", "nvidia", "intel", "amd", "crashdumps", "d3dscache",
+             "npm-cache", "pip", "node_modules", ".git", "__pycache__", "seomuai", "python", "programs",
+             "fontcache", "iconcache", "comms", "connecteddevicesplatform", "cache2", "code cache",
+             "gpucache", "service worker", "indexeddb", "webcache", "inetcache"}
+
+
+# ---------------------------------------------------------------- 붙임 목록 해석
+_ATTACH_HEAD = re.compile(r"(?:^|\n)[ \t□○·\-]*(?:붙[ \t]*임|첨[ \t]*부)(?![가-힣])[ \t]*[:：]?")
+_COUNT_TAIL = re.compile(r"\s*(?:각\s*)?\d+\s*(?:부|매|권|장|건|식|개)\s*\.?\s*$")
+
+
+def expected_attachments(body: str) -> list[str]:
+    """본문의 '붙임' 표기에서 붙임 문서 이름 목록을 뽑는다."""
+    m = None
+    for m in _ATTACH_HEAD.finditer(body or ""):
+        pass                       # 보통 마지막 '붙임'이 실제 붙임 목록
+    if not m:
+        return []
+    tail = body[m.end():]
+    end = re.search(r"끝\s*\.", tail)
+    tail = tail[: end.start()] if end else "\n".join(tail.splitlines()[:12])
+    tail = tail.replace("\t", " ")
+    # '1. A 1부. 2. B 1부.' / 줄바꿈 / '①' 형식 모두 나눈다
+    parts = re.split(r"(?:^|\s)(?:\d{1,2}\s*[.)]|[①②③④⑤⑥⑦⑧⑨⑩])\s+", "\n" + tail)
+    if len(parts) <= 1:
+        parts = [tail]
+    names: list[str] = []
+    for p in parts:
+        for line in p.splitlines():
+            line = re.sub(r"\s+", " ", line).strip(" .,·-")
+            line = _COUNT_TAIL.sub("", line).strip(" .,·-")
+            if len(line) >= 2 and not re.fullmatch(r"[\d\s.]+", line):
+                names.append(line)
+    return list(dict.fromkeys(names))[:20]
+
+
+# ---------------------------------------------------------------- 이름 비슷한 정도
+def _norm(s: str) -> str:
+    s = os.path.splitext(s)[0] if re.search(r"\.[A-Za-z0-9]{2,5}$", s or "") else (s or "")
+    s = re.sub(r"\(\d+\)$", "", s.strip())                 # '파일 (1)' 같은 중복 번호
+    s = re.sub(r"^[\[(]?\s*붙임\s*\d*\s*[\])]?\s*", "", s)   # '(붙임1) ' 접두어
+    return re.sub(r"[\s_\-.,·()\[\]{}「」『』<>~!@#$%^&*+=]", "", s).lower()
+
+
+def _bigrams(s: str) -> set[str]:
+    return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) > 1 else {s}
+
+
+def name_score(expected: str, filename: str) -> float:
+    """0~1. 붙임 표기 이름과 파일 이름이 얼마나 비슷한지 (말줄임 '…' 이름도 지원)."""
+    a, b = _norm(expected), _norm(filename.replace("…", "").replace("...", ""))
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if len(b) >= 4 and (b in a or a in b):
+        return 0.9
+    if len(b) >= 3 and a.startswith(b):                    # 화면에 잘려 보이는 이름
+        return 0.8
+    x, y = _bigrams(a), _bigrams(b)
+    return 2 * len(x & y) / (len(x) + len(y))
+
+
+def best_match(expected: str, names: list[str], threshold: float = 0.45) -> tuple[int, float]:
+    best, score = -1, 0.0
+    for i, n in enumerate(names):
+        sc = name_score(expected, n)
+        if sc > score:
+            best, score = i, sc
+    return (best, score) if score >= threshold else (-1, score)
+
+
+# ---------------------------------------------------------------- PC 안에서 후보 파일 찾기
+def search_roots() -> list[tuple[Path, int]]:
+    """(폴더, 탐색 깊이) — 붙임이 내려받아지거나 열릴 때 파일이 생기는 곳."""
+    home = Path.home()
+    roots = [(home / "Downloads", 2), (home / "Desktop", 1), (home / "Documents", 2)]
+    for env, depth in (("TEMP", 4), ("LOCALAPPDATA", 5), ("APPDATA", 5)):
+        v = os.environ.get(env)
+        if v:
+            roots.append((Path(v), depth))
+    if os.environ.get("USERPROFILE"):
+        roots.append((Path(os.environ["USERPROFILE"]) / "AppData" / "LocalLow", 5))
+    seen, out = set(), []
+    for p, d in roots:
+        key = os.path.normcase(str(p))
+        if p.exists() and key not in seen:
+            seen.add(key)
+            out.append((p, d))
+    return out
+
+
+def recent_documents(hours: float = 6) -> list[str]:
+    """Windows '최근 항목'에 남은 파일 경로 (붙임을 한글·PDF로 열면 여기에 기록된다)."""
+    if not sys.platform.startswith("win"):
+        return []
+    ps = (f"$s=New-Object -ComObject WScript.Shell; $t=(Get-Date).AddHours(-{hours}); "
+          "Get-ChildItem \"$env:APPDATA\\Microsoft\\Windows\\Recent\" -Filter *.lnk -ErrorAction SilentlyContinue | "
+          "Where-Object { $_.LastWriteTime -gt $t } | ForEach-Object { $s.CreateShortcut($_.FullName).TargetPath }")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                              "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + ps],
+                             capture_output=True, timeout=15,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return [l.strip() for l in out.stdout.decode("utf-8", "ignore").splitlines() if l.strip()]
+    except Exception:
+        return []
+
+
+def candidate_files(since: float, roots: list[tuple[Path, int]] | None = None, budget: float = 8.0,
+                    exclude: Path | None = None, extra: list[str] | None = None) -> list[dict]:
+    """since(유닉스 시각) 이후 생기거나 바뀐 문서 파일 목록. budget초 안에서만 탐색."""
+    roots = roots if roots is not None else search_roots()
+    deadline = time.time() + budget
+    found: dict[str, dict] = {}
+    excl = os.path.normcase(str(exclude.resolve())) if exclude else None
+
+    def add(path: str, st):
+        key = os.path.normcase(path)
+        if excl and key.startswith(excl):
+            return
+        found[key] = {"path": path, "name": os.path.basename(path), "mtime": st.st_mtime, "size": st.st_size}
+
+    def walk(p: str, depth: int):
+        if time.time() > deadline:
+            return
+        try:
+            with os.scandir(p) as it:
+                for e in it:
+                    try:
+                        if e.is_file(follow_symlinks=False):
+                            if os.path.splitext(e.name)[1].lower() in DOC_EXT and not e.name.startswith(("~$", ".")):
+                                st = e.stat()
+                                if st.st_mtime >= since and st.st_size > 0:
+                                    add(e.path, st)
+                        elif depth > 0 and e.is_dir(follow_symlinks=False) and e.name.lower() not in SKIP_DIRS:
+                            walk(e.path, depth - 1)
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+
+    for root, depth in roots:
+        walk(str(root), depth)
+    for path in extra or []:
+        try:
+            st = os.stat(path)
+            if os.path.splitext(path)[1].lower() in DOC_EXT and st.st_size > 0:
+                add(path, st)
+        except OSError:
+            continue
+    return sorted(found.values(), key=lambda f: -f["mtime"])
+
+
+def match_files(expected: list[str], files: list[dict], threshold: float = 0.45) -> dict[str, dict]:
+    """붙임 이름 → 가장 비슷한(같으면 최신) 파일. 같은 파일을 두 번 쓰지 않는다."""
+    out: dict[str, dict] = {}
+    used: set[str] = set()
+    names = [f["name"] for f in files]
+    pairs = []
+    for e in expected:
+        for i, n in enumerate(names):
+            sc = name_score(e, n)
+            if sc >= threshold:
+                pairs.append((sc, files[i]["mtime"], e, i))
+    for sc, _mt, e, i in sorted(pairs, key=lambda x: (-x[0], -x[1])):
+        if e in out or files[i]["path"] in used:
+            continue
+        out[e] = dict(files[i], score=round(sc, 2))
+        used.add(files[i]["path"])
+    return out
+
+
+def file_hash(path: str | Path) -> str:
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+_TITLE_PATH = re.compile(r"(?P<name>[^\[\]\\/:*?\"<>|]+\.[A-Za-z0-9]{2,5})\s*\[(?P<dir>[A-Za-z]:\\[^\]]*)\]")
+_FULL_PATH = re.compile(r"(?P<path>[A-Za-z]:\\[^\[\]*?\"<>|]+?\.[A-Za-z0-9]{2,5})(?=\s|$|\s-\s)")
+
+
+def path_from_title(title: str) -> str:
+    """'파일.hwpx [C:\\폴더\\] - 한글' 또는 'C:\\폴더\\파일.pdf - 뷰어' 같은 창 제목에서 파일 경로를 얻는다."""
+    m = _TITLE_PATH.search(title or "")
+    if m:
+        return ntpath.join(m.group("dir"), m.group("name").strip())
+    m = _FULL_PATH.search(title or "")
+    return m.group("path") if m else ""
+
+
+def name_from_title(title: str) -> str:
+    """경로가 없는 창 제목에서 파일 이름만 (예: '계약서.pdf - Adobe Acrobat')."""
+    m = re.search(r"([^\\/:*?\"<>|\[\]]+\.(?:hwpx?|pdf|docx?|xlsx?|pptx?|zip|txt|cell|show))", title or "", re.I)
+    return m.group(1).strip() if m else ""

@@ -191,3 +191,70 @@ def test_trim_body_keeps_deadline_lines():
     body = "\n".join(["본문 내용 " * 20] * 40) + "\n제출 기한: 2026. 12. 1.까지 회신"
     out = trim_body(body, 3000)
     assert len(out) <= 3100 and "2026. 12. 1.까지" in out
+
+
+NOTICE_SURVEY = """행복한 구민, 신뢰받는 공기업!
+
+○○시설관리공단
+
+
+수 신
+수신자 참조
+(경유)
+
+제 목
+공공체육시설 문화체육프로그램 추첨제 현황 조사 협조 요청
+1. 귀 기관의 무궁한 발전을 기원합니다.
+
+2. 공공체육시설 수강신청 제도의 공정성 제고를 위한 검토자료로 활용하고자 다음과 같이 문화체육프로그램 수강신청 운영현황을 조사하오니 협조하여 주시기 바랍니다.
+
+  가. 조 사 명 : 공공체육시설 문화체육프로그램 추첨제 운영현황 조사
+  나. 대    상 : 공공체육시설 문화체육프로그램 운영기관
+  라. 회신자료 : 붙임 조사표 1부
+  마. 회신기한 : 2026. 11. 13.(금)
+  바. 회신방법 : 공문 또는 담당자 이메일(contact@example.go.kr)
+
+3. 조사 결과는 회신 기관과 공유할 예정이오니 적극적인 협조를 부탁드립니다.
+
+첨부  공공체육시설 문화체육프로그램 추첨제 현황 조사표 1부.  끝.
+
+
+○○시설관리공단이사장
+"""
+
+
+def test_rule_analysis_skips_boilerplate():
+    from seomu.analyzer import rule_analysis
+    a = rule_analysis("공공체육시설 문화체육프로그램 추첨제 현황 조사 협조 요청", NOTICE_SURVEY, [], REF)
+    assert a["summary"].startswith("공공체육시설 수강신청 제도의 공정성")
+    assert "행복한" not in a["summary"] and "무궁한 발전" not in a["summary"]
+    assert "회신기한: 2026. 11. 13.(금)" in a["summary"]
+    assert a["deadlines"] == [{"date": "2026-11-13", "time": "", "what": "조사표 회신", "source": "규칙"}]
+    assert len(a["submissions"]) == 1 and "조사표" in a["submissions"][0]["item"]
+    assert a["submissions"][0]["how"].startswith("공문 또는 담당자 이메일")
+    assert a["actions"][0] == "조사표 회신 (11/13까지)"
+
+
+def test_expected_attachments_and_matching():
+    from seomu.attach import expected_attachments, match_files, name_score, path_from_title
+    assert expected_attachments(NOTICE_SURVEY) == ["공공체육시설 문화체육프로그램 추첨제 현황 조사표"]
+    body = "붙임  1. 과업지시서(샘플) 및 모델가이드라인 체크리스트 각 1부.\n      2. 계약심의위원회 운영 내규 1부.  끝."
+    exp = expected_attachments(body)
+    assert exp == ["과업지시서(샘플) 및 모델가이드라인 체크리스트", "계약심의위원회 운영 내규"]
+    assert name_score(exp[0], "과업지시...") >= 0.8                       # 화면에 잘려 보이는 이름
+    assert name_score(exp[1], "(붙임2) 계약심의위원회 운영 내규 (1).hwpx") == 1.0
+    files = [{"name": "회의록.hwp", "path": "a", "mtime": 3}, {"name": "계약심의위원회 운영 내규.hwpx", "path": "b", "mtime": 2},
+             {"name": "1.과업지시서(샘플) 및 모델가이드라인 체크리스트.hwp", "path": "c", "mtime": 1}]
+    m = match_files(exp, files)
+    assert m[exp[0]]["path"] == "c" and m[exp[1]]["path"] == "b"
+    assert path_from_title("(붙임1) 안내서.hwpx [C:\\\\Users\\\\u\\\\Downloads\\\\] - 한글") == "C:\\\\Users\\\\u\\\\Downloads\\\\(붙임1) 안내서.hwpx"
+
+
+def test_candidate_files(tmp_path):
+    import time as _t
+    from seomu.attach import candidate_files
+    (tmp_path / "cache" / "sub").mkdir(parents=True)
+    (tmp_path / "cache" / "sub" / "조사표.hwp").write_bytes(b"x")
+    (tmp_path / "cache" / "app.exe").write_bytes(b"x")
+    got = candidate_files(_t.time() - 60, roots=[(tmp_path, 3)])
+    assert [g["name"] for g in got] == ["조사표.hwp"]

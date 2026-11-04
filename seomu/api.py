@@ -28,7 +28,7 @@ from .config import Config
 from .deadlines import dday
 from .llm import LLMError, OllamaClient
 from . import models as model_catalog
-from . import winwindow
+from . import attach, winwindow
 from .mail import DEFAULT_TEMPLATES, POLISH_PROMPT, VARIABLES, build_variables, render, tasks_to_ics
 from .parsers import SUPPORTED
 from .rag import RAGEngine
@@ -468,7 +468,9 @@ class Api:
         def work(job: Job):
             say = lambda m: setattr(job, "message", m)  # noqa: E731
             trace: list[str] = []
-            text, how = winwindow.extract_text(win["hwnd"], say, trace)
+            hwnd_ = win["hwnd"]
+            started = time.time()
+            text, how = winwindow.extract_text(hwnd_, say, trace)
             win_title = win["title"]
             for suffix in (" - 온나라", " - 문서", " - Microsoft Edge", " - Chrome", " - Whale"):
                 win_title = win_title.replace(suffix, "")
@@ -476,47 +478,134 @@ class Api:
             m = re.search(r"^[ \t]*(?:제\s*목|건\s*명)[ \t]*[:：]?[ \t]*(\S.{2,120})$", text or "", re.M)
             name = title.strip() or (m.group(1).strip() if m else "") or win_title
             folder = make_notice_folder(root, name)
-            winwindow.save_window_image(win["hwnd"], folder / "본문_화면.png")
-            listed = winwindow.attachment_names(win["hwnd"]) if winwindow.uia_available() else []
+            dest = folder / "붙임"
+            winwindow.save_window_image(hwnd_, folder / "본문_화면.png")
 
-            watcher = winwindow.FileWatcher(winwindow.watch_dirs(), folder / "붙임")
-            state = winwindow.try_save_attachments(win["hwnd"], folder / "붙임", say, trace)
-            trace.append(f"붙임 저장 버튼: {state or '찾지 못함'}")
-            # 본문을 못 읽었으면 사용자가 '본문복사'를 누를 수 있도록 클립보드도 감시
+            # ---- 붙임: 본문의 '붙임/첨부' 목록으로 모아야 할 파일을 먼저 알아낸다
+            expected = attach.expected_attachments(text)
+            trace.append(f"본문의 붙임 목록 {len(expected)}개: {expected}")
+            got: dict[str, dict] = {}          # 붙임 이름 → 모은 파일
+            extras: list[dict] = []            # 목록과 이름이 안 맞지만 새로 생긴 파일
+            hashes: set[str] = set()
+
+            def take(src: str, label: str | None) -> dict | None:
+                try:
+                    h = attach.file_hash(src)
+                except OSError:
+                    return None
+                if h in hashes:
+                    return None
+                hashes.add(h)
+                dest.mkdir(parents=True, exist_ok=True)
+                target = unique_path(dest / safe_name(Path(src).name, 150))
+                try:
+                    shutil.copy2(src, target)
+                except OSError as e:
+                    trace.append(f"복사 실패 {src}: {e}")
+                    return None
+                item = {"name": target.name, "path": str(target), "ok": True, "from": str(Path(src).parent)}
+                if label:
+                    got[label] = item
+                else:
+                    extras.append(item)
+                return item
+
+            def missing() -> list[str]:
+                return [e for e in expected if e not in got]
+
+            def harvest(since: float, budget: float = 8.0) -> None:
+                if not missing():
+                    return
+                files = attach.candidate_files(since, exclude=folder, budget=budget,
+                                               extra=attach.recent_documents() if winwindow.available() else [])
+                for e, f in attach.match_files(missing(), files).items():
+                    if take(f["path"], e):
+                        trace.append(f"'{e}' ← PC 안의 파일 {f['path']} (일치도 {f['score']})")
+
+            watcher = winwindow.FileWatcher(winwindow.watch_dirs(), dest)
+
+            def absorb() -> None:
+                """폴더 감시로 새로 들어온 파일을 붙임 목록에 짝지어 준다."""
+                for item in watcher.poll():
+                    try:
+                        h = attach.file_hash(item["path"])
+                    except OSError:
+                        continue
+                    if h in hashes:          # 이미 모은 파일과 같은 내용 → 중복 제거
+                        Path(item["path"]).unlink(missing_ok=True)
+                        continue
+                    hashes.add(h)
+                    i, sc = attach.best_match(item["name"], missing()) if missing() else (-1, 0)
+                    if i >= 0:
+                        got[missing()[i]] = item
+                        trace.append(f"'{item['name']}' ← 폴더 감시 (일치도 {sc:.2f})")
+                    else:
+                        extras.append(item)
+
+            # ① 이미 PC에 있는 파일 (뷰어가 열 때 내려받은 임시·캐시 파일, 최근 문서 등)
+            say("PC에 이미 내려받아진 붙임파일을 찾는 중…")
+            harvest(started - 3 * 3600)
+            # ② 저장/다운로드 버튼
+            state = ""
+            if missing() or not expected:
+                state = winwindow.try_save_attachments(hwnd_, dest, say, trace)
+                trace.append(f"저장 버튼: {state or '찾지 못함'}")
+                end = time.time() + (6 if state else 0)
+                while time.time() < end and missing():
+                    absorb()
+                    time.sleep(0.5)
+            # ③ 화면에 보이는 붙임 이름을 찾아 열기
+            if missing() and winwindow.available():
+                for r in winwindow.open_named_on_screen(hwnd_, missing(), say, trace):
+                    if r["path"]:
+                        take(r["path"], r["expected"])
+                    absorb()
+                harvest(started - 120, budget=6)       # 열면서 임시 폴더에 생긴 파일
+            absorb()
+
+            # ④ 남은 것은 폴더 감시 (사용자가 직접 저장해도 자동 수집). 모두 모이면 자동 종료
             clip_before = winwindow.get_clipboard()
             deadline = time.time() + max(20, int(wait_seconds))
-            hint = ("뷰어에서 붙임파일을 저장(PC저장 등)하면 자동으로 모읍니다."
-                    if state != "saved" else "붙임파일 저장을 기다리는 중…")
-            if not text:
-                hint += " 본문을 읽지 못했습니다. 뷰어의 [본문복사]를 눌러 주세요."
+            quiet_since = time.time()
             while time.time() < deadline and not job.flags.get("done"):
-                watcher.poll()
+                n_before = len(got) + len(extras)
+                absorb()
+                if len(got) + len(extras) != n_before:
+                    quiet_since = time.time()
                 if not text:
                     clip = winwindow.get_clipboard()
                     if clip and clip != clip_before and len(clip.strip()) > 50:
                         text, how = clip, "본문복사(직접)"
-                job.message = f"{hint} (모은 붙임 {len(watcher.collected)}개)"
-                job.text = json.dumps({"phase": "watch", "files": [f["name"] for f in watcher.collected],
-                                       "listed": listed, "has_text": bool(text), "how": how,
-                                       "folder": str(folder)}, ensure_ascii=False)
-                # 자동 저장에 성공했고 새 파일이 더 이상 없으면 일찍 끝낸다
-                if state == "saved" and watcher.collected and not watcher.pending and watcher.idle_for() > 6:
-                    break
+                        expected = expected or attach.expected_attachments(text)
+                if expected and not missing() and text:
+                    break                                  # 붙임을 다 모았다
+                if not expected and text and time.time() - quiet_since > 15:
+                    break                                  # 붙임 표기가 없는 공문
+                left = missing()
+                hint = (f"붙임 {len(got)}/{len(expected)}개를 모았습니다. 남은 붙임은 뷰어에서 저장하면 자동으로 모읍니다."
+                        if expected else "새로 저장되는 붙임파일을 기다리는 중…")
+                if not text:
+                    hint += " 본문을 읽지 못했습니다. 뷰어의 [본문복사]를 눌러 주세요."
+                job.message = hint
+                job.text = json.dumps({
+                    "phase": "watch", "has_text": bool(text), "how": how, "folder": str(folder),
+                    "expected": [{"name": e, "file": (got.get(e) or {}).get("name", "")} for e in expected],
+                    "files": [f["name"] for f in list(got.values()) + extras], "listed": [],
+                    "missing": left}, ensure_ascii=False)
                 time.sleep(1.0)
-            watcher.poll()
-            trace.append(f"본문: {how or '읽지 못함'} ({len(text)}자) / 모은 붙임 {len(watcher.collected)}개")
+            absorb()
+            trace.append(f"본문: {how or '읽지 못함'} ({len(text)}자) / 붙임 {len(got)}/{len(expected)}개 + 기타 {len(extras)}개")
             (folder / "수집기록.txt").write_text("\n".join(trace), encoding="utf-8")
             body = text or "(본문을 읽지 못했습니다. 본문_화면.png를 확인하세요.)"
             save_body(folder, name, body, "", f"창: {win['title']} ({win['process']})")
-            files = list(watcher.collected)
-            got = {f["name"] for f in files}
-            for n in listed:
-                if "." in n and n not in got:
-                    files.append({"name": n, "path": "", "ok": False, "error": "저장되지 않음 (뷰어에서 저장 후 '다시 분석')"})
-            cap = Captured(name, body, "", f"창: {win['title']}", folder, files,
-                           str(folder / "본문_화면.png"))
+            files = list(got.values()) + extras
+            for e in missing():
+                files.append({"name": e, "path": "", "ok": False,
+                              "error": "자동으로 찾지 못함 — 뷰어에서 저장한 뒤 공문 폴더의 '붙임'에 넣어 주세요"})
+            cap = Captured(name, body, "", f"창: {win['title']}", folder, files, str(folder / "본문_화면.png"))
             result = self._finish_capture(job, cap, use_ai)
             result["capture_method"] = how
+            result["attach_summary"] = {"expected": len(expected), "found": len(got), "extra": len(extras)}
             return result
         return self._run_job("capture_window", work)
 

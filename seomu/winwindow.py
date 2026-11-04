@@ -13,6 +13,7 @@ Windows 전용 기능이다. 다른 OS에서는 available()이 False를 돌려�
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import struct
 import sys
@@ -28,7 +29,8 @@ DOC_EXT = {".hwp", ".hwpx", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".
            ".csv", ".jpg", ".jpeg", ".png", ".odt", ".ods", ".show", ".cell", ".egg", ".7z", ".gul"}
 PARTIAL_EXT = {".crdownload", ".part", ".tmp", ".download", ".partial"}
 BODY_COPY_NAMES = ("본문복사", "본문 복사")
-SAVE_NAMES = ("PC저장", "PC 저장", "붙임문서", "붙임 저장", "일괄저장", "모두 저장")
+SAVE_NAMES = ("PC저장", "PC 저장", "일괄저장", "일괄 저장", "모두 저장", "전체 저장", "붙임저장", "첨부저장",
+              "전체 다운로드", "일괄 다운로드", "모두 다운로드", "다운로드", "Download")
 SELF_TITLES = ("서무비서 AI",)
 
 
@@ -1010,3 +1012,91 @@ if __name__ == "__main__":  # 진단:  python -m seomu.winwindow [창 제목 일
     out = Path.home() / "Downloads" / "서무비서_진단.txt"
     out.write_text(report, encoding="utf-8")
     print(f"\n진단 결과를 저장했습니다: {out}")
+
+
+# ---------------------------------------------------------------- 화면에 보이는 붙임 이름을 찾아 열기 (범용)
+def real_double_click(x: int, y: int) -> None:
+    old = wintypes.POINT()
+    user32.GetCursorPos(ctypes.byref(old))
+    user32.SetCursorPos(int(x), int(y))
+    time.sleep(0.05)
+    for _ in range(2):
+        user32.mouse_event(0x0002, 0, 0, 0, 0)
+        user32.mouse_event(0x0004, 0, 0, 0, 0)
+        time.sleep(0.06)
+    time.sleep(0.05)
+    user32.SetCursorPos(old.x, old.y)
+
+
+def ocr_window(hwnd: int, scale: int = 2) -> list[dict]:
+    """창 전체를 확대해 OCR. 좌표는 창 기준(확대 전) 픽셀로 돌려준다."""
+    import tempfile
+    img = Path(tempfile.gettempdir()) / "seomu_window.png"
+    if not save_window_image(hwnd, img, scale=scale):
+        return []
+    lines = ocr_image(img, timeout=90)
+    for l in lines:
+        for k in ("x", "y", "w", "h"):
+            l[k] = l.get(k, 0) / scale
+    return lines
+
+
+def open_named_on_screen(hwnd: int, names: list[str], log: Callable[[str], None] = lambda m: None,
+                         trace: list | None = None, per_item: float = 8.0) -> list[dict]:
+    """화면에서 붙임 이름(목록·패널·링크)을 OCR로 찾아 더블클릭하고, 열린 파일의 경로를 알아낸다.
+
+    반환: [{"expected": 붙임 이름, "path": 파일 경로 또는 "", "title": 열린 창 제목}]
+    열린 창(한글·PDF 뷰어 등)은 경로를 확인한 뒤 닫는다.
+    """
+    from . import attach
+    trace = trace if trace is not None else []
+    if not IS_WIN or not names:
+        return []
+    log("화면에서 붙임 이름을 찾는 중… (글자 인식)")
+    lines = ocr_window(hwnd)
+    trace.append(f"화면 OCR 줄 {len(lines)}개")
+    left, top, _r, _b = _rect(hwnd)
+    viewer_pid = _pid(hwnd)
+    me = os.getpid()
+    results = []
+    for name in names:
+        # 본문 속 '붙임 1. ○○ 1부.' 줄이 아니라 목록·패널·링크에 보이는 이름을 고른다
+        best, score = None, 0.0
+        for l in lines:
+            t = l.get("text", "")
+            if not t or re.search(r"(붙\s*임|\d\s*부\s*\.?$|끝\s*\.)", t):
+                continue
+            sc = attach.name_score(name, t)
+            if sc > score:
+                best, score = l, sc
+        if not best or score < 0.5:
+            trace.append(f"'{name}': 화면에서 이름을 찾지 못함 (최고 {score:.2f})")
+            continue
+        before = {w["hwnd"] for w in list_windows()}
+        x, y = left + best["x"] + min(best["w"] / 2, 60), top + best["y"] + best["h"] / 2
+        activate(hwnd)
+        real_double_click(int(x), int(y))
+        trace.append(f"'{name}': 화면의 '{best['text']}' 더블클릭 ({score:.2f})")
+        opened = None
+        end = time.time() + per_item
+        while time.time() < end and not opened:
+            time.sleep(0.5)
+            for w in list_windows():
+                if w["hwnd"] not in before and w["pid"] not in (me,) and w["hwnd"] != hwnd:
+                    if attach.path_from_title(w["title"]) or attach.name_from_title(w["title"]) or w["pid"] != viewer_pid:
+                        opened = w
+                        break
+        if not opened:
+            results.append({"expected": name, "path": "", "title": ""})
+            trace.append(f"'{name}': 새 창이 열리지 않음 (다운로드됐다면 폴더 감시로 수집)")
+            continue
+        time.sleep(1.0)
+        title = _text(opened["hwnd"]) or opened["title"]
+        path = attach.path_from_title(title)
+        results.append({"expected": name, "path": path if path and os.path.exists(path) else "",
+                        "title": title, "file_name": attach.name_from_title(title)})
+        trace.append(f"'{name}': 열린 창 '{title[:80]}' → 경로 {path or '없음'}")
+        if opened["pid"] != viewer_pid:      # 붙임을 연 프로그램 창(한글·PDF 등)은 닫는다
+            user32.PostMessageW(opened["hwnd"], 0x0010, 0, 0)  # WM_CLOSE
+            time.sleep(0.8)
+    return results

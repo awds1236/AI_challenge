@@ -137,9 +137,9 @@ def find_submissions(text: str) -> list[str]:
         if not l:
             in_attach = False
             continue
-        if re.match(r"^(□\s*)?붙\s*임\b", l):
+        if re.match(r"^(□\s*)?(붙\s*임|첨\s*부)(?![가-힣])", l):
             in_attach = True
-            rest = re.sub(r"^(□\s*)?붙\s*임\s*[:：]?\s*", "", l)
+            rest = re.sub(r"^(□\s*)?(붙\s*임|첨\s*부)\s*[:：]?\s*", "", l)
             if rest:
                 items.extend(_split_attach(rest))
             continue

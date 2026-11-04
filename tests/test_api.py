@@ -211,3 +211,28 @@ def test_capture_window_simulated(api, tmp_path, monkeypatch):
     assert [d["date"] for d in n["analysis"]["deadlines"]] == ["2026-11-13", "2026-11-27", "2026-12-28"]
     assert n["capture_method"] == "본문복사 버튼"
     assert (folder / "수집기록.txt").exists()
+
+
+def test_capture_window_harvests_existing_attachment(api, tmp_path, monkeypatch):
+    """뷰어가 이미 임시·캐시 폴더에 내려받아 둔 붙임을 이름으로 찾아 자동 수집하고 바로 끝난다."""
+    from seomu import attach, winwindow
+    cache = tmp_path / "AppData" / "Viewer" / "temp"
+    cache.mkdir(parents=True)
+    (cache / "공공체육시설 문화체육프로그램 추첨제 현황 조사표.hwp").write_bytes(b"form")
+    (cache / "다른문서.hwp").write_bytes(b"other")
+    body = ("제   목   추첨제 현황 조사 협조 요청\n2. 운영현황을 조사하오니 협조하여 주시기 바랍니다.\n"
+            "  마. 회신기한 : 2026. 11. 13.(금)\n첨부  공공체육시설 문화체육프로그램 추첨제 현황 조사표 1부.  끝.")
+    win = {"hwnd": 7, "title": "추첨제 현황 조사 협조 요청", "process": "viewer.exe", "cls": "X", "pid": 1}
+    monkeypatch.setattr(winwindow, "available", lambda: True)
+    monkeypatch.setattr(winwindow, "list_windows", lambda: [win])
+    monkeypatch.setattr(winwindow, "extract_text", lambda h, log=None, trace=None: (body, "전체 선택·복사"))
+    monkeypatch.setattr(winwindow, "save_window_image", lambda h, p, **k: False)
+    monkeypatch.setattr(winwindow, "get_clipboard", lambda: "")
+    monkeypatch.setattr(winwindow, "watch_dirs", lambda extra=None: [tmp_path / "none"])
+    monkeypatch.setattr(attach, "search_roots", lambda: [(tmp_path / "AppData", 4)])
+    t0 = time.time()
+    n = wait(api, api.capture_window(7, "", False, 60))
+    assert time.time() - t0 < 10                       # 다 모았으니 기다리지 않고 끝남
+    assert n["attach_summary"] == {"expected": 1, "found": 1, "extra": 0}
+    assert (Path(n["folder"]) / "붙임" / "공공체육시설 문화체육프로그램 추첨제 현황 조사표.hwp").exists()
+    assert n["analysis"]["deadlines"][0]["what"] == "조사표 회신" or n["analysis"]["deadlines"][0]["date"] == "2026-11-13"

@@ -300,7 +300,11 @@ async function doCollect(name, args) {
         const box = $("#hud-files");
         box.classList.remove("hidden");
         const body = info.has_text ? "✅ " + esc(info.how) : "⏳ 읽지 못함 — 뷰어의 [본문복사]를 눌러 주세요";
-        const files = info.files.length ? info.files.map((f) => "<div>📎 " + esc(f) + "</div>").join("") : "<div>📎 붙임파일 대기 중…</div>";
+        const exp = info.expected || [];
+        const files = exp.length
+          ? exp.map((e) => "<div>" + (e.file ? "✅ " : "⏳ ") + esc(e.name) + (e.file ? ' <span style="opacity:.6">← ' + esc(e.file) + "</span>" : "") + "</div>").join("") +
+            info.files.filter((f) => !exp.some((e) => e.file === f)).map((f) => "<div>📎 " + esc(f) + "</div>").join("")
+          : (info.files.length ? info.files.map((f) => "<div>📎 " + esc(f) + "</div>").join("") : "<div>📎 붙임 표기가 없거나 대기 중…</div>");
         const listed = info.listed && info.listed.length ? '<div style="opacity:.7">뷰어 붙임목록: ' + esc(info.listed.join(", ")) + "</div>" : "";
         box.innerHTML = "<div>본문: " + body + "</div>" + files + listed;
       }
