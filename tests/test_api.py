@@ -166,3 +166,39 @@ def test_model_management(api, tmp_path):
     assert api.get_settings()["chat_model"] == ""
     with pytest.raises(ValueError):
         api.import_gguf(str(tmp_path / "nope.txt"), "x")
+
+
+def test_capture_window_simulated(api, tmp_path, monkeypatch):
+    """Windows 창 수집 흐름을 흉내 내어 검증 (본문 읽기 → 붙임 감시 → 분석·할 일 등록)."""
+    from seomu import winwindow
+    dl = tmp_path / "Downloads"
+    dl.mkdir()
+    body = ("제   목   2026년도 회계마감에 따른 협조사항 알림\n"
+            "구 분\t추진기한\n계약심의위원회 심사 대상사업 의뢰\t2026.11.13한\n"
+            "연간용역 계약의뢰\t2026.11. 27한\n집행잔액 반납\t2026.12.28한\n"
+            "붙임  1. 계약심의위원회 운영 내규 1부.  끝.")
+    win = {"hwnd": 101, "title": "2026년도 회계마감에 따른 협조사항 알림", "process": "viewer.exe", "cls": "X", "pid": 1}
+    monkeypatch.setattr(winwindow, "available", lambda: True)
+    monkeypatch.setattr(winwindow, "uia_available", lambda: False)
+    monkeypatch.setattr(winwindow, "list_windows", lambda: [win])
+    monkeypatch.setattr(winwindow, "extract_text", lambda h, log=None: (body, "본문복사 버튼"))
+    monkeypatch.setattr(winwindow, "save_window_image", lambda h, p: False)
+    monkeypatch.setattr(winwindow, "get_clipboard", lambda: "")
+    monkeypatch.setattr(winwindow, "watch_dirs", lambda extra=None: [dl])
+
+    job = api.capture_window(101, "", False, 30)
+    for _ in range(40):                       # 감시 단계에 들어갈 때까지 대기
+        st = api.job_status(job["job_id"])
+        if st["text"] and '"watch"' in st["text"]:
+            break
+        time.sleep(0.05)
+    (dl / "계약심의위원회 운영 내규.hwp").write_bytes(b"hwp-data")   # 사용자가 붙임을 저장
+    time.sleep(2.6)
+    api.job_signal(job["job_id"], "done")
+    n = wait(api, job)
+    folder = Path(n["folder"])
+    assert folder.name.endswith("2026년도 회계마감에 따른 협조사항 알림")
+    assert (folder / "붙임" / "계약심의위원회 운영 내규.hwp").exists()
+    assert not (dl / "계약심의위원회 운영 내규.hwp").exists()   # 다운로드 폴더에서 옮겨 정리
+    assert [d["date"] for d in n["analysis"]["deadlines"]] == ["2026-11-13", "2026-11-27", "2026-12-28"]
+    assert n["capture_method"] == "본문복사 버튼"

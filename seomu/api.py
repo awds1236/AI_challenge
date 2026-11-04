@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import uuid
 from datetime import date, datetime, timedelta
@@ -19,11 +22,13 @@ from typing import Callable
 
 from . import APP_NAME, __version__
 from .analyzer import analyze, summary_markdown
-from .collector import BrowserWorker, Captured, collect_from_files, collect_from_url, safe_name, unique_path
+from .collector import (BrowserWorker, Captured, collect_from_files, collect_from_url,
+                        make_notice_folder, safe_name, save_body, unique_path)
 from .config import Config
 from .deadlines import dday
 from .llm import LLMError, OllamaClient
 from . import models as model_catalog
+from . import winwindow
 from .mail import DEFAULT_TEMPLATES, POLISH_PROMPT, VARIABLES, build_variables, render, tasks_to_ics
 from .parsers import SUPPORTED
 from .rag import RAGEngine
@@ -40,6 +45,7 @@ class Job:
         self.result = None
         self.error = ""
         self.started = datetime.now()
+        self.flags: dict = {}       # 화면에서 보내는 신호 (예: 붙임 수집 완료)
 
     def to_dict(self) -> dict:
         return {"id": self.id, "kind": self.kind, "status": self.status, "message": self.message,
@@ -100,6 +106,7 @@ class Api:
     def app_info(self) -> dict:
         return {"name": APP_NAME, "version": __version__, "home": str(self._cfg.home),
                 "browser_available": BrowserWorker.available(),
+                "windows_available": winwindow.available(), "uia_available": winwindow.uia_available(),
                 "native": self._window is not None}
 
     def get_settings(self) -> dict:
@@ -401,6 +408,76 @@ class Api:
             cap = collect_from_files(paths, root, title.strip(), int(body_index or 0))
             return self._finish_capture(job, cap, use_ai)
         return self._run_job("collect", work)
+
+    # ---- 열린 프로그램 창에서 수집 (Windows) ----
+    def list_windows(self) -> list[dict]:
+        return winwindow.list_windows()
+
+    def job_signal(self, job_id: str, name: str) -> bool:
+        job = self._jobs.get(job_id)
+        if not job:
+            return False
+        job.flags[name] = True
+        return True
+
+    def capture_window(self, hwnd: int, title: str = "", use_ai: bool = True, wait_seconds: int = 180) -> dict:
+        if not winwindow.available():
+            raise RuntimeError("열린 창 수집은 Windows에서만 사용할 수 있습니다.")
+        root = self._cfg.settings.resolved_download_root()
+        win = next((w for w in winwindow.list_windows() if w["hwnd"] == int(hwnd)), None)
+        if not win:
+            raise ValueError("선택한 창을 찾을 수 없습니다. 창 목록을 새로고침하세요.")
+
+        def work(job: Job):
+            say = lambda m: setattr(job, "message", m)  # noqa: E731
+            text, how = winwindow.extract_text(win["hwnd"], say)
+            win_title = win["title"]
+            for suffix in (" - 온나라", " - 문서", " - Microsoft Edge", " - Chrome", " - Whale"):
+                win_title = win_title.replace(suffix, "")
+            # 폴더 이름: 직접 입력 > 본문의 '제목' 줄 > 창 제목
+            m = re.search(r"^[ \t]*(?:제\s*목|건\s*명)[ \t]*[:：]?[ \t]*(\S.{2,120})$", text or "", re.M)
+            name = title.strip() or (m.group(1).strip() if m else "") or win_title
+            folder = make_notice_folder(root, name)
+            winwindow.save_window_image(win["hwnd"], folder / "본문_화면.png")
+            listed = winwindow.attachment_names(win["hwnd"]) if winwindow.uia_available() else []
+
+            watcher = winwindow.FileWatcher(winwindow.watch_dirs(), folder / "붙임")
+            state = winwindow.try_save_attachments(win["hwnd"], folder / "붙임", say) if winwindow.uia_available() else ""
+            # 본문을 못 읽었으면 사용자가 '본문복사'를 누를 수 있도록 클립보드도 감시
+            clip_before = winwindow.get_clipboard()
+            deadline = time.time() + max(20, int(wait_seconds))
+            hint = ("뷰어에서 붙임파일을 저장(PC저장 등)하면 자동으로 모읍니다."
+                    if state != "saved" else "붙임파일 저장을 기다리는 중…")
+            if not text:
+                hint += " 본문을 읽지 못했습니다. 뷰어의 [본문복사]를 눌러 주세요."
+            while time.time() < deadline and not job.flags.get("done"):
+                watcher.poll()
+                if not text:
+                    clip = winwindow.get_clipboard()
+                    if clip and clip != clip_before and len(clip.strip()) > 50:
+                        text, how = clip, "본문복사(직접)"
+                job.message = f"{hint} (모은 붙임 {len(watcher.collected)}개)"
+                job.text = json.dumps({"phase": "watch", "files": [f["name"] for f in watcher.collected],
+                                       "listed": listed, "has_text": bool(text), "how": how,
+                                       "folder": str(folder)}, ensure_ascii=False)
+                # 자동 저장에 성공했고 새 파일이 더 이상 없으면 일찍 끝낸다
+                if state == "saved" and watcher.collected and not watcher.pending and watcher.idle_for() > 6:
+                    break
+                time.sleep(1.0)
+            watcher.poll()
+            body = text or "(본문을 읽지 못했습니다. 본문_화면.png를 확인하세요.)"
+            save_body(folder, name, body, "", f"창: {win['title']} ({win['process']})")
+            files = list(watcher.collected)
+            got = {f["name"] for f in files}
+            for n in listed:
+                if "." in n and n not in got:
+                    files.append({"name": n, "path": "", "ok": False, "error": "저장되지 않음 (뷰어에서 저장 후 '다시 분석')"})
+            cap = Captured(name, body, "", f"창: {win['title']}", folder, files,
+                           str(folder / "본문_화면.png"))
+            result = self._finish_capture(job, cap, use_ai)
+            result["capture_method"] = how
+            return result
+        return self._run_job("capture_window", work)
 
     def list_notices(self) -> list[dict]:
         return self._store.list_notices()

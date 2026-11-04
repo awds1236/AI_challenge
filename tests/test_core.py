@@ -158,3 +158,29 @@ def test_model_family_alias():
     assert installed_id(e2b, ["gemma4:e2b", "gemma4:e2b-it-qat"]) == "gemma4:e2b-it-qat"
     assert is_installed("embeddinggemma", ["embeddinggemma:latest"])
     assert not is_installed("gemma4:e4b-it-qat", ["gemma4:e2b"])
+
+
+def test_file_watcher(tmp_path):
+    import time as _t
+    from seomu.winwindow import FileWatcher
+    src, dest = tmp_path / "Desktop", tmp_path / "notice" / "붙임"
+    src.mkdir()
+    (src / "old.pdf").write_bytes(b"old")
+    w = FileWatcher([src], dest)
+    (src / "새 붙임.hwpx").write_bytes(b"x" * 10)
+    (src / "download.crdownload").write_bytes(b"x")
+    (src / "memo.exe").write_bytes(b"x")
+    assert w.poll() == []            # 첫 확인: 크기 안정 대기
+    _t.sleep(1.1)
+    got = w.poll()
+    assert [g["name"] for g in got] == ["새 붙임.hwpx"]
+    assert (dest / "새 붙임.hwpx").exists() and (src / "새 붙임.hwpx").exists()   # 바탕화면 파일은 복사
+    _t.sleep(1.1)
+    assert w.poll() == []            # 같은 파일 중복 수집 안 함
+
+
+def test_png_writer(tmp_path):
+    from seomu.winwindow import _png
+    p = tmp_path / "a.png"
+    _png(p, 2, 1, bytes([0, 0, 255, 255, 255, 0, 0, 255]))
+    assert p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"

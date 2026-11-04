@@ -72,7 +72,10 @@ function toast(msg, kind = "info", ms = 3800) {
   setTimeout(() => { el.style.transition = "opacity .3s"; el.style.opacity = "0"; setTimeout(() => el.remove(), 300); }, ms);
 }
 function hud(text) {
-  if (text === false) return $("#hud").classList.add("hidden");
+  if (text === false) {
+    $("#hud-action").classList.add("hidden"); $("#hud-files").classList.add("hidden");
+    return $("#hud").classList.add("hidden");
+  }
   $("#hud-text").textContent = text;
   $("#hud").classList.remove("hidden");
 }
@@ -275,12 +278,31 @@ async function loadNotices() {
   $("#badge-notices").textContent = state.notices.length || "";
   $("#notice-list").innerHTML = state.notices.length ? state.notices.map(noticeRow).join("")
     : `<li class="empty">아직 수집한 공문이 없습니다. 위에서 공문을 수집해 보세요.</li>`;
+  if ($("#collect-mode button.on")?.dataset.v === "window") loadWindows();
   $("#br-hint").textContent = state.info.browser_available ? "" : "※ 브라우저 연동을 쓰려면 Playwright 설치가 필요합니다 (README 참고). 주소 수집과 파일 가져오기는 바로 쓸 수 있습니다.";
 }
 async function doCollect(name, args) {
   hud("공문을 수집하는 중…");
   try {
-    const notice = await runJob(name, args, (st) => st.message && hud(st.message));
+    const notice = await runJob(name, args, (st) => {
+      if (st.message) hud(st.message);
+      let info = null;
+      try { info = st.text ? JSON.parse(st.text) : null; } catch { info = null; }
+      if (info && info.phase === "watch") {
+        const act = $("#hud-action");
+        if (act.classList.contains("hidden")) {
+          act.classList.remove("hidden");
+          act.textContent = "붙임 수집 완료"; act.disabled = false;
+          act.onclick = () => { api("job_signal", st.id, "done"); act.textContent = "정리하는 중…"; act.disabled = true; };
+        }
+        const box = $("#hud-files");
+        box.classList.remove("hidden");
+        const body = info.has_text ? "✅ " + esc(info.how) : "⏳ 읽지 못함 — 뷰어의 [본문복사]를 눌러 주세요";
+        const files = info.files.length ? info.files.map((f) => "<div>📎 " + esc(f) + "</div>").join("") : "<div>📎 붙임파일 대기 중…</div>";
+        const listed = info.listed && info.listed.length ? '<div style="opacity:.7">뷰어 붙임목록: ' + esc(info.listed.join(", ")) + "</div>" : "";
+        box.innerHTML = "<div>본문: " + body + "</div>" + files + listed;
+      }
+    });
     hud(false);
     const a = notice.analysis || {};
     toast(`정리 완료: ${a.folder_name || notice.title} · 기한 ${(a.deadlines || []).length}건 등록`, "ok");
@@ -294,6 +316,30 @@ function renderPendingFiles() {
     <span>${esc(baseName(p))}</span><span class="spacer"></span>
     ${i ? `<button class="btn ghost sm" data-main="${i}">본문으로</button>` : ""}<button class="btn ghost sm" data-rm="${i}">${svg("close")}</button></li>`).join("");
   $("#file-collect").disabled = !state.pendingFiles.length;
+}
+
+// 열린 창 목록
+let winSel = null, winAll = [];
+const NOTICE_WORDS = /(알림|요청|협조|안내|제출|회신|통보|개최|계획|시행|공문|문서|조사|의뢰)/;
+async function loadWindows() {
+  if (!state.info.windows_available) {
+    $("#win-list").innerHTML = '<li class="empty">열린 창 수집은 Windows에서 사용할 수 있습니다.</li>';
+    return;
+  }
+  try { winAll = await api("list_windows"); } catch (e) { toast(e.message, "err"); winAll = []; }
+  renderWindows();
+  $("#win-hint").textContent = state.info.uia_available ? "" : "※ uiautomation 패키지가 없어 '본문복사·PC저장 자동 누르기'는 생략됩니다 (Ctrl+A/C와 파일 감시는 동작).";
+}
+function renderWindows() {
+  const q = $("#win-filter").value.trim();
+  const list = winAll.filter((w) => !q || w.title.includes(q) || (w.process || "").toLowerCase().includes(q.toLowerCase()))
+    .sort((a, b) => (NOTICE_WORDS.test(b.title) ? 1 : 0) - (NOTICE_WORDS.test(a.title) ? 1 : 0));
+  $("#win-list").innerHTML = list.length ? list.map((w) => `
+    <li class="${w.hwnd === winSel ? "on" : ""} ${NOTICE_WORDS.test(w.title) ? "likely" : ""}" data-hwnd="${w.hwnd}">
+      <div class="ico">${svg(/edge|chrome|whale|firefox/i.test(w.process) ? "globe" : "doc")}</div>
+      <div class="main-col"><div class="t">${esc(w.title)}</div><div class="s">${esc(w.process || w.cls)}</div></div></li>`).join("")
+    : `<li class="empty">${q ? "검색 결과가 없습니다" : "열린 창이 없습니다. 공문을 띄운 뒤 새로고침하세요."}</li>`;
+  $("#win-capture").disabled = !list.some((w) => w.hwnd === winSel);
 }
 
 // 공문 상세 시트
@@ -594,7 +640,12 @@ function bind() {
   $("#ask-clear").addEventListener("click", async () => { if (confirm("대화 기록을 지울까요?")) { await api("clear_chat"); loadChat(); } });
 
   // 공문 수집
-  segmented($("#collect-mode"), (v) => $$(".mode-pane").forEach((p) => p.classList.toggle("on", p.dataset.mode === v)));
+  segmented($("#collect-mode"), (v) => { $$(".mode-pane").forEach((p) => p.classList.toggle("on", p.dataset.mode === v)); if (v === "window") loadWindows(); });
+  $("#win-refresh").addEventListener("click", loadWindows);
+  $("#win-filter").addEventListener("input", renderWindows);
+  $("#win-list").addEventListener("click", (e) => { const li = e.target.closest("[data-hwnd]"); if (li) { winSel = Number(li.dataset.hwnd); renderWindows(); } });
+  $("#win-list").addEventListener("dblclick", (e) => { if (e.target.closest("[data-hwnd]")) $("#win-capture").click(); });
+  $("#win-capture").addEventListener("click", () => { if (winSel) doCollect("capture_window", [winSel, $("#collect-title").value, $("#collect-ai").checked]); });
   const title = () => $("#collect-title").value;
   const useAI = () => $("#collect-ai").checked;
   $("#br-open").addEventListener("click", async () => {

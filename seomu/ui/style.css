@@ -375,3 +375,19 @@ details.raw pre { white-space: pre-wrap; font-family: var(--font); font-size: 12
 .gguf-box a { color: var(--blue); }
 .model-progress { margin-top: 12px; font-size: 13px; }
 #model-others { margin-top: 10px; }
+
+/* ---------- 열린 창 수집 ---------- */
+.win-list { list-style: none; margin: 10px 0 0; padding: 4px; max-height: 300px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.win-list li { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 9px; cursor: pointer; }
+.win-list li:hover { background: var(--surface); }
+.win-list li.on { background: var(--blue); color: #fff; }
+.win-list li.on .s { color: rgba(255,255,255,.8); }
+.win-list li .ico { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--surface); color: var(--blue); font-size: 16px; flex: none; }
+.win-list li.on .ico { background: rgba(255,255,255,.2); color: #fff; }
+.win-list .t { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.win-list .s { font-size: 11.5px; color: var(--text-2); }
+.win-list li.likely .t::after { content: "공문"; font-size: 10.5px; font-weight: 700; margin-left: 6px; padding: 1px 6px; border-radius: 5px; background: rgba(52,199,89,.18); color: var(--green); }
+.win-list .empty { color: var(--text-3); justify-content: center; cursor: default; }
+.hud-files { font-size: 12px; opacity: .9; max-height: 120px; overflow: auto; text-align: left; width: 100%; }
+.hud-files div { padding: 1px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#hud-action { background: #fff; color: #1d1d1f; border-color: transparent; }
