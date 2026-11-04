@@ -463,6 +463,7 @@ async function loadSettings() {
   $("#set-root-hint").textContent = `현재: ${s._download_root}`;
   $("#set-home").textContent = s._home;
   refreshAI();
+  loadModels();
 }
 function applyTheme(t) {
   if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
@@ -479,6 +480,60 @@ async function saveSettings() {
     toast("설정을 저장했습니다", "ok");
     loadSettings();
   } catch (e) { toast(e.message, "err"); }
+}
+
+// ------------------------------------------------------------------ AI 모델
+let ggufTarget = null, modelBusy = false;
+async function loadModels() {
+  let c;
+  try { c = await api("model_catalog"); } catch (e) { $("#model-grid").innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  const si = c.system, rec = c.recommend;
+  const recName = (c.models.find((m) => m.id === rec.model) || {}).name || rec.model;
+  $("#pc-box").innerHTML = `<div class="specs"><b>내 PC</b> · ${esc(si.cpu)} (${si.cores}스레드)<br>
+    메모리 <b>${si.ram_total_gb}GB</b> (현재 여유 ${si.ram_avail_gb}GB) · 디스크 여유 ${si.disk_free_gb}GB ·
+    GPU ${si.gpu ? esc(si.gpu.split(",")[0]) + (si.gpu_usable ? " (AI 가속 가능)" : " (AI 가속 불가)") : "AI 가속 불가 · CPU 사용"}</div>
+    <div class="rec"><span class="badge green">추천</span> <b>${esc(recName)}</b><div class="muted small">${esc(rec.reason)}</div></div>`;
+  if (!c.engine_ok) {
+    $("#model-grid").innerHTML = `<div class="muted">로컬 AI 엔진(Ollama)이 실행 중이 아닙니다. Ollama를 설치·실행한 뒤 '다시 확인'을 눌러 주세요.<br><span class="small">${esc(c.engine_error)}</span></div>`;
+    return;
+  }
+  $("#model-grid").innerHTML = c.models.map((m) => `
+    <div class="model-card ${m.active ? "active" : ""}">
+      <div class="top"><span class="name">${esc(m.name)}</span><span class="vendor">${esc(m.vendor)}</span><span class="spacer"></span>
+        ${m.id === rec.model ? '<span class="badge green">내 PC 추천</span>' : ""}<span class="badge ${m.kind === "embed" ? "purple" : "blue"}">${esc(m.badge)}</span></div>
+      <div class="desc">${esc(m.desc)}</div>
+      <div class="meta"><span class="badge">약 ${m.download_gb}GB</span><span class="badge">RAM ${m.min_ram_gb}GB+</span>
+        <span class="badge">${esc(m.license)}</span><span class="badge">${esc(m.korean)}</span></div>
+      ${m.fits ? "" : '<div class="warn">⚠ 이 PC 메모리로는 느리거나 실행되지 않을 수 있습니다</div>'}
+      <div class="actions">
+        ${m.installed
+          ? (m.active ? `<span class="badge green">${m.kind === "embed" ? "검색에 사용 중" : "사용 중"}</span>` : `<button class="btn primary sm" data-use="${esc(m.id)}">사용</button>`) +
+            `<button class="btn ghost sm danger" data-mdel="${esc(m.id)}" title="모델 삭제">${svg("trash")}</button>`
+          : m.install === "gguf"
+            ? `<button class="btn sm" data-gguf="${esc(m.id)}">${svg("download")} GGUF 등록</button>`
+            : `<button class="btn sm" data-pull="${esc(m.id)}">${svg("download")} 받기</button>`}
+      </div>
+    </div>`).join("");
+  $("#model-others").textContent = c.others.length ? `기타 설치된 모델: ${c.others.join(", ")} (아래 '직접 입력'으로 사용)` : "";
+  const s = await api("get_settings");
+  state.settings = s;
+  $("#set-chat_model").value = s.chat_model || ""; $("#set-embed_model").value = s.embed_model || "";
+}
+async function modelJob(name, args, doneMsg) {
+  if (modelBusy) return toast("다른 모델 작업이 진행 중입니다", "info");
+  modelBusy = true;
+  const box = $("#model-progress"); box.classList.remove("hidden");
+  $("#model-bar").style.width = "2%";
+  try {
+    await runJob(name, args, (st) => {
+      $("#model-progress-text").textContent = st.message || "진행 중…";
+      const [d, t] = (st.text || "0/0").split("/").map(Number);
+      if (t) $("#model-bar").style.width = `${Math.max(2, (d / t) * 100)}%`;
+    });
+    toast(doneMsg, "ok");
+    $("#gguf-box").classList.add("hidden");
+  } catch (e) { toast(e.message, "err", 8000); }
+  finally { modelBusy = false; box.classList.add("hidden"); loadModels(); refreshAI(); }
 }
 
 // ------------------------------------------------------------------ 드래그 & 드롭
@@ -658,7 +713,35 @@ function bind() {
   // 설정
   segmented($("#set-theme"), applyTheme);
   $("#set-save").addEventListener("click", saveSettings);
-  $("#set-ai-check").addEventListener("click", refreshAI);
+  $("#set-ai-check").addEventListener("click", () => { refreshAI(); loadModels(); });
+  $("#model-grid").addEventListener("click", async (e) => {
+    const u = e.target.closest("[data-use]"), p = e.target.closest("[data-pull]"), d = e.target.closest("[data-mdel]"), g = e.target.closest("[data-gguf]");
+    if (u) { await api("use_model", u.dataset.use); toast(`${u.dataset.use} 모델을 사용합니다`, "ok"); loadModels(); refreshAI(); }
+    if (p) modelJob("pull_model", [p.dataset.pull], `${p.dataset.pull} 모델을 받았습니다. '사용'을 눌러 적용하세요.`);
+    if (d && confirm(`${d.dataset.mdel} 모델을 PC에서 삭제할까요? (다시 받을 수 있습니다)`)) {
+      try { await api("delete_model", d.dataset.mdel); toast("삭제했습니다", "ok"); } catch (er) { toast(er.message, "err"); }
+      loadModels(); refreshAI();
+    }
+    if (g) {
+      ggufTarget = g.dataset.gguf;
+      const m = (await api("model_catalog")).models.find((x) => x.id === ggufTarget);
+      $("#gguf-title").textContent = `${m.name} 등록`;
+      $("#gguf-hf").dataset.href = m.hf || "https://huggingface.co";
+      $("#gguf-box").classList.remove("hidden");
+      $("#gguf-path").focus();
+    }
+  });
+  $("#gguf-hf").addEventListener("click", (e) => { e.preventDefault(); window.open(e.target.dataset.href, "_blank"); });
+  $("#gguf-pick").addEventListener("click", async () => {
+    if (!state.info.native) return toast("브라우저 모드에서는 파일 경로를 직접 입력해 주세요", "info");
+    const p = await api("pick_files", false); if (p && p[0]) $("#gguf-path").value = p[0];
+  });
+  $("#gguf-go").addEventListener("click", () => {
+    const v = $("#gguf-path").value.trim();
+    if (!v || !ggufTarget) return toast("GGUF 파일 경로를 입력하세요", "info");
+    if (/^hf\.co\//i.test(v)) return modelJob("pull_model", [v, ggufTarget], `${ggufTarget} 모델을 받았습니다. '사용'을 눌러 적용하세요.`);
+    modelJob("import_gguf", [v, ggufTarget], `${ggufTarget} 모델을 등록했습니다. '사용'을 눌러 적용하세요.`);
+  });
   $("#set-root-pick").addEventListener("click", async () => { if (!state.info.native) return toast("브라우저 모드에서는 경로를 직접 입력해 주세요", "info"); const p = await api("pick_folder"); if (p) $("#set-download_root").value = p; });
 }
 

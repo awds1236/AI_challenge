@@ -23,6 +23,7 @@ from .collector import BrowserWorker, Captured, collect_from_files, collect_from
 from .config import Config
 from .deadlines import dday
 from .llm import LLMError, OllamaClient
+from . import models as model_catalog
 from .mail import DEFAULT_TEMPLATES, POLISH_PROMPT, VARIABLES, build_variables, render, tasks_to_ics
 from .parsers import SUPPORTED
 from .rag import RAGEngine
@@ -127,6 +128,81 @@ class Api:
             st["embed_model"] = c.pick_embed_model(s.embed_model)
         st["local_only"] = not s.allow_remote_llm
         return st
+
+    # ------------------------------------------------------------ 모델 관리
+    def model_catalog(self) -> dict:
+        client = self._client()
+        st = client.status()
+        installed = st.get("models", [])
+        s = self._cfg.settings
+        info = model_catalog.system_info()
+        try:
+            active_chat = client.pick_chat_model(s.chat_model) if st["ok"] else s.chat_model
+        except LLMError:
+            active_chat = s.chat_model
+        active_embed = client.pick_embed_model(s.embed_model) if st["ok"] else s.embed_model
+        items = []
+        for m in model_catalog.CATALOG:
+            d = dict(m)
+            d["installed"] = model_catalog.is_installed(m["id"], installed)
+            d["active"] = m["id"] in (active_chat, active_embed) or \
+                (m["id"] + ":latest") in (active_chat, active_embed)
+            d["fits"] = info["ram_total_gb"] == 0 or info["ram_total_gb"] >= m["min_ram_gb"] * 0.9
+            items.append(d)
+        known = {m["id"] for m in model_catalog.CATALOG} | {m["id"] + ":latest" for m in model_catalog.CATALOG}
+        return {"engine_ok": st["ok"], "engine_error": st.get("error", ""), "models": items,
+                "others": [m for m in installed if m not in known], "active_chat": active_chat,
+                "active_embed": active_embed, "system": info, "recommend": model_catalog.recommend(info)}
+
+    def use_model(self, model_id: str) -> dict:
+        m = model_catalog.find(model_id)
+        key = "embed_model" if (m and m["kind"] == "embed") or "embed" in model_id else "chat_model"
+        self.save_settings({key: model_id})
+        if key == "embed_model":
+            self._rag.invalidate()
+        return self.model_catalog()
+
+    def _progress(self, job: Job):
+        def cb(obj: dict):
+            total, done = obj.get("total"), obj.get("completed")
+            pct = f" {done / total * 100:.0f}%" if total and done is not None else ""
+            job.message = f"{obj.get('status', '진행 중')}{pct}"
+            job.text = f"{done or 0}/{total or 0}"
+        return cb
+
+    def pull_model(self, model_id: str, alias: str = "") -> dict:
+        """모델 다운로드. alias를 주면(예: hf.co/... → kanana-2:3b) 그 이름으로도 등록한다."""
+        model_id = (model_id or "").strip()
+        if not model_id:
+            raise ValueError("모델 이름을 입력하세요")
+
+        def work(job: Job):
+            job.message = "다운로드 준비 중…"
+            client = self._client()
+            client.pull(model_id, self._progress(job))
+            if alias and alias != model_id:
+                client.copy(model_id, alias)
+                client.delete(model_id)
+            return self.model_catalog()
+        return self._run_job("pull", work)
+
+    def import_gguf(self, path: str, model_id: str) -> dict:
+        p = Path(path or "")
+        if not p.is_file() or p.suffix.lower() != ".gguf":
+            raise ValueError("GGUF(.gguf) 파일을 선택하세요")
+        name = (model_id or p.stem).strip().lower()
+
+        def work(job: Job):
+            self._client().create_from_gguf(name, str(p), self._progress(job))
+            return self.model_catalog()
+        return self._run_job("import", work)
+
+    def delete_model(self, model_id: str) -> dict:
+        self._client().delete(model_id)
+        s = self._cfg.settings
+        if model_id in (s.chat_model, s.embed_model):
+            self.save_settings({"chat_model" if model_id == s.chat_model else "embed_model": ""})
+        return self.model_catalog()
 
     def dashboard(self) -> dict:
         today = date.today()

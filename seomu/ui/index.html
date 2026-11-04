@@ -308,15 +308,38 @@
 
       <div class="settings">
         <div class="group">
+          <div class="group-title">AI 모델</div>
+          <div class="group-body pad">
+            <div class="pc-box" id="pc-box"><div class="muted small">PC 사양 확인 중…</div></div>
+            <div class="model-grid" id="model-grid"></div>
+            <div class="gguf-box hidden" id="gguf-box">
+              <div><b id="gguf-title">GGUF 파일 등록</b>
+                <div class="muted small">① <a href="#" id="gguf-hf">Hugging Face</a>에서 <code>Q4_K_M</code> GGUF 파일을 내려받고 ② 아래에서 파일을 지정하면 인터넷 없이 등록됩니다.
+                  주소를 알면 <code>hf.co/사용자/저장소:Q4_K_M</code> 형태로 바로 받을 수도 있습니다.</div></div>
+              <div class="row">
+                <input class="input grow" id="gguf-path" placeholder="C:\Users\...\Downloads\kanana-2-3b-instruct-Q4_K_M.gguf 또는 hf.co/...">
+                <button class="btn" id="gguf-pick" title="파일 찾기"><i data-icon="folder"></i></button>
+                <button class="btn primary" id="gguf-go">등록</button>
+              </div>
+            </div>
+            <div class="model-progress hidden" id="model-progress">
+              <div class="row tight"><span id="model-progress-text">다운로드 중…</span></div>
+              <div class="bar"><div id="model-bar"></div></div>
+            </div>
+            <div class="muted small" id="model-others"></div>
+          </div>
+        </div>
+
+        <div class="group">
           <div class="group-title">로컬 AI 엔진</div>
           <div class="group-body">
             <div class="set-row"><div><b>엔진 상태</b><div class="muted small" id="set-ai-status">확인 중…</div></div>
               <button class="btn sm" id="set-ai-check">다시 확인</button></div>
             <div class="set-row"><div><b>Ollama 주소</b><div class="muted small">PC 안에서 동작하는 AI 엔진 주소</div></div>
               <input class="input w-260" id="set-ollama_url"></div>
-            <div class="set-row"><div><b>답변 모델</b><div class="muted small">비워두면 설치된 Gemma 계열 모델 자동 선택</div></div>
-              <input class="input w-260" id="set-chat_model" list="model-list" placeholder="자동 (예: gemma3:4b)"></div>
-            <div class="set-row"><div><b>임베딩 모델</b><div class="muted small">선택 사항 · 의미 검색 정확도 향상 (예: bge-m3)</div></div>
+            <div class="set-row"><div><b>답변 모델 (직접 입력)</b><div class="muted small">위 목록 외 모델을 쓸 때만 입력 · 비우면 자동 선택</div></div>
+              <input class="input w-260" id="set-chat_model" list="model-list" placeholder="자동 (예: gemma4:e2b)"></div>
+            <div class="set-row"><div><b>임베딩 모델 (직접 입력)</b><div class="muted small">선택 사항 · 의미 검색 정확도 향상</div></div>
               <input class="input w-260" id="set-embed_model" list="model-list" placeholder="자동 / 키워드 검색만"></div>
             <datalist id="model-list"></datalist>
             <div class="set-row"><div><b>근거 문단 수</b><div class="muted small">답변 시 참고할 조문 개수</div></div>

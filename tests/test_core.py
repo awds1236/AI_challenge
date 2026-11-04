@@ -138,3 +138,11 @@ def test_mail_render():
 
 def test_html_to_text_skips_script():
     assert html_to_text("<p>a</p><script>x()</script><p>b</p>") == "a\n\nb"
+
+
+def test_recommend_by_spec():
+    from seomu.models import recommend
+    assert recommend({"ram_total_gb": 16, "ram_avail_gb": 7, "gpu_usable": False})["model"] == "gemma4:e2b"
+    assert recommend({"ram_total_gb": 32, "ram_avail_gb": 20, "gpu_usable": False})["model"] == "gemma4:e4b"
+    assert recommend({"ram_total_gb": 8, "ram_avail_gb": 3, "gpu_usable": False})["model"] == "kanana-2:3b"
+    assert recommend({"ram_total_gb": 4, "ram_avail_gb": 2, "gpu_usable": False})["model"] == "kanana-2:1.3b"

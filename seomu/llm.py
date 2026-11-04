@@ -14,7 +14,7 @@ import urllib.request
 from typing import Callable, Iterable
 from urllib.parse import urlparse
 
-PREFERRED_CHAT = ("gemma4", "gemma3n", "gemma3", "gemma2", "gemma", "qwen", "exaone", "llama")
+PREFERRED_CHAT = ("gemma4", "kanana", "gemma3n", "gemma3", "gemma2", "gemma", "exaone", "llama")
 PREFERRED_EMBED = ("bge-m3", "nomic-embed", "mxbai-embed", "embeddinggemma", "snowflake-arctic-embed", "embed")
 
 
@@ -50,13 +50,14 @@ class OllamaClient:
                 "설정에서 '외부 LLM 주소 허용'을 켜지 않는 한 PC 밖으로 데이터를 보내지 않습니다."
             )
 
-    def _request(self, path: str, payload: dict | None = None, timeout: float | None = None):
+    def _request(self, path: str, payload: dict | None = None, timeout: float | None = None,
+                 method: str | None = None, raw=None, headers: dict | None = None):
         self._check()
-        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        data = raw if raw is not None else (json.dumps(payload).encode("utf-8") if payload is not None else None)
         req = urllib.request.Request(
             self.base_url + path, data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST" if data is not None else "GET",
+            headers=headers or {"Content-Type": "application/json"},
+            method=method or ("POST" if data is not None else "GET"),
         )
         try:
             return _opener.open(req, timeout=timeout or self.timeout)
@@ -149,6 +150,72 @@ class OllamaClient:
                 if obj.get("done"):
                     break
         return "".join(out)
+
+    # ---------- 모델 관리 ----------
+    def _stream(self, path: str, payload: dict, on_progress: Callable[[dict], None] | None,
+                timeout: float = 3600) -> dict:
+        last: dict = {}
+        with self._request(path, payload, timeout=timeout) as r:
+            for line in r:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line.decode("utf-8"))
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("error"):
+                    raise LLMError(obj["error"])
+                last = obj
+                if on_progress:
+                    on_progress(obj)
+        return last
+
+    def pull(self, model: str, on_progress: Callable[[dict], None] | None = None) -> dict:
+        """모델 다운로드 (Ollama 공식 저장소 또는 hf.co/... GGUF)."""
+        return self._stream("/api/pull", {"model": model, "stream": True}, on_progress)
+
+    def copy(self, source: str, destination: str) -> None:
+        with self._request("/api/copy", {"source": source, "destination": destination}):
+            pass
+
+    def delete(self, model: str) -> None:
+        with self._request("/api/delete", {"model": model}, method="DELETE"):
+            pass
+
+    def push_blob(self, path: str, on_progress: Callable[[dict], None] | None = None) -> str:
+        """GGUF 파일을 Ollama에 올리고 sha256 다이제스트를 돌려준다 (인터넷 불필요)."""
+        import hashlib
+        import os
+        h = hashlib.sha256()
+        size = os.path.getsize(path)
+        done = 0
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 22), b""):
+                h.update(chunk)
+                done += len(chunk)
+                if on_progress:
+                    on_progress({"status": "파일 검사 중", "total": size, "completed": done})
+        digest = "sha256:" + h.hexdigest()
+        try:
+            with self._request(f"/api/blobs/{digest}", method="HEAD", timeout=10):
+                return digest  # 이미 있음
+        except LLMError:
+            pass
+        if on_progress:
+            on_progress({"status": "AI 엔진에 등록 중", "total": size, "completed": 0})
+        with open(path, "rb") as f:
+            with self._request(f"/api/blobs/{digest}", raw=f, method="POST",
+                               headers={"Content-Length": str(size),
+                                        "Content-Type": "application/octet-stream"}, timeout=3600):
+                pass
+        return digest
+
+    def create_from_gguf(self, name: str, path: str, on_progress: Callable[[dict], None] | None = None) -> dict:
+        import os
+        digest = self.push_blob(path, on_progress)
+        return self._stream("/api/create", {"model": name, "files": {os.path.basename(path): digest},
+                                            "stream": True}, on_progress)
 
     def embed(self, texts: list[str], model: str) -> list[list[float]]:
         if not texts:

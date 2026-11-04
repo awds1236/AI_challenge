@@ -63,7 +63,22 @@
 - **AI로 다듬기**: 날짜, 서류명 같은 사실은 그대로 두고 문장만 공공기관 메일 문체로 다듬습니다.
 - 전체 복사, 메일 앱으로 열기, 공문 폴더에 초안 저장을 지원합니다.
 
-### 5. Apple 스타일 화면
+### 5. AI 모델 선택
+<img src="docs/screenshots/models.png" width="860" alt="AI 모델 선택">
+
+- 설정 화면에서 PC 사양(CPU, 메모리, GPU)을 확인하고 **이 PC에 맞는 모델을 추천**합니다.
+- 모델 카드에서 **받기 → 사용** 두 번만 누르면 모델이 바뀝니다.
+
+| 모델 | 특징 | 받는 방법 |
+|---|---|---|
+| **Gemma 4 E2B** (Google) | 기본 모델. 사무용 PC(RAM 8GB+)용, Apache 2.0 | 앱에서 [받기] |
+| **Gemma 4 E4B** (Google) | 고성능. 여유 메모리가 많은 PC용 | 앱에서 [받기] |
+| **Kanana-2 3B / 1.3B** (Kakao) | 국산 한국어 특화 경량 모델 | GGUF 파일을 내려받아 [GGUF 등록] (인터넷 없이 등록 가능) |
+| **EmbeddingGemma** (Google) | 규정 검색 정확도 향상 (선택) | 앱에서 [받기] |
+
+> Kanana-2는 Kanana Open License를 따릅니다. 기관에 배포하기 전에 라이선스 원문을 확인하세요.
+
+### 6. Apple 스타일 화면
 - macOS 디자인 언어를 따른 반투명 사이드바, 카드, 세그먼트 컨트롤, 토글, 시트 화면을 씁니다.
 - 라이트와 다크 모드를 모두 지원합니다(시스템 설정을 따르거나 직접 선택).
 
@@ -87,14 +102,14 @@
 
 **권장 사양**: Windows 10/11, RAM 16GB, Python 3.10 이상. GPU는 없어도 됩니다.
 
-1. **로컬 AI 엔진 설치**: [Ollama](https://ollama.com)를 설치한 뒤 모델을 받습니다.
+1. **로컬 AI 엔진 설치**: [Ollama](https://ollama.com)(0.22 이상)를 설치합니다. 모델은 프로그램의 **설정 → AI 모델**에서 받을 수 있고, 명령줄로 받아도 됩니다.
    ```bash
-   ollama pull gemma3:4b
+   ollama pull gemma4:e2b
    ```
    ```bash
-   ollama pull bge-m3
+   ollama pull embeddinggemma
    ```
-   > `bge-m3`는 선택 사항이며 의미 검색 정확도를 높여 줍니다. 더 가볍게 쓰려면 `gemma3:1b`도 됩니다. 설치된 Gemma 계열 모델(Gemma 4 포함)은 자동으로 선택되고, 설정에서 직접 지정할 수도 있습니다.
+   > `embeddinggemma`는 선택 사항이며 의미 검색 정확도를 높여 줍니다.
 
 2. **프로그램 설치**: `install.bat`을 실행합니다(가상환경을 만들고 필요한 패키지를 설치합니다).
 
@@ -126,7 +141,8 @@
 │  ├─ app.py          실행 진입점 (네이티브 창 / 브라우저 모드)
 │  ├─ api.py          화면에서 호출하는 기능 API, 작업(job) 관리
 │  ├─ server.py       127.0.0.1 전용 HTTP 브리지 (토큰 인증)
-│  ├─ llm.py          로컬 Ollama 클라이언트 (루프백 강제, 프록시 우회)
+│  ├─ llm.py          로컬 Ollama 클라이언트 (루프백 강제, 프록시 우회, 모델 받기·GGUF 등록)
+│  ├─ models.py       지원 모델 목록, PC 사양 확인과 모델 추천
 │  ├─ rag.py          조문 단위 분할, BM25와 임베딩 하이브리드 검색, 근거 기반 답변
 │  ├─ parsers.py      HWP, HWPX, PDF, DOCX, XLSX, HTML, TXT 텍스트 추출
 │  ├─ collector.py    공문 수집 (Playwright 브라우저 연동, URL, 파일), 붙임 다운로드

@@ -21,11 +21,46 @@ class FakeOllama(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    installed = ["gemma3:4b"]
+    blobs: set = set()
+
     def do_GET(self):
-        self._json({"models": [{"name": "gemma3:4b"}]})
+        self._json({"models": [{"name": n} for n in self.installed]})
+
+    def do_HEAD(self):
+        self.send_response(200 if self.path.split("/")[-1] in self.blobs else 404)
+        self.end_headers()
+
+    def do_DELETE(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.installed.remove(body["model"])
+        self._json({})
+
+    def _lines(self, objs):
+        self.send_response(200)
+        self.end_headers()
+        for o in objs:
+            self.wfile.write((json.dumps(o) + "\n").encode())
 
     def do_POST(self):
+        if self.path.startswith("/api/blobs/"):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.blobs.add(self.path.split("/")[-1])
+            self.send_response(201)
+            self.end_headers()
+            return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path == "/api/pull":
+            self.installed.append(body["model"])
+            return self._lines([{"status": "pulling manifest"}, {"status": "downloading", "total": 10, "completed": 10},
+                                {"status": "success"}])
+        if self.path == "/api/copy":
+            self.installed.append(body["destination"])
+            return self._json({})
+        if self.path == "/api/create":
+            assert all(d in self.blobs for d in body["files"].values())
+            self.installed.append(body["model"])
+            return self._lines([{"status": "success"}])
         if body.get("format"):
             self._json({"message": {"content": json.dumps({
                 "folder_name": "청렴 교육 행사 참여 요청", "summary": "청렴 교육 참여 인원 회신 요청",
@@ -72,6 +107,7 @@ def wait(a, job):
 
 
 def test_full_flow(api):
+    FakeOllama.installed[:] = ["gemma3:4b"]
     assert api.llm_status()["chat_model"] == "gemma3:4b"
     res = wait(api, api.reindex(False))
     assert res["added"] == 1
@@ -93,3 +129,31 @@ def test_full_flow(api):
     assert "청렴" in mail["subject"] and "참가 신청서" in mail["body"]
     assert wait(api, api.polish_mail(mail["body"]))["body"] == "다듬은 메일"
     assert Path(api.export_ics()).exists()
+
+
+def test_model_management(api, tmp_path):
+    FakeOllama.installed[:] = ["gemma3:4b"]
+    cat = api.model_catalog()
+    assert cat["engine_ok"] and cat["recommend"]["model"]
+    ids = [m["id"] for m in cat["models"]]
+    assert {"gemma4:e2b", "gemma4:e4b", "kanana-2:3b", "kanana-2:1.3b"} <= set(ids)
+    assert cat["others"] == ["gemma3:4b"]
+
+    cat = wait(api, api.pull_model("gemma4:e2b"))
+    assert next(m for m in cat["models"] if m["id"] == "gemma4:e2b")["installed"]
+    cat = api.use_model("gemma4:e2b")
+    assert cat["active_chat"] == "gemma4:e2b" and api.get_settings()["chat_model"] == "gemma4:e2b"
+
+    gguf = tmp_path / "kanana-2-3b-instruct-Q4_K_M.gguf"
+    gguf.write_bytes(b"GGUF" + b"0" * 100)
+    cat = wait(api, api.import_gguf(str(gguf), "kanana-2:3b"))
+    assert next(m for m in cat["models"] if m["id"] == "kanana-2:3b")["installed"]
+
+    cat = wait(api, api.pull_model("hf.co/someone/kanana-2-1.3b-GGUF:Q4_K_M", "kanana-2:1.3b"))
+    assert next(m for m in cat["models"] if m["id"] == "kanana-2:1.3b")["installed"]
+    assert "hf.co/someone/kanana-2-1.3b-GGUF:Q4_K_M" not in FakeOllama.installed
+
+    api.delete_model("gemma4:e2b")
+    assert api.get_settings()["chat_model"] == ""
+    with pytest.raises(ValueError):
+        api.import_gguf(str(tmp_path / "nope.txt"), "x")
