@@ -352,32 +352,69 @@ class Api:
         except Exception:
             return []
 
+    def _sync_tasks(self, nid: int, title: str, analysis: dict) -> None:
+        """공문에서 자동 등록한 '진행 중' 할 일을 분석 결과에 맞게 다시 만든다 (완료한 일은 유지)."""
+        tasks = [t for t in self._store.list_tasks() if t.get("notice_id") == nid]
+        done = {t["due"] for t in tasks if t.get("done")}
+        for t in tasks:
+            if not t.get("done"):
+                self._store.delete_task(t["id"])
+        label = analysis.get("folder_name") or title
+        for d in analysis.get("deadlines") or []:
+            if d["date"] in done:
+                continue
+            self._store.add_task(f"[{label}] {d['what'][:80]}",
+                                 detail=f"공문: {title}" + (f"\n시각: {d['time']}" if d.get("time") else ""),
+                                 due=d["date"], notice_id=nid)
+
     def _finish_capture(self, job: Job, cap: Captured, use_ai: bool) -> dict:
-        s = self._cfg.settings
-        job.message = "본문·붙임 문서를 분석하는 중… (로컬 AI)"
-        client = self._client() if use_ai else None
-        analysis = analyze(cap.title, cap.text, cap.files, client, s.chat_model, s.num_ctx)
+        """① 규칙 기반 분석으로 바로 저장·표시 → ② 로컬 AI 보완 분석은 백그라운드에서."""
+        job.message = "기한·제출물을 찾는 중…"
+        analysis = analyze(cap.title, cap.text, cap.files, None)
+        analysis["ai_status"] = "running" if use_ai else "off"
         folder = cap.folder
-        # AI가 제안한 짧은 폴더명으로 정리 (예: 20261104_OO행사 참여 요청)
-        want = safe_name(analysis.get("folder_name") or "", 60)
-        if want and want != "제목없음" and not folder.name.endswith(want):
-            new = unique_path(folder.with_name(f"{folder.name[:8]}_{want}"))
-            try:
-                folder.rename(new)
-                for f in cap.files:
-                    if f.get("path"):
-                        f["path"] = str(new / Path(f["path"]).relative_to(folder))
-                folder = new
-            except OSError:
-                pass
         (folder / "요약.md").write_text(summary_markdown(cap.title, cap.url, analysis, cap.files), encoding="utf-8")
         nid = self._store.add_notice(cap.title, cap.url, str(folder), cap.text, cap.files, analysis)
-        for d in analysis.get("deadlines") or []:
-            self._store.add_task(f"[{analysis.get('folder_name') or cap.title}] {d['what'][:80]}",
-                                 detail=f"공문: {cap.title}" + (f"\n시각: {d['time']}" if d.get("time") else ""),
-                                 due=d["date"], notice_id=nid)
+        self._sync_tasks(nid, cap.title, analysis)
+        if use_ai:
+            threading.Thread(target=self._ai_refine, args=(nid,), daemon=True, name="ai-refine").start()
         job.message = "완료"
         return self._store.get_notice(nid) or {}
+
+    def _ai_refine(self, nid: int) -> None:
+        """로컬 AI로 요약·제출물·할 일을 보완하고 할 일·요약.md를 갱신한다."""
+        n = self._store.get_notice(nid)
+        if not n:
+            return
+        s = self._cfg.settings
+        started = time.time()
+        a = analyze(n["title"], n["body"], n["attachments"], self._client(), s.chat_model, s.num_ctx)
+        if a.get("mode") == "llm":
+            a["ai_status"] = "done"
+        else:
+            a = dict(n.get("analysis") or a)
+            a["ai_status"] = "error"
+            a["llm_error"] = a.get("llm_error") or "AI 분석 실패"
+        a["ai_seconds"] = round(time.time() - started)
+        if not self._store.get_notice(nid):   # 그사이 삭제됨
+            return
+        self._store.update_notice_analysis(nid, a)
+        if a["ai_status"] == "done":
+            self._sync_tasks(nid, n["title"], a)
+        folder = Path(n["folder"])
+        if folder.exists():
+            (folder / "요약.md").write_text(summary_markdown(n["title"], n["source"], a, n["attachments"]),
+                                            encoding="utf-8")
+
+    def preload_model(self) -> None:
+        """앱 시작 시 답변 모델을 미리 메모리에 올려 첫 질문·분석을 빠르게 한다."""
+        def run():
+            try:
+                c = self._client()
+                c.preload(c.pick_chat_model(self._cfg.settings.chat_model))
+            except Exception:
+                pass
+        threading.Thread(target=run, daemon=True, name="preload").start()
 
     def capture_browser(self, page_index: int | None = None, title: str = "", use_ai: bool = True) -> dict:
         root = self._cfg.settings.resolved_download_root()
@@ -430,7 +467,8 @@ class Api:
 
         def work(job: Job):
             say = lambda m: setattr(job, "message", m)  # noqa: E731
-            text, how = winwindow.extract_text(win["hwnd"], say)
+            trace: list[str] = []
+            text, how = winwindow.extract_text(win["hwnd"], say, trace)
             win_title = win["title"]
             for suffix in (" - 온나라", " - 문서", " - Microsoft Edge", " - Chrome", " - Whale"):
                 win_title = win_title.replace(suffix, "")
@@ -442,7 +480,8 @@ class Api:
             listed = winwindow.attachment_names(win["hwnd"]) if winwindow.uia_available() else []
 
             watcher = winwindow.FileWatcher(winwindow.watch_dirs(), folder / "붙임")
-            state = winwindow.try_save_attachments(win["hwnd"], folder / "붙임", say) if winwindow.uia_available() else ""
+            state = winwindow.try_save_attachments(win["hwnd"], folder / "붙임", say, trace)
+            trace.append(f"붙임 저장 버튼: {state or '찾지 못함'}")
             # 본문을 못 읽었으면 사용자가 '본문복사'를 누를 수 있도록 클립보드도 감시
             clip_before = winwindow.get_clipboard()
             deadline = time.time() + max(20, int(wait_seconds))
@@ -465,6 +504,8 @@ class Api:
                     break
                 time.sleep(1.0)
             watcher.poll()
+            trace.append(f"본문: {how or '읽지 못함'} ({len(text)}자) / 모은 붙임 {len(watcher.collected)}개")
+            (folder / "수집기록.txt").write_text("\n".join(trace), encoding="utf-8")
             body = text or "(본문을 읽지 못했습니다. 본문_화면.png를 확인하세요.)"
             save_body(folder, name, body, "", f"창: {win['title']} ({win['process']})")
             files = list(watcher.collected)
@@ -498,12 +539,9 @@ class Api:
             s = self._cfg.settings
             a = analyze(n["title"], n["body"], n["attachments"], self._client(), s.chat_model, s.num_ctx)
             a["folder_name"] = (n.get("analysis") or {}).get("folder_name") or a.get("folder_name")
+            a["ai_status"] = "done" if a.get("mode") == "llm" else "error"
             self._store.update_notice_analysis(n["id"], a)
-            existing = {(t["due"], t["title"]) for t in self._store.list_tasks() if t.get("notice_id") == n["id"]}
-            for d in a.get("deadlines") or []:
-                title = f"[{a.get('folder_name') or n['title']}] {d['what'][:80]}"
-                if (d["date"], title) not in existing:
-                    self._store.add_task(title, f"공문: {n['title']}", d["date"], n["id"])
+            self._sync_tasks(n["id"], n["title"], a)
             folder = Path(n["folder"])
             if folder.exists():
                 (folder / "요약.md").write_text(summary_markdown(n["title"], n["source"], a, n["attachments"]),
@@ -606,6 +644,11 @@ class Api:
 
     # ------------------------------------------------------------ 종료
     def shutdown(self) -> None:
+        try:   # 앱을 닫으면 AI 모델이 차지하던 메모리를 바로 돌려준다
+            c = self._client()
+            c.unload(c.pick_chat_model(self._cfg.settings.chat_model))
+        except Exception:
+            pass
         if self._browser:
             self._browser.close()
         self._store.close()

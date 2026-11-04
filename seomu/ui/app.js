@@ -207,6 +207,7 @@ function noticeRow(n) {
   return `<li class="clickable" data-notice="${n.id}"><div class="notice-icon">${svg("doc")}</div>
     <div class="main-col"><div class="t">${esc(a.folder_name || n.title)}</div>
     <div class="s">${relTime(n.created_at)} · 붙임 ${okFiles}건${next ? " · 기한 " + fmtDate(next.date, false) : ""}</div></div>
+    ${a.ai_status === "running" ? '<span class="badge purple">AI 분석 중</span>' : ""}
     ${next ? ddayBadge(dd) : ""}</li>`;
 }
 
@@ -276,6 +277,7 @@ async function loadNotices() {
   state.notices = await api("list_notices");
   $("#notice-count").textContent = state.notices.length ? `${state.notices.length}건` : "";
   $("#badge-notices").textContent = state.notices.length || "";
+  state.notices.filter((n) => (n.analysis || {}).ai_status === "running").forEach((n) => watchAI(n.id));
   $("#notice-list").innerHTML = state.notices.length ? state.notices.map(noticeRow).join("")
     : `<li class="empty">아직 수집한 공문이 없습니다. 위에서 공문을 수집해 보세요.</li>`;
   if ($("#collect-mode button.on")?.dataset.v === "window") loadWindows();
@@ -305,7 +307,9 @@ async function doCollect(name, args) {
     });
     hud(false);
     const a = notice.analysis || {};
-    toast(`정리 완료: ${a.folder_name || notice.title} · 기한 ${(a.deadlines || []).length}건 등록`, "ok");
+    toast(`정리 완료: ${a.folder_name || notice.title} · 기한 ${(a.deadlines || []).length}건 등록` +
+      (a.ai_status === "running" ? " · 로컬 AI가 이어서 자세히 분석합니다" : ""), "ok", 5000);
+    if (a.ai_status === "running") watchAI(notice.id);
     await loadNotices();
     openNotice(notice.id);
   } catch (e) { hud(false); toast(e.message, "err", 6000); }
@@ -350,7 +354,9 @@ async function openNotice(id) {
   currentNotice = n;
   const a = n.analysis || {};
   $("#nd-title").textContent = a.folder_name || n.title;
-  $("#nd-date").textContent = `${n.created_at.replace("T", " ").slice(0, 16)} 수집 · ${a.mode === "llm" ? "로컬 AI 분석 (" + (a.model || "") + ")" : "규칙 기반 분석"}`;
+  const how = a.ai_status === "running" ? "규칙 기반 분석 · 로컬 AI가 보완 분석 중…"
+    : a.mode === "llm" ? `로컬 AI 분석 (${a.model || ""}${a.ai_seconds ? ", " + a.ai_seconds + "초" : ""})` : "규칙 기반 분석";
+  $("#nd-date").textContent = `${n.created_at.replace("T", " ").slice(0, 16)} 수집 · ${how}`;
   const today = new Date(new Date().toDateString());
   const dls = (a.deadlines || []).map((d) => {
     const dt = new Date(d.date + "T00:00:00");
@@ -379,8 +385,30 @@ async function openNotice(id) {
     ${a.llm_error ? `<div class="section muted small">AI 분석 불가로 규칙 기반 결과를 표시합니다: ${esc(a.llm_error)}</div>` : ""}
     <details class="raw"><summary>본문 원문 보기</summary><pre>${esc(n.body || "")}</pre></details>`;
   $("#sheet").classList.remove("hidden");
+  if (a.ai_status === "running") watchAI(n.id);
 }
 function closeSheet() { $("#sheet").classList.add("hidden"); }
+
+// 백그라운드 AI 분석이 끝나면 화면 갱신
+const aiWatching = new Set();
+async function watchAI(id) {
+  if (aiWatching.has(id)) return;
+  aiWatching.add(id);
+  try {
+    for (let i = 0; i < 400; i++) {          // 최대 약 20분
+      await sleep(3000);
+      const n = await api("get_notice", id);
+      if (!n) return;
+      const st = (n.analysis || {}).ai_status;
+      if (st === "running") continue;
+      if (st === "done") toast(`AI 분석 완료: ${(n.analysis || {}).folder_name || n.title}`, "ok");
+      else toast(`AI 분석을 하지 못해 규칙 기반 결과를 유지합니다: ${(n.analysis || {}).llm_error || ""}`, "err", 7000);
+      loadNotices(); loadHome();
+      if (currentNotice && currentNotice.id === id && !$("#sheet").classList.contains("hidden")) openNotice(id);
+      return;
+    }
+  } finally { aiWatching.delete(id); }
+}
 
 // ------------------------------------------------------------------ 할 일
 async function loadTasks() {

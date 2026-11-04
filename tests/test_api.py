@@ -121,7 +121,15 @@ def test_full_flow(api):
     assert folder.name.endswith("청렴 교육 행사 참여 요청")
     assert (folder / "요약.md").exists() and (folder / "붙임" / "참가신청서.txt").exists()
     assert n["analysis"]["deadlines"][0]["date"] == "2026-11-13"
+    assert n["analysis"]["ai_status"] == "running"          # 규칙 기반 결과는 즉시, AI는 백그라운드
+    for _ in range(100):
+        a = api.get_notice(n["id"])["analysis"]
+        if a["ai_status"] != "running":
+            break
+        time.sleep(0.05)
+    assert a["ai_status"] == "done" and a["mode"] == "llm" and a["summary"] == "청렴 교육 참여 인원 회신 요청"
     tasks = api.list_tasks()
+    assert sum(1 for t in tasks if t["due"] == "2026-11-13" and t["notice_id"] == n["id"]) == 1   # 중복 없음
     assert any(t["due"] == "2026-11-13" for t in tasks)
 
     tpl = api.list_templates()["templates"][0]
@@ -181,7 +189,7 @@ def test_capture_window_simulated(api, tmp_path, monkeypatch):
     monkeypatch.setattr(winwindow, "available", lambda: True)
     monkeypatch.setattr(winwindow, "uia_available", lambda: False)
     monkeypatch.setattr(winwindow, "list_windows", lambda: [win])
-    monkeypatch.setattr(winwindow, "extract_text", lambda h, log=None: (body, "본문복사 버튼"))
+    monkeypatch.setattr(winwindow, "extract_text", lambda h, log=None, trace=None: (body, "본문복사 버튼"))
     monkeypatch.setattr(winwindow, "save_window_image", lambda h, p: False)
     monkeypatch.setattr(winwindow, "get_clipboard", lambda: "")
     monkeypatch.setattr(winwindow, "watch_dirs", lambda extra=None: [dl])
@@ -202,3 +210,4 @@ def test_capture_window_simulated(api, tmp_path, monkeypatch):
     assert not (dl / "계약심의위원회 운영 내규.hwp").exists()   # 다운로드 폴더에서 옮겨 정리
     assert [d["date"] for d in n["analysis"]["deadlines"]] == ["2026-11-13", "2026-11-27", "2026-12-28"]
     assert n["capture_method"] == "본문복사 버튼"
+    assert (folder / "수집기록.txt").exists()

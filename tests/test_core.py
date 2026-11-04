@@ -184,3 +184,10 @@ def test_png_writer(tmp_path):
     p = tmp_path / "a.png"
     _png(p, 2, 1, bytes([0, 0, 255, 255, 255, 0, 0, 255]))
     assert p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_trim_body_keeps_deadline_lines():
+    from seomu.analyzer import trim_body
+    body = "\n".join(["본문 내용 " * 20] * 40) + "\n제출 기한: 2026. 12. 1.까지 회신"
+    out = trim_body(body, 3000)
+    assert len(out) <= 3100 and "2026. 12. 1.까지" in out

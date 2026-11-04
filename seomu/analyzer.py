@@ -49,7 +49,7 @@ PROMPT = """다음은 공공기관에서 받은 공문 본문과 붙임 문서 �
 """
 
 
-def read_attachments(files: list[dict], max_files: int = 4, max_chars: int = 1500) -> list[dict]:
+def read_attachments(files: list[dict], max_files: int = 2, max_chars: int = 700) -> list[dict]:
     out = []
     for f in files:
         if not f.get("ok") or not f.get("path"):
@@ -65,6 +65,19 @@ def read_attachments(files: list[dict], max_files: int = 4, max_chars: int = 150
         if len(out) >= max_files:
             break
     return out
+
+
+def trim_body(body: str, limit: int = 3000) -> str:
+    """공문 본문을 limit자 안으로 줄인다: 빈 줄·결재란 등 군더더기를 빼고 앞부분(핵심)을 남긴다."""
+    lines = [re.sub(r"[ \t]+", " ", l).strip() for l in body.splitlines()]
+    lines = [l for l in lines if l and not re.fullmatch(r"[-=_·.\s]+", l)]
+    text = "\n".join(lines)
+    if len(text) <= limit:
+        return text
+    # 기한·제출과 관련된 줄은 뒤쪽에 있어도 살린다
+    head = text[: int(limit * 0.75)]
+    key = [l for l in lines[len(head.splitlines()):] if re.search(r"(까지|기한|제출|회신|붙임|문의)", l)]
+    return head + "\n…\n" + "\n".join(key)[: limit - len(head)]
 
 
 def _norm_date(s: str) -> str | None:
@@ -109,9 +122,10 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
     try:
         model = client.pick_chat_model(chat_model)
         attach_txt = "\n\n".join(f"<{a['name']}>\n{a['text']}" for a in attach) or "(없음)"
-        prompt = PROMPT.format(today=ref.isoformat(), body=body[:7000], attach=attach_txt[:5000])
+        # CPU에서는 '입력 읽기'가 가장 오래 걸리므로 본문 핵심과 붙임 발췌만 넣는다
+        prompt = PROMPT.format(today=ref.isoformat(), body=trim_body(body, 3000), attach=attach_txt[:1400])
         raw = client.chat([{"role": "user", "content": prompt}], model, temperature=0.1,
-                          num_ctx=num_ctx, fmt=SCHEMA)
+                          num_ctx=min(num_ctx, 6144), fmt=SCHEMA)
         data = extract_json(raw)
         if not isinstance(data, dict):
             raise LLMError("AI 응답을 해석할 수 없습니다")

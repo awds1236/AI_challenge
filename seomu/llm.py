@@ -37,10 +37,11 @@ _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 class OllamaClient:
     def __init__(self, base_url: str = "http://127.0.0.1:11434", allow_remote: bool = False,
-                 timeout: float = 600.0):
+                 timeout: float = 900.0, keep_alive: str = "30m"):
         self.base_url = base_url.rstrip("/")
         self.allow_remote = allow_remote
         self.timeout = timeout
+        self.keep_alive = keep_alive   # 사용 후에도 모델을 메모리에 유지 (다음 요청 시 다시 불러오지 않음)
 
     # ---------- 저수준 ----------
     def _check(self) -> None:
@@ -125,6 +126,7 @@ class OllamaClient:
             "messages": messages,
             "stream": on_token is not None,
             "options": {"temperature": temperature, "num_ctx": num_ctx},
+            "keep_alive": self.keep_alive,
         }
         if fmt:
             payload["format"] = fmt
@@ -150,6 +152,13 @@ class OllamaClient:
                 if obj.get("done"):
                     break
         return "".join(out)
+
+    def preload(self, model: str) -> None:
+        """모델을 미리 메모리에 올린다 (프롬프트 없이 요청하면 로드만 한다)."""
+        self._json("/api/generate", {"model": model, "keep_alive": self.keep_alive}, timeout=600)
+
+    def unload(self, model: str) -> None:
+        self._json("/api/generate", {"model": model, "keep_alive": 0}, timeout=5)
 
     # ---------- 모델 관리 ----------
     def _stream(self, path: str, payload: dict, on_progress: Callable[[dict], None] | None,

@@ -70,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     api = Api()
+    api.preload_model()          # 답변 모델을 미리 메모리에 올려 첫 분석·질문을 빠르게
     httpd, url = start_server(api, args.port)
 
     try:

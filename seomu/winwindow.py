@@ -99,6 +99,37 @@ if IS_WIN:
     IDOK = 1
     VK_CONTROL, VK_MENU = 0x11, 0x12
     KEYEVENTF_KEYUP = 0x0002
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE = 0x0201, 0x0202, 0x0200
+    BM_CLICK = 0x00F5
+    TB_GETBUTTON, TB_BUTTONCOUNT, TB_GETITEMRECT, TB_GETBUTTONTEXTW = 0x0417, 0x0418, 0x041D, 0x044B
+
+    user32.PostMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM]
+    user32.GetParent.argtypes = [wintypes.HWND]
+    user32.GetParent.restype = wintypes.HWND
+    user32.GetAncestor.argtypes = [wintypes.HWND, ctypes.c_uint]
+    user32.GetAncestor.restype = wintypes.HWND
+    user32.EnumChildWindows.argtypes = [wintypes.HWND, WNDENUMPROC, wintypes.LPARAM]
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+    user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+    kernel32.VirtualAllocEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t, wintypes.DWORD,
+                                        wintypes.DWORD]
+    kernel32.VirtualAllocEx.restype = wintypes.LPVOID
+    kernel32.VirtualFreeEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t, wintypes.DWORD]
+    kernel32.ReadProcessMemory.argtypes = [wintypes.HANDLE, wintypes.LPCVOID, wintypes.LPVOID, ctypes.c_size_t,
+                                           ctypes.POINTER(ctypes.c_size_t)]
+    kernel32.IsWow64Process.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    kernel32.GlobalSize.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalSize.restype = ctypes.c_size_t
+
+    # 고해상도 화면에서 좌표·캡처가 어긋나지 않도록 DPI 인식 설정
+    try:
+        user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except Exception:
+        try:
+            ctypes.WinDLL("shcore").SetProcessDpiAwareness(2)
+        except Exception:
+            pass
 
 
 def _text(hwnd) -> str:
@@ -171,14 +202,31 @@ def list_windows() -> list[dict]:
     return out
 
 
-def activate(hwnd: int) -> None:
+def activate(hwnd: int) -> bool:
+    """창을 맨 앞으로 가져온다. Windows의 포그라운드 전환 제한을 우회한다."""
     if user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-    # 포그라운드 전환 제한 우회: Alt 키를 한 번 눌렀다 뗀다
+    fg = user32.GetForegroundWindow()
+    if int(fg or 0) == int(hwnd):
+        return True
+    cur_tid = kernel32.GetCurrentThreadId()
+    fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+    target_tid = user32.GetWindowThreadProcessId(hwnd, None)
     user32.keybd_event(VK_MENU, 0, 0, 0)
     user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
-    user32.SetForegroundWindow(hwnd)
+    attached = []
+    for tid in {fg_tid, target_tid}:
+        if tid and tid != cur_tid and user32.AttachThreadInput(cur_tid, tid, True):
+            attached.append(tid)
+    try:
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.SetFocus(hwnd)
+    finally:
+        for tid in attached:
+            user32.AttachThreadInput(cur_tid, tid, False)
     time.sleep(0.4)
+    return int(user32.GetForegroundWindow() or 0) == int(hwnd)
 
 
 # ---------------------------------------------------------------- 클립보드
@@ -193,13 +241,27 @@ def get_clipboard() -> str:
         return ""
     try:
         h = user32.GetClipboardData(CF_UNICODETEXT)
-        if not h:
-            return ""
-        p = kernel32.GlobalLock(h)
-        try:
-            return ctypes.wstring_at(p) if p else ""
-        finally:
-            kernel32.GlobalUnlock(h)
+        if h:
+            p = kernel32.GlobalLock(h)
+            try:
+                if p:
+                    return ctypes.wstring_at(p)
+            finally:
+                kernel32.GlobalUnlock(h)
+        # 일부 프로그램은 텍스트 없이 HTML 형식으로만 복사한다
+        fmt = user32.RegisterClipboardFormatW("HTML Format")
+        h = user32.GetClipboardData(fmt) if fmt else None
+        if h:
+            p = kernel32.GlobalLock(h)
+            try:
+                raw = ctypes.string_at(p, kernel32.GlobalSize(h)) if p else b""
+            finally:
+                kernel32.GlobalUnlock(h)
+            html = raw.split(b"\x00", 1)[0].decode("utf-8", "ignore")
+            i = html.find("<")
+            from .parsers import html_to_text
+            return html_to_text(html[i:]) if i >= 0 else ""
+        return ""
     finally:
         user32.CloseClipboard()
 
@@ -252,14 +314,38 @@ def _png(path: Path, width: int, height: int, bgra: bytes) -> None:
                      + chunk(b"IDAT", raw) + chunk(b"IEND", b""))
 
 
-def save_window_image(hwnd: int, path: Path) -> bool:
-    if not IS_WIN:
+def save_window_image(hwnd: int, path: Path, crop: tuple[float, float] | None = None, scale: int = 1) -> bool:
+    """창을 PNG로 저장. crop=(위쪽 비율, 아래쪽 비율)로 세로 일부만, scale배 확대 가능."""
+    grab = _grab(hwnd)
+    if not grab:
         return False
+    w, h, data = grab
+    if crop:
+        y0, y1 = int(h * crop[0]), max(int(h * crop[0]) + 1, int(h * crop[1]))
+        data, h = data[y0 * w * 4:y1 * w * 4], y1 - y0
+    if scale > 1:
+        rows = []
+        for y in range(h):
+            row = data[y * w * 4:(y + 1) * w * 4]
+            wide = b"".join(row[x * 4:x * 4 + 4] * scale for x in range(w))
+            rows.extend([wide] * scale)
+        data, w, h = b"".join(rows), w * scale, h * scale
+    try:
+        _png(path, w, h, data)
+        return True
+    except OSError:
+        return False
+
+
+def _grab(hwnd: int):
+    """(너비, 높이, BGRA 바이트) — 창이 가려져 있어도 PrintWindow로 그린다."""
+    if not IS_WIN:
+        return None
     rect = wintypes.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(rect))
     w, h = rect.right - rect.left, rect.bottom - rect.top
     if w <= 0 or h <= 0:
-        return False
+        return None
     hdc = user32.GetWindowDC(hwnd)
     mdc = gdi32.CreateCompatibleDC(hdc)
     bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
@@ -278,10 +364,9 @@ def save_window_image(hwnd: int, path: Path) -> bool:
         bi.biWidth, bi.biHeight, bi.biPlanes, bi.biBitCount = w, -h, 1, 32
         buf = ctypes.create_string_buffer(w * h * 4)
         gdi32.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(bi), 0)
-        _png(path, w, h, buf.raw)
-        return True
+        return w, h, buf.raw
     except Exception:
-        return False
+        return None
     finally:
         gdi32.SelectObject(mdc, old)
         gdi32.DeleteObject(bmp)
@@ -394,43 +479,348 @@ def attachment_names(hwnd: int) -> list[str]:
     return list(dict.fromkeys(n for n in names if n))[:30]
 
 
-def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None) -> tuple[str, str]:
-    """(본문, 사용한 방법)"""
+# ---------------------------------------------------------------- 일반 Win32 컨트롤 (추가 패키지 불필요)
+def _norm(s: str) -> str:
+    return "".join(ch for ch in (s or "") if not ch.isspace() and ch not in "&.…").lower()
+
+
+def _matches(text: str, names: tuple[str, ...]) -> bool:
+    t = _norm(text)
+    return bool(t) and any(_norm(n) in t for n in names)
+
+
+def children(hwnd: int) -> list[int]:
+    out: list[int] = []
+
+    def cb(h, _):
+        out.append(int(h))
+        return True
+
+    user32.EnumChildWindows(hwnd, WNDENUMPROC(cb), 0)
+    return out
+
+
+def _rect(hwnd: int) -> tuple[int, int, int, int]:
+    r = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(r))
+    return r.left, r.top, r.right, r.bottom
+
+
+def toolbar_buttons(hwnd: int) -> list[dict]:
+    """창 안의 표준 도구모음(ToolbarWindow32) 버튼 목록: 글자, 명령 ID, 위치."""
+    out: list[dict] = []
+    is64 = sys.maxsize > 2**32
+    for tb in children(hwnd):
+        if _class(tb) != "ToolbarWindow32" or not user32.IsWindowVisible(tb):
+            continue
+        h = kernel32.OpenProcess(0x0008 | 0x0010 | 0x0020 | 0x0400, False, _pid(tb))
+        if not h:
+            continue
+        mem = None
+        try:
+            wow = wintypes.BOOL()
+            kernel32.IsWow64Process(h, ctypes.byref(wow))
+            size = 20 if (wow.value or not is64) else 32       # TBBUTTON 크기 (32/64비트 프로그램)
+            mem = kernel32.VirtualAllocEx(h, None, 4096, 0x3000, 0x04)
+            if not mem:
+                continue
+            got = ctypes.c_size_t()
+            n = user32.SendMessageW(tb, TB_BUTTONCOUNT, 0, 0)
+            for i in range(min(int(n), 200)):
+                if not user32.SendMessageW(tb, TB_GETBUTTON, i, mem):
+                    continue
+                raw = ctypes.create_string_buffer(size)
+                kernel32.ReadProcessMemory(h, mem, raw, size, ctypes.byref(got))
+                cmd = struct.unpack_from("<i", raw.raw, 4)[0]
+                if raw.raw[9] & 0x01:          # 구분선
+                    continue
+                text = ""
+                ln = user32.SendMessageW(tb, TB_GETBUTTONTEXTW, cmd, mem)
+                if 0 < ln < 1000:
+                    tbuf = ctypes.create_string_buffer((ln + 1) * 2)
+                    kernel32.ReadProcessMemory(h, mem, tbuf, (ln + 1) * 2, ctypes.byref(got))
+                    text = tbuf.raw.decode("utf-16-le", "ignore").split("\x00", 1)[0]
+                rect = (0, 0, 0, 0)
+                if user32.SendMessageW(tb, TB_GETITEMRECT, i, mem):
+                    rb = ctypes.create_string_buffer(16)
+                    kernel32.ReadProcessMemory(h, mem, rb, 16, ctypes.byref(got))
+                    rect = struct.unpack("<4i", rb.raw)
+                out.append({"tb": tb, "index": i, "cmd": cmd, "text": text, "rect": rect})
+        except Exception:
+            continue
+        finally:
+            if mem:
+                kernel32.VirtualFreeEx(h, mem, 0, 0x8000)
+            kernel32.CloseHandle(h)
+    return out
+
+
+def _lparam(x: int, y: int) -> int:
+    return (y & 0xFFFF) << 16 | (x & 0xFFFF)
+
+
+def real_click(x: int, y: int) -> None:
+    """실제 마우스 클릭(화면 좌표). 끝나면 마우스를 원래 위치로 돌려놓는다."""
+    old = wintypes.POINT()
+    user32.GetCursorPos(ctypes.byref(old))
+    user32.SetCursorPos(int(x), int(y))
+    time.sleep(0.05)
+    user32.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
+    time.sleep(0.05)
+    user32.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
+    time.sleep(0.05)
+    user32.SetCursorPos(old.x, old.y)
+
+
+def _wait(check: Callable[[], bool] | None, seconds: float) -> bool:
+    if check is None:
+        return True
+    end = time.time() + seconds
+    while time.time() < end:
+        if check():
+            return True
+        time.sleep(0.15)
+    return False
+
+
+# ---------------------------------------------------------------- Windows 내장 OCR (PowerShell + WinRT)
+_OCR_PS = r"""
+param([string]$Path)
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
+$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
+$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics, ContentType = WindowsRuntime]
+$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+  $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+  $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+function Await($op, $type) { $t = $asTask.MakeGenericMethod($type).Invoke($null, @($op)); $t.Wait(-1) | Out-Null; $t.Result }
+$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Path)) ([Windows.Storage.StorageFile])
+$stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+$dec = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+$bmp = Await ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage((New-Object Windows.Globalization.Language 'ko'))
+if ($engine -eq $null) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
+if ($engine -eq $null) { Write-Output '[]'; exit }
+$res = Await ($engine.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])
+$lines = @()
+foreach ($l in $res.Lines) {
+  $r = $l.Words | ForEach-Object { $_.BoundingRect }
+  $x = ($r | Measure-Object -Property X -Minimum).Minimum
+  $y = ($r | Measure-Object -Property Y -Minimum).Minimum
+  $x2 = ($r | ForEach-Object { $_.X + $_.Width } | Measure-Object -Maximum).Maximum
+  $y2 = ($r | ForEach-Object { $_.Y + $_.Height } | Measure-Object -Maximum).Maximum
+  $words = @($l.Words | ForEach-Object { @{ t = $_.Text; x = $_.BoundingRect.X; y = $_.BoundingRect.Y;
+             w = $_.BoundingRect.Width; h = $_.BoundingRect.Height } })
+  $lines += @{ text = $l.Text; x = $x; y = $y; w = $x2 - $x; h = $y2 - $y; words = $words }
+}
+ConvertTo-Json -InputObject @($lines) -Depth 5 -Compress
+"""
+
+
+def ocr_image(path: Path, timeout: float = 60) -> list[dict]:
+    """Windows 내장 OCR로 이미지의 글자 줄을 읽는다. [{text,x,y,w,h,words}] (인터넷 불필요)"""
+    if not IS_WIN:
+        return []
+    import json
+    import subprocess
+    import tempfile
+    script = Path(tempfile.gettempdir()) / "seomu_ocr.ps1"
+    try:
+        script.write_text(_OCR_PS, encoding="utf-8-sig")
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                              "-File", str(script), str(path)], capture_output=True, timeout=timeout,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        txt = out.stdout.decode("utf-8", "ignore").strip()
+        data = json.loads(txt) if txt.startswith("[") else []
+        return data if isinstance(data, list) else [data]
+    except Exception:
+        return []
+
+
+def _ocr_find(hwnd: int, names: tuple[str, ...]) -> tuple[int, int] | None:
+    """창 위쪽(도구모음)을 2배 확대해 OCR한 뒤 버튼 글자의 화면 좌표를 찾는다."""
+    import tempfile
+    left, top, right, bottom = _rect(hwnd)
+    img = Path(tempfile.gettempdir()) / "seomu_toolbar.png"
+    if not save_window_image(hwnd, img, crop=(0.0, 0.18), scale=2):
+        return None
+    targets = [_norm(n) for n in names]
+    for line in ocr_image(img, timeout=40):
+        words = line.get("words") or []
+        joined = ""
+        for i, w in enumerate(words):        # 띄어 쓴 단어("본문 복사")도 이어 붙여 비교
+            joined = _norm(w.get("t", ""))
+            for j in range(i, min(i + 3, len(words))):
+                if j > i:
+                    joined += _norm(words[j].get("t", ""))
+                if any(t in joined for t in targets):
+                    x0 = words[i]["x"]
+                    x1 = words[j]["x"] + words[j]["w"]
+                    y = (words[i]["y"] + words[i]["h"] / 2)
+                    return int(left + (x0 + x1) / 4), int(top + y / 2)
+        if any(t in _norm(line.get("text", "")) for t in targets):
+            return int(left + (line["x"] + line["w"] / 2) / 2), int(top + (line["y"] + line["h"] / 2) / 2)
+    return None
+
+
+def ocr_body(hwnd: int, image: Path | None = None) -> str:
+    """최후 수단: 창 화면을 OCR해 본문 글자를 읽는다 (화면에 보이는 부분만)."""
+    import tempfile
+    img = image or Path(tempfile.gettempdir()) / "seomu_body.png"
+    if image is None and not save_window_image(hwnd, img):
+        return ""
+    lines = ocr_image(img)
+    if not lines:
+        return ""
+    long_lines = [l for l in lines if len(l.get("text", "")) >= 12]
+    if long_lines:   # 본문 단(段)의 좌우 범위 안의 줄만 남겨 도구모음·옆 패널 글자를 뺀다
+        x0 = min(l["x"] for l in long_lines) - 60
+        x1 = max(l["x"] + l["w"] for l in long_lines) + 60
+        y0 = min(l["y"] for l in long_lines) - 80
+        lines = [l for l in lines if l["x"] >= x0 and l["x"] + l["w"] <= x1 and l["y"] >= y0]
+    lines.sort(key=lambda l: (round(l["y"] / 8), l["x"]))
+    return "\n".join(l["text"] for l in lines).strip()
+
+
+# ---------------------------------------------------------------- 버튼 누르기 (여러 방법 순서대로)
+def click_any(hwnd: int, names: tuple[str, ...], check: Callable[[], bool] | None = None,
+              log: Callable[[str], None] = lambda m: None, trace: list | None = None,
+              use_ocr: bool = True) -> str:
+    """이름이 맞는 버튼을 누르고 check()가 참이 되면 사용한 방법을 돌려준다. 실패 시 ""."""
+    trace = trace if trace is not None else []
+    if not IS_WIN:
+        return ""
+    # ① 표준 도구모음 버튼
+    buttons = toolbar_buttons(hwnd)
+    trace.append(f"도구모음 버튼 {len(buttons)}개: " + ", ".join(b["text"] for b in buttons if b["text"])[:300])
+    for b in buttons:
+        if not _matches(b["text"], names):
+            continue
+        l, t, r, bt = b["rect"]
+        x, y = (l + r) // 2, (t + bt) // 2
+        user32.PostMessageW(b["tb"], WM_MOUSEMOVE, 0, _lparam(x, y))
+        user32.PostMessageW(b["tb"], WM_LBUTTONDOWN, 1, _lparam(x, y))
+        user32.PostMessageW(b["tb"], WM_LBUTTONUP, 0, _lparam(x, y))
+        if _wait(check, 2.5):
+            return f"도구모음 '{b['text']}' 클릭"
+        root = user32.GetAncestor(b["tb"], 2)  # GA_ROOT
+        for target in (user32.GetParent(b["tb"]), root):
+            user32.PostMessageW(target, WM_COMMAND, b["cmd"] & 0xFFFF, b["tb"])
+            if _wait(check, 2.0):
+                return f"도구모음 '{b['text']}' 명령"
+        trace.append(f"'{b['text']}' 버튼을 눌렀지만 반응 없음")
+    # ② 일반 버튼 컨트롤
+    for c in children(hwnd):
+        if "button" in _class(c).lower() and _matches(_text(c), names):
+            user32.PostMessageW(c, BM_CLICK, 0, 0)
+            if _wait(check, 2.5):
+                return f"버튼 '{_text(c)}'"
+    # ③ UI Automation
+    if uia_available():
+        try:
+            if click_named(hwnd, names) and _wait(check, 2.5):
+                return "UI Automation"
+            trace.append("UI Automation: 버튼을 찾지 못함")
+        except Exception as e:
+            trace.append(f"UI Automation 오류: {e}")
+    else:
+        trace.append("UI Automation: uiautomation 패키지 없음")
+    # ④ 화면 글자 인식(OCR)으로 버튼 위치를 찾아 실제 클릭
+    if use_ocr:
+        log(f"화면에서 '{names[0]}' 버튼 글자를 찾는 중… (글자 인식)")
+        pos = _ocr_find(hwnd, names)
+        trace.append(f"OCR 버튼 위치: {pos}")
+        if pos:
+            activate(hwnd)
+            real_click(*pos)
+            if _wait(check, 3.0):
+                return "글자 인식 후 클릭"
+    return ""
+
+
+def _largest_child(hwnd: int) -> int:
+    best, area = 0, 0
+    for c in children(hwnd):
+        if not user32.IsWindowVisible(c) or _class(c) in ("ToolbarWindow32", "ReBarWindow32", "msctls_statusbar32"):
+            continue
+        l, t, r, b = _rect(c)
+        a = max(0, r - l) * max(0, b - t)
+        if a > area:
+            best, area = c, a
+    return best
+
+
+def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
+                 trace: list | None = None) -> tuple[str, str]:
+    """(본문, 사용한 방법). trace에 단계별 기록을 남긴다."""
+    trace = trace if trace is not None else []
     if not IS_WIN:
         return "", ""
     previous = get_clipboard()
     marker = f"__seomu_{time.time()}__"
-    set_clipboard(marker)
+
+    def fresh() -> str:
+        t = get_clipboard()
+        return t if t and t != marker and len(t.strip()) > 20 else ""
+
     try:
+        trace.append(f"창 맨 앞으로: {activate(hwnd)}")
+        # ① 본문복사 버튼 (여러 방법)
+        log("뷰어의 '본문복사' 버튼을 누르는 중…")
+        set_clipboard(marker)
+        how = click_any(hwnd, BODY_COPY_NAMES, check=lambda: bool(fresh()), log=log, trace=trace)
+        if how:
+            return fresh(), f"본문복사 ({how})"
+        # ② UI Automation 글자 읽기
+        if uia_available():
+            log("화면의 글자 정보를 읽는 중…")
+            t = uia_text(hwnd)
+            trace.append(f"UI Automation 글자: {len(t)}자")
+            if len(t) > 80:
+                return t, "화면 글자 정보"
+        # ③ 문서 영역 클릭 후 Ctrl+A / Ctrl+C
+        log("문서를 전체 선택·복사하는 중…")
+        set_clipboard(marker)
         activate(hwnd)
-        # ① 본문복사 버튼
-        log("뷰어의 '본문복사' 버튼을 찾는 중…")
-        if click_named(hwnd, BODY_COPY_NAMES):
-            for _ in range(20):
-                time.sleep(0.15)
-                t = get_clipboard()
-                if t and t != marker and len(t.strip()) > 20:
-                    return t, "본문복사 버튼"
-        # ② UI Automation
-        log("화면의 글자를 읽는 중…")
-        t = uia_text(hwnd)
-        if len(t) > 80:
-            return t, "화면 글자 읽기"
-        # ③ Ctrl+A / Ctrl+C
-        log("전체 선택·복사로 읽는 중…")
-        activate(hwnd)
+        doc = _largest_child(hwnd) or hwnd
+        l, t, r, b = _rect(doc)
+        if r - l > 50 and b - t > 50:
+            real_click((l + r) // 2, t + (b - t) // 3)
+            time.sleep(0.2)
         _hotkey(VK_CONTROL, 0x41)
-        time.sleep(0.2)
+        time.sleep(0.3)
         _hotkey(VK_CONTROL, 0x43)
-        for _ in range(15):
-            time.sleep(0.15)
-            t = get_clipboard()
-            if t and t != marker and len(t.strip()) > 20:
-                return t, "전체 선택·복사"
+        if _wait(lambda: bool(fresh()), 2.5):
+            return fresh(), "전체 선택·복사"
+        trace.append(f"전체 선택·복사 실패 (문서 영역 클래스: {_class(doc)})")
+        # ④ 화면 OCR
+        log("화면 글자 인식(OCR)으로 본문을 읽는 중…")
+        t = ocr_body(hwnd)
+        trace.append(f"OCR 본문: {len(t)}자")
+        if len(t) > 80:
+            return t, "화면 글자 인식(OCR) — 보이는 부분만"
         return "", ""
     finally:
         if previous:
             set_clipboard(previous)
+
+
+def diagnose(hwnd: int) -> str:
+    """수집이 안 될 때 뷰어 구조를 확인하는 진단 보고서."""
+    lines = [f"창: {_text(hwnd)}", f"클래스: {_class(hwnd)} / 프로세스: {_process_name(_pid(hwnd))}",
+             f"UI Automation 사용 가능: {uia_available()}"]
+    from collections import Counter
+    kids = children(hwnd)
+    lines.append(f"하위 창 {len(kids)}개: " + ", ".join(f"{k}×{v}" for k, v in Counter(_class(c) for c in kids).most_common(25)))
+    for c in kids:
+        t = _text(c)
+        if t:
+            lines.append(f"  - [{_class(c)}] {t[:60]}")
+    for b in toolbar_buttons(hwnd):
+        lines.append(f"  도구모음 버튼: '{b['text']}' (명령 {b['cmd']}, 위치 {b['rect']})")
+    return "\n".join(lines)
 
 
 def _dialogs_of(pid: int) -> list[int]:
@@ -459,7 +849,8 @@ def _find_edit(hwnd) -> int:
     return 0
 
 
-def try_save_attachments(hwnd: int, folder: Path, log: Callable[[str], None] = lambda m: None) -> str:
+def try_save_attachments(hwnd: int, folder: Path, log: Callable[[str], None] = lambda m: None,
+                         trace: list | None = None) -> str:
     """'PC저장'/'붙임문서' 버튼을 누르고, 저장 대화상자가 뜨면 공문 폴더를 지정한다.
 
     반환: "saved"(대화상자에 경로 입력 완료), "clicked"(버튼만 누름), ""(버튼 없음)
@@ -469,8 +860,8 @@ def try_save_attachments(hwnd: int, folder: Path, log: Callable[[str], None] = l
     pid = _pid(hwnd)
     before = set(_dialogs_of(pid))
     activate(hwnd)
-    log("뷰어의 'PC저장/붙임문서' 버튼을 찾는 중…")
-    if not click_named(hwnd, SAVE_NAMES):
+    log("뷰어의 'PC저장' 버튼을 누르는 중…")
+    if not click_any(hwnd, SAVE_NAMES, check=lambda: bool(set(_dialogs_of(pid)) - before), log=log, trace=trace):
         return ""
     for _ in range(25):
         time.sleep(0.2)
@@ -598,3 +989,24 @@ class FileWatcher:
     def idle_for(self) -> float:
         last = max([self.started] + [p[2] for p in self.pending.values()])
         return time.time() - last
+
+
+if __name__ == "__main__":  # 진단:  python -m seomu.winwindow [창 제목 일부]
+    if not IS_WIN:
+        print("Windows에서만 동작합니다.")
+        sys.exit(0)
+    wins = list_windows()
+    if len(sys.argv) < 2:
+        for w in wins:
+            print(f"{w['hwnd']:>10}  {w['process']:<20} {w['title']}")
+        sys.exit(0)
+    key = " ".join(sys.argv[1:])
+    target = next((w for w in wins if key in w["title"]), None)
+    if not target:
+        print("해당 제목의 창이 없습니다.")
+        sys.exit(1)
+    report = diagnose(target["hwnd"])
+    print(report)
+    out = Path.home() / "Downloads" / "서무비서_진단.txt"
+    out.write_text(report, encoding="utf-8")
+    print(f"\n진단 결과를 저장했습니다: {out}")
