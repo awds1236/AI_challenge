@@ -141,15 +141,16 @@ class Api:
         except LLMError:
             active_chat = s.chat_model
         active_embed = client.pick_embed_model(s.embed_model) if st["ok"] else s.embed_model
-        items = []
+        items, known = [], set()
         for m in model_catalog.CATALOG:
             d = dict(m)
-            d["installed"] = model_catalog.is_installed(m["id"], installed)
-            d["active"] = m["id"] in (active_chat, active_embed) or \
-                (m["id"] + ":latest") in (active_chat, active_embed)
+            all_names = model_catalog.names(m)
+            known.update(all_names)
+            d["installed_id"] = model_catalog.installed_id(m, installed)
+            d["installed"] = bool(d["installed_id"])
+            d["active"] = any(n in (active_chat, active_embed) for n in all_names)
             d["fits"] = info["ram_total_gb"] == 0 or info["ram_total_gb"] >= m["min_ram_gb"] * 0.9
             items.append(d)
-        known = {m["id"] for m in model_catalog.CATALOG} | {m["id"] + ":latest" for m in model_catalog.CATALOG}
         return {"engine_ok": st["ok"], "engine_error": st.get("error", ""), "models": items,
                 "others": [m for m in installed if m not in known], "active_chat": active_chat,
                 "active_embed": active_embed, "system": info, "recommend": model_catalog.recommend(info)}

@@ -142,7 +142,19 @@ def test_html_to_text_skips_script():
 
 def test_recommend_by_spec():
     from seomu.models import recommend
-    assert recommend({"ram_total_gb": 16, "ram_avail_gb": 7, "gpu_usable": False})["model"] == "gemma4:e2b-it-qat"
-    assert recommend({"ram_total_gb": 16, "ram_avail_gb": 10, "gpu_usable": False})["model"] == "gemma4:e4b-it-qat"
-    assert recommend({"ram_total_gb": 8, "ram_avail_gb": 3, "gpu_usable": False})["model"] == "kanana-2:3b"
+    r = recommend({"ram_total_gb": 16, "ram_avail_gb": 2.9, "gpu_usable": False})
+    assert r["model"] == "gemma4:e2b-it-qat" and r["warn"]          # 여유 메모리가 순간적으로 적어도 E2B
+    assert recommend({"ram_total_gb": 16, "ram_avail_gb": 10, "gpu_usable": False})["model"] == "gemma4:e2b-it-qat"
+    assert recommend({"ram_total_gb": 32, "ram_avail_gb": 20, "gpu_usable": False})["model"] == "gemma4:e4b-it-qat"
+    assert recommend({"ram_total_gb": 8, "ram_avail_gb": 3, "gpu_usable": False})["model"] == "gemma4:e2b-it-qat"
+    assert recommend({"ram_total_gb": 6, "ram_avail_gb": 3, "gpu_usable": False})["model"] == "kanana-2:3b"
     assert recommend({"ram_total_gb": 4, "ram_avail_gb": 2, "gpu_usable": False})["model"] == "kanana-2:1.3b"
+
+
+def test_model_family_alias():
+    from seomu.models import find, installed_id, is_installed
+    e2b = find("gemma4:e2b-it-qat")
+    assert installed_id(e2b, ["gemma4:e2b", "embeddinggemma:latest"]) == "gemma4:e2b"
+    assert installed_id(e2b, ["gemma4:e2b", "gemma4:e2b-it-qat"]) == "gemma4:e2b-it-qat"
+    assert is_installed("embeddinggemma", ["embeddinggemma:latest"])
+    assert not is_installed("gemma4:e4b-it-qat", ["gemma4:e2b"])

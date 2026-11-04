@@ -51,7 +51,7 @@ if errorlevel 1 (
   pause
   exit /b 0
 )
-echo [AI 모델] 기본 모델 Gemma 4 E2B ^(QAT 경량판, 약 4.3GB^)를 내려받습니다.
+echo [AI 모델] 기본 모델 Gemma 4 E2B ^(QAT 경량판, 약 4.5GB^)를 내려받습니다.
 ollama pull gemma4:e2b-it-qat
 echo [AI 모델] 검색 보조 모델 EmbeddingGemma ^(약 0.6GB^)를 내려받습니다.
 ollama pull embeddinggemma

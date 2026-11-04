@@ -71,7 +71,7 @@
 
 | 모델 | 특징 | 받는 방법 |
 |---|---|---|
-| **Gemma 4 E2B** (Google) | 기본 모델. 사무용 PC(RAM 8GB+)용 QAT 경량판(약 4.3GB), Apache 2.0 | 앱에서 [받기] |
+| **Gemma 4 E2B** (Google) | 기본 모델. 사무용 PC(RAM 8GB+)용 QAT 경량판(약 4.5GB), Apache 2.0 | 앱에서 [받기] |
 | **Gemma 4 E4B** (Google) | 고성능 QAT 경량판(약 6.1GB). 여유 메모리가 많은 PC용 | 앱에서 [받기] |
 | **Kanana-2 3B / 1.3B** (Kakao) | 국산 한국어 특화 경량 모델 | GGUF 파일을 내려받아 [GGUF 등록] (인터넷 없이 등록 가능) |
 | **EmbeddingGemma** (Google) | 규정 검색 정확도 향상 (선택) | 앱에서 [받기] |

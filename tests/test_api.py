@@ -139,6 +139,15 @@ def test_model_management(api, tmp_path):
     assert {"gemma4:e2b-it-qat", "gemma4:e4b-it-qat", "kanana-2:3b", "kanana-2:1.3b"} <= set(ids)
     assert cat["others"] == ["gemma3:4b"]
 
+    # 일반판(gemma4:e2b)만 받아도 E2B 카드가 설치됨으로 표시되고 그 이름으로 사용
+    FakeOllama.installed.append("gemma4:e2b")
+    card = next(m for m in api.model_catalog()["models"] if m["id"] == "gemma4:e2b-it-qat")
+    assert card["installed"] and card["installed_id"] == "gemma4:e2b"
+    assert "gemma4:e2b" not in api.model_catalog()["others"]
+    assert api.use_model("gemma4:e2b")["active_chat"] == "gemma4:e2b"
+    assert next(m for m in api.model_catalog()["models"] if m["id"] == "gemma4:e2b-it-qat")["active"]
+    FakeOllama.installed.remove("gemma4:e2b")
+
     cat = wait(api, api.pull_model("gemma4:e2b-it-qat"))
     assert next(m for m in cat["models"] if m["id"] == "gemma4:e2b-it-qat")["installed"]
     cat = api.use_model("gemma4:e2b-it-qat")

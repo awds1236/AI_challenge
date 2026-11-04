@@ -13,15 +13,18 @@ import sys
 CATALOG: list[dict] = [
     {
         "id": "gemma4:e2b-it-qat", "name": "Gemma 4 E2B", "vendor": "Google", "kind": "chat",
-        "install": "pull", "download_gb": 4.3, "min_ram_gb": 8, "license": "Apache 2.0",
+        "install": "pull", "download_gb": 4.5, "min_ram_gb": 8, "license": "Apache 2.0",
         "badge": "기본 · 추천", "korean": "다국어", "variant": "QAT 경량판",
+        "alt": ["gemma4:e2b", "gemma4:e2b-it-q4_K_M"],
         "desc": "일반 사무용 PC(RAM 8GB 이상)용 기본 모델. 품질 손실을 줄인 4비트 경량판(QAT)으로 "
-                "원본보다 약 40% 작고 빠릅니다. 라이선스가 명확해 기관 배포에 적합합니다.",
+                "같은 4비트 크기에서 품질 손실이 가장 적습니다. 라이선스가 명확해 기관 배포에 적합합니다. "
+                "(일반판 gemma4:e2b를 받아도 사용할 수 있습니다)",
     },
     {
         "id": "gemma4:e4b-it-qat", "name": "Gemma 4 E4B", "vendor": "Google", "kind": "chat",
         "install": "pull", "download_gb": 6.1, "min_ram_gb": 16, "license": "Apache 2.0",
         "badge": "고성능", "korean": "다국어", "variant": "QAT 경량판",
+        "alt": ["gemma4:e4b", "gemma4:latest", "gemma4:e4b-it-q4_K_M"],
         "desc": "답변 품질이 더 좋은 상위 모델(QAT 경량판). 여유 메모리 8GB 이상 권장. "
                 "구형 CPU에서는 답변이 느릴 수 있습니다.",
     },
@@ -53,9 +56,27 @@ def find(model_id: str) -> dict | None:
     return next((m for m in CATALOG if m["id"] == model_id), None)
 
 
+def names(entry: dict) -> list[str]:
+    """카드 하나에 해당하는 모든 모델 이름 (QAT판·일반판 등 같은 계열 포함)."""
+    out = []
+    for n in [entry["id"], *entry.get("alt", [])]:
+        out.append(n)
+        if ":" not in n:
+            out.append(n + ":latest")
+    return out
+
+
+def installed_id(entry: dict, installed: list[str]) -> str:
+    """설치된 이름을 돌려준다 (기본 이름 우선). 없으면 빈 문자열."""
+    for n in names(entry):
+        if n in installed:
+            return n
+    return ""
+
+
 def is_installed(model_id: str, installed: list[str]) -> bool:
-    base = model_id if ":" in model_id else model_id + ":latest"
-    return any(i == model_id or i == base for i in installed)
+    entry = find(model_id) or {"id": model_id}
+    return bool(installed_id(entry, installed))
 
 
 # ---------------------------------------------------------------- PC 사양
@@ -131,18 +152,26 @@ def system_info() -> dict:
 
 
 def recommend(info: dict) -> dict:
-    """PC 사양으로 답변 모델을 추천한다."""
+    """PC 사양으로 답변 모델을 추천한다.
+
+    순간 여유 메모리는 다운로드·다른 프로그램에 따라 크게 바뀌므로 추천은 전체 메모리로 정하고,
+    여유 메모리는 경고에만 쓴다.
+    """
     total, avail = info.get("ram_total_gb", 0), info.get("ram_avail_gb", 0)
-    if info.get("gpu_usable") or (total >= 16 and avail >= 9):
+    if info.get("gpu_usable") or total >= 24:
         mid, why = "gemma4:e4b-it-qat", "메모리가 넉넉해 고성능 모델(E4B)을 쓸 수 있습니다."
-    elif total >= 8 and avail >= 5:
+    elif total >= 7.5:
         mid, why = "gemma4:e2b-it-qat", "일반 사무용 PC 사양입니다. 기본 모델(E2B)을 권장합니다."
         if total >= 15:
             why += " 다른 프로그램을 닫아 여유 메모리가 8GB 이상이면 E4B도 시도할 수 있습니다."
-    elif total >= 6:
-        mid, why = "kanana-2:3b", "여유 메모리가 적어 가벼운 한국어 모델을 권장합니다."
+    elif total >= 5.5:
+        mid, why = "kanana-2:3b", "메모리가 적어 가벼운 한국어 모델을 권장합니다."
     else:
         mid, why = "kanana-2:1.3b", "저사양 PC입니다. 초경량 모델을 권장합니다."
     if not info.get("gpu_usable"):
         why += " AI는 CPU로 동작합니다."
-    return {"model": mid, "reason": why}
+    warn = ""
+    if total and avail < 4:
+        warn = (f"현재 여유 메모리가 {avail}GB로 적습니다. AI 사용 전에 다른 프로그램(브라우저 탭 등)을 "
+                "닫으면 답변이 빨라집니다.")
+    return {"model": mid, "reason": why, "warn": warn}

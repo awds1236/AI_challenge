@@ -492,7 +492,8 @@ async function loadModels() {
   $("#pc-box").innerHTML = `<div class="specs"><b>내 PC</b> · ${esc(si.cpu)} (${si.cores}스레드)<br>
     메모리 <b>${si.ram_total_gb}GB</b> (현재 여유 ${si.ram_avail_gb}GB) · 디스크 여유 ${si.disk_free_gb}GB ·
     GPU ${si.gpu ? esc(si.gpu.split(",")[0]) + (si.gpu_usable ? " (AI 가속 가능)" : " (AI 가속 불가)") : "AI 가속 불가 · CPU 사용"}</div>
-    <div class="rec"><span class="badge green">추천</span> <b>${esc(recName)}</b><div class="muted small">${esc(rec.reason)}</div></div>`;
+    <div class="rec"><span class="badge green">추천</span> <b>${esc(recName)}</b><div class="muted small">${esc(rec.reason)}</div>
+    ${rec.warn ? `<div class="small" style="color:var(--orange);margin-top:4px">⚠ ${esc(rec.warn)}</div>` : ""}</div>`;
   if (!c.engine_ok) {
     $("#model-grid").innerHTML = `<div class="muted">로컬 AI 엔진(Ollama)이 실행 중이 아닙니다. Ollama를 설치·실행한 뒤 '다시 확인'을 눌러 주세요.<br><span class="small">${esc(c.engine_error)}</span></div>`;
     return;
@@ -503,12 +504,13 @@ async function loadModels() {
         ${m.id === rec.model ? '<span class="badge green">내 PC 추천</span>' : ""}<span class="badge ${m.kind === "embed" ? "purple" : "blue"}">${esc(m.badge)}</span></div>
       <div class="desc">${esc(m.desc)}</div>
       <div class="meta"><span class="badge">약 ${m.download_gb}GB</span><span class="badge">RAM ${m.min_ram_gb}GB+</span>
-        <span class="badge">${esc(m.license)}</span><span class="badge">${esc(m.korean)}</span>${m.variant ? `<span class="badge green">${esc(m.variant)}</span>` : ""}</div>
+        <span class="badge">${esc(m.license)}</span><span class="badge">${esc(m.korean)}</span>${m.variant ? `<span class="badge green">${esc(m.variant)}</span>` : ""}
+        ${m.installed && m.installed_id !== m.id && m.installed_id !== m.id + ":latest" ? `<span class="badge">설치됨: ${esc(m.installed_id)}</span>` : ""}</div>
       ${m.fits ? "" : '<div class="warn">⚠ 이 PC 메모리로는 느리거나 실행되지 않을 수 있습니다</div>'}
       <div class="actions">
         ${m.installed
-          ? (m.active ? `<span class="badge green">${m.kind === "embed" ? "검색에 사용 중" : "사용 중"}</span>` : `<button class="btn primary sm" data-use="${esc(m.id)}">사용</button>`) +
-            `<button class="btn ghost sm danger" data-mdel="${esc(m.id)}" title="모델 삭제">${svg("trash")}</button>`
+          ? (m.active ? `<span class="badge green">${m.kind === "embed" ? "검색에 사용 중" : "사용 중"}</span>` : `<button class="btn primary sm" data-use="${esc(m.installed_id)}">사용</button>`) +
+            `<button class="btn ghost sm danger" data-mdel="${esc(m.installed_id)}" title="${esc(m.installed_id)} 삭제">${svg("trash")}</button>`
           : m.install === "gguf"
             ? `<button class="btn sm" data-gguf="${esc(m.id)}">${svg("download")} GGUF 등록</button>`
             : `<button class="btn sm" data-pull="${esc(m.id)}">${svg("download")} 받기</button>`}
