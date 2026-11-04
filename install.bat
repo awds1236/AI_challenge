@@ -3,11 +3,29 @@ chcp 65001 > nul
 cd /d "%~dp0"
 echo [서무비서 AI] 설치를 시작합니다.
 echo.
-where python > nul 2>&1 || (echo [오류] Python 3.10 이상을 먼저 설치하세요: https://www.python.org/downloads/  ^(설치 시 "Add python.exe to PATH" 체크^) & pause & exit /b 1)
-python -m venv .venv
+rem 패키지 호환성을 위해 Python 3.13 / 3.12를 우선 사용
+set "PY="
+py -V:3.13 --version > nul 2>&1 && set "PY=py -V:3.13"
+if not defined PY py -V:3.12 --version > nul 2>&1 && set "PY=py -V:3.12"
+if not defined PY py -3.13 --version > nul 2>&1 && set "PY=py -3.13"
+if not defined PY py -3.12 --version > nul 2>&1 && set "PY=py -3.12"
+if not defined PY where python > nul 2>&1 && set "PY=python"
+if not defined PY (
+  echo [오류] Python이 없습니다. https://www.python.org/downloads/ 에서 설치하세요.
+  echo        ^(권장: 설치 후 명령 프롬프트에서  py install 3.13^)
+  pause
+  exit /b 1
+)
+echo 사용할 Python:
+%PY% --version
+if exist .venv\Scripts\python.exe (
+  echo 기존 가상환경^(.venv^)을 사용합니다. 다시 만들려면 .venv 폴더를 지우고 실행하세요.
+) else (
+  %PY% -m venv .venv || (echo [오류] 가상환경을 만들지 못했습니다. & pause & exit /b 1)
+)
 call .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt || (echo [오류] 패키지 설치에 실패했습니다. 위 오류 메시지를 확인하세요. & pause & exit /b 1)
 echo.
 where ollama > nul 2>&1
 if errorlevel 1 (
