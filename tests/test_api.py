@@ -136,13 +136,13 @@ def test_model_management(api, tmp_path):
     cat = api.model_catalog()
     assert cat["engine_ok"] and cat["recommend"]["model"]
     ids = [m["id"] for m in cat["models"]]
-    assert {"gemma4:e2b", "gemma4:e4b", "kanana-2:3b", "kanana-2:1.3b"} <= set(ids)
+    assert {"gemma4:e2b-it-qat", "gemma4:e4b-it-qat", "kanana-2:3b", "kanana-2:1.3b"} <= set(ids)
     assert cat["others"] == ["gemma3:4b"]
 
-    cat = wait(api, api.pull_model("gemma4:e2b"))
-    assert next(m for m in cat["models"] if m["id"] == "gemma4:e2b")["installed"]
-    cat = api.use_model("gemma4:e2b")
-    assert cat["active_chat"] == "gemma4:e2b" and api.get_settings()["chat_model"] == "gemma4:e2b"
+    cat = wait(api, api.pull_model("gemma4:e2b-it-qat"))
+    assert next(m for m in cat["models"] if m["id"] == "gemma4:e2b-it-qat")["installed"]
+    cat = api.use_model("gemma4:e2b-it-qat")
+    assert cat["active_chat"] == "gemma4:e2b-it-qat" and api.get_settings()["chat_model"] == "gemma4:e2b-it-qat"
 
     gguf = tmp_path / "kanana-2-3b-instruct-Q4_K_M.gguf"
     gguf.write_bytes(b"GGUF" + b"0" * 100)
@@ -153,7 +153,7 @@ def test_model_management(api, tmp_path):
     assert next(m for m in cat["models"] if m["id"] == "kanana-2:1.3b")["installed"]
     assert "hf.co/someone/kanana-2-1.3b-GGUF:Q4_K_M" not in FakeOllama.installed
 
-    api.delete_model("gemma4:e2b")
+    api.delete_model("gemma4:e2b-it-qat")
     assert api.get_settings()["chat_model"] == ""
     with pytest.raises(ValueError):
         api.import_gguf(str(tmp_path / "nope.txt"), "x")

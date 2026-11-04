@@ -503,7 +503,7 @@ async function loadModels() {
         ${m.id === rec.model ? '<span class="badge green">내 PC 추천</span>' : ""}<span class="badge ${m.kind === "embed" ? "purple" : "blue"}">${esc(m.badge)}</span></div>
       <div class="desc">${esc(m.desc)}</div>
       <div class="meta"><span class="badge">약 ${m.download_gb}GB</span><span class="badge">RAM ${m.min_ram_gb}GB+</span>
-        <span class="badge">${esc(m.license)}</span><span class="badge">${esc(m.korean)}</span></div>
+        <span class="badge">${esc(m.license)}</span><span class="badge">${esc(m.korean)}</span>${m.variant ? `<span class="badge green">${esc(m.variant)}</span>` : ""}</div>
       ${m.fits ? "" : '<div class="warn">⚠ 이 PC 메모리로는 느리거나 실행되지 않을 수 있습니다</div>'}
       <div class="actions">
         ${m.installed

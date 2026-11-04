@@ -12,16 +12,18 @@ import sys
 # install: "pull" = Ollama 저장소에서 내려받기, "gguf" = GGUF 파일을 받아 등록
 CATALOG: list[dict] = [
     {
-        "id": "gemma4:e2b", "name": "Gemma 4 E2B", "vendor": "Google", "kind": "chat",
-        "install": "pull", "download_gb": 7.4, "min_ram_gb": 8, "license": "Apache 2.0",
-        "badge": "기본 · 추천", "korean": "다국어",
-        "desc": "일반 사무용 PC(RAM 8GB 이상)에서 동작하는 기본 모델. 라이선스가 명확해 기관 배포에 적합합니다.",
+        "id": "gemma4:e2b-it-qat", "name": "Gemma 4 E2B", "vendor": "Google", "kind": "chat",
+        "install": "pull", "download_gb": 4.3, "min_ram_gb": 8, "license": "Apache 2.0",
+        "badge": "기본 · 추천", "korean": "다국어", "variant": "QAT 경량판",
+        "desc": "일반 사무용 PC(RAM 8GB 이상)용 기본 모델. 품질 손실을 줄인 4비트 경량판(QAT)으로 "
+                "원본보다 약 40% 작고 빠릅니다. 라이선스가 명확해 기관 배포에 적합합니다.",
     },
     {
-        "id": "gemma4:e4b", "name": "Gemma 4 E4B", "vendor": "Google", "kind": "chat",
-        "install": "pull", "download_gb": 9.6, "min_ram_gb": 16, "license": "Apache 2.0",
-        "badge": "고성능", "korean": "다국어",
-        "desc": "답변 품질이 더 좋지만 여유 메모리 8GB 이상이 필요합니다. 구형 CPU에서는 느릴 수 있습니다.",
+        "id": "gemma4:e4b-it-qat", "name": "Gemma 4 E4B", "vendor": "Google", "kind": "chat",
+        "install": "pull", "download_gb": 6.1, "min_ram_gb": 16, "license": "Apache 2.0",
+        "badge": "고성능", "korean": "다국어", "variant": "QAT 경량판",
+        "desc": "답변 품질이 더 좋은 상위 모델(QAT 경량판). 여유 메모리 8GB 이상 권장. "
+                "구형 CPU에서는 답변이 느릴 수 있습니다.",
     },
     {
         "id": "kanana-2:3b", "name": "Kanana-2 3B", "vendor": "Kakao", "kind": "chat",
@@ -131,11 +133,13 @@ def system_info() -> dict:
 def recommend(info: dict) -> dict:
     """PC 사양으로 답변 모델을 추천한다."""
     total, avail = info.get("ram_total_gb", 0), info.get("ram_avail_gb", 0)
-    if info.get("gpu_usable") or (total >= 24 and avail >= 10):
-        mid, why = "gemma4:e4b", "메모리가 넉넉해 고성능 모델을 쾌적하게 쓸 수 있습니다."
-    elif total >= 12 and avail >= 6:
-        mid, why = "gemma4:e2b", "일반 사무용 PC 사양입니다. 기본 모델을 권장합니다. (E4B는 동작하지만 느릴 수 있음)"
-    elif total >= 8:
+    if info.get("gpu_usable") or (total >= 16 and avail >= 9):
+        mid, why = "gemma4:e4b-it-qat", "메모리가 넉넉해 고성능 모델(E4B)을 쓸 수 있습니다."
+    elif total >= 8 and avail >= 5:
+        mid, why = "gemma4:e2b-it-qat", "일반 사무용 PC 사양입니다. 기본 모델(E2B)을 권장합니다."
+        if total >= 15:
+            why += " 다른 프로그램을 닫아 여유 메모리가 8GB 이상이면 E4B도 시도할 수 있습니다."
+    elif total >= 6:
         mid, why = "kanana-2:3b", "여유 메모리가 적어 가벼운 한국어 모델을 권장합니다."
     else:
         mid, why = "kanana-2:1.3b", "저사양 PC입니다. 초경량 모델을 권장합니다."
