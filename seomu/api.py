@@ -33,6 +33,7 @@ from . import attach, winwindow
 from .mail import DEFAULT_TEMPLATES, POLISH_PROMPT, VARIABLES, build_variables, render, tasks_to_ics
 from .parsers import SUPPORTED
 from .rag import RAGEngine
+from . import report as report_mod
 from .storage import Store
 
 
@@ -77,7 +78,7 @@ class Api:
         s = self._cfg.settings
         if self._engine_kind() == "builtin":
             return LocalClient(self._engine, ctx=s.num_ctx, threads=s.threads)
-        return OllamaClient(s.ollama_url, allow_remote=s.allow_remote_llm)
+        return OllamaClient(s.ollama_url, allow_remote=s.allow_remote_llm, num_ctx=s.num_ctx)
 
     def engine_info(self) -> dict:
         return {"kind": self._engine_kind(), "setting": self._cfg.settings.engine,
@@ -460,6 +461,14 @@ class Api:
                 c.preload(c.pick_chat_model(self._cfg.settings.chat_model))
             except Exception:
                 pass
+            try:   # 의미 검색을 쓰면 검색 모델도 미리 올려 첫 질문의 대기 시간을 줄인다
+                if self._rag.index().has_vecs:
+                    c = self._client()
+                    em = c.pick_embed_model(self._cfg.settings.embed_model)
+                    if em:
+                        c.embed(["준비"], em)
+            except Exception:
+                pass
         threading.Thread(target=run, daemon=True, name="preload").start()
 
     def capture_browser(self, page_index: int | None = None, title: str = "", use_ai: bool = True) -> dict:
@@ -760,8 +769,10 @@ class Api:
             c = self._client()
             s = self._cfg.settings
             model = c.pick_chat_model(s.chat_model)
+            # 다듬은 글은 초안과 길이가 비슷하다: 생성 길이 상한을 초안 길이에 맞춰 군더더기 생성을 막는다
+            limit = min(1536, int(len(body) * 1.1) + 160)
             return {"body": c.chat([{"role": "user", "content": POLISH_PROMPT.format(body=body)}], model,
-                                   temperature=0.3, num_ctx=s.num_ctx,
+                                   temperature=0.3, num_ctx=s.num_ctx, max_tokens=limit,
                                    on_token=lambda t: setattr(job, "text", job.text + t)).strip()}
         return self._run_job("polish", work)
 
@@ -776,6 +787,99 @@ class Api:
         p = unique_path(folder / "메일초안.txt")
         p.write_text(f"제목: {subject}\n\n{body}\n", encoding="utf-8")
         return str(p)
+
+    # ------------------------------------------------------------ 보고서 작성 (HWPX 양식)
+    def _report_dir(self) -> Path:
+        d = self._cfg.home / "report_templates"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _report_files(self) -> list[Path]:
+        files = sorted(self._report_dir().glob("*.hwpx"))
+        builtin = report_mod.builtin_template()
+        if builtin and not any(f.name == builtin.name for f in files):
+            files.append(builtin)
+        return files
+
+    def report_templates(self) -> dict:
+        items = []
+        for f in self._report_files():
+            try:
+                info = report_mod.load_template(f).info()
+                info["ok"] = True
+            except report_mod.ReportError as e:
+                info = {"name": f.stem, "path": str(f), "ok": False, "error": str(e)}
+            info["builtin"] = f.parent != self._report_dir()
+            items.append(info)
+        return {"templates": items}
+
+    def add_report_templates(self, paths: list[str]) -> dict:
+        """보고서 양식(.hwpx)을 등록한다. 해석할 수 없는 양식은 이유를 알려 준다."""
+        errors = []
+        for p in paths or []:
+            src = Path(p)
+            try:
+                report_mod.load_template(src)
+            except (report_mod.ReportError, OSError) as e:
+                errors.append(f"{src.name}: {e}")
+                continue
+            dest = self._report_dir() / safe_name(src.name, 120)
+            if src.resolve() != dest.resolve():
+                shutil.copy2(src, dest)
+        res = self.report_templates()
+        res["errors"] = errors
+        return res
+
+    def delete_report_template(self, name: str) -> dict:
+        p = self._report_dir() / f"{name}.hwpx"
+        if p.exists():
+            p.unlink()
+        return self.report_templates()
+
+    def make_report(self, template: str, notice_id: int | None = None, material: str = "",
+                    purpose: str = "", use_ai: bool = True) -> dict:
+        """양식에 맞춰 보고서를 만든다. 공문을 고르면 분석 결과로, 아니면 입력한 자료로 쓴다."""
+        tpath = next((f for f in self._report_files() if f.stem == template or str(f) == template), None)
+        if not tpath:
+            raise ValueError("보고서 양식을 먼저 골라 주세요")
+        notice = self._store.get_notice(int(notice_id)) if notice_id else None
+        material = (material or "").strip()
+        if not notice and not material:
+            raise ValueError("관련 공문을 고르거나 보고서에 넣을 자료를 입력해 주세요")
+
+        def work(job: Job):
+            started = time.time()
+            job.message = "양식을 읽는 중…"
+            tpl = report_mod.load_template(tpath)
+            s = self._cfg.settings
+            outline, mode, err = None, "rule", ""
+            if use_ai:
+                job.message = "로컬 AI가 보고서 내용을 쓰는 중…"
+                src = report_mod.notice_material(notice) if notice else ""
+                if material:
+                    src = (src + "\n\n[추가 자료]\n" + material) if src else material
+                try:
+                    c = self._client()
+                    outline = report_mod.ai_outline(c, c.pick_chat_model(s.chat_model), src, purpose,
+                                                    tpl.headings, s.num_ctx)
+                    mode = "llm"
+                except LLMError as e:
+                    err = str(e)
+            if outline is None:
+                outline = (report_mod.outline_from_notice(notice, purpose) if notice
+                           else report_mod.outline_from_text(material, purpose))
+            job.message = "양식에 채우는 중…"
+            data = report_mod.fill(tpl, outline, dept=s.user_dept)
+            clean = report_mod.clean_outline(outline)
+            folder = Path(notice["folder"]) if notice and Path(notice["folder"]).exists() \
+                else self._cfg.settings.resolved_download_root() / "보고서"
+            folder.mkdir(parents=True, exist_ok=True)
+            out = unique_path(folder / f"{safe_name(clean['title'] or '보고서', 60)}.hwpx")
+            out.write_bytes(data)
+            return {"path": str(out), "folder": str(folder), "outline": clean,
+                    "preview": report_mod.outline_text(clean), "mode": mode, "llm_error": err,
+                    "template": tpath.stem, "seconds": round(time.time() - started, 1)}
+        return self._run_job("report", work)
 
     # ------------------------------------------------------------ 종료
     def shutdown(self) -> None:

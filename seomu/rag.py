@@ -310,11 +310,44 @@ class RAGEngine:
         return idx.search(query, k or s.top_k, q_vec=q_vec, category=category)
 
     @staticmethod
-    def build_context(hits: list[Hit]) -> str:
-        blocks = []
+    def excerpt(text: str, query: str, limit: int) -> str:
+        """조문이 길면 질문과 관련된 줄만 원래 순서대로 남겨 limit자 안으로 줄인다.
+        CPU에서는 AI가 '입력을 읽는 시간'이 답변 시간의 대부분이라 근거 길이가 곧 속도다."""
+        if len(text) <= limit:
+            return text
+        q = set(tokenize(query))
+        lines = [l for l in re.split(r"(?<=[.다])\s+|\n", text) if l.strip()]
+        if not q or len(lines) <= 1:
+            return text[:limit] + "…"
+        scored = sorted(range(len(lines)), key=lambda i: (-len(q & set(tokenize(lines[i]))), i))
+        keep, size = {0}, len(lines[0])          # 첫 줄(조문 제목·요지)은 항상
+        for i in scored:
+            if i in keep:
+                continue
+            if size + len(lines[i]) + 1 > limit:
+                continue
+            keep.add(i)
+            size += len(lines[i]) + 1
+        out, prev = [], -1
+        for i in sorted(keep):
+            if prev >= 0 and i != prev + 1:
+                out.append("…")
+            out.append(lines[i].strip())
+            prev = i
+        return "\n".join(out)
+
+    @classmethod
+    def build_context(cls, hits: list[Hit], query: str = "", budget: int = 3600) -> str:
+        """근거 블록. 1순위 조문에 더 많은 분량을 주고 전체를 budget자 안으로 맞춘다."""
+        blocks, left = [], budget
         for i, h in enumerate(hits, 1):
+            if left < 200:
+                break
             head = f"「{h.title}」" + (f" {h.heading}" if h.heading else "")
-            blocks.append(f"[{i}] {head}\n{h.text[:1800]}")
+            share = min(1600 if i == 1 else 800, left)
+            body = cls.excerpt(h.text, query, share) if query else h.text[:share]
+            blocks.append(f"[{i}] {head}\n{body}")
+            left -= len(body) + len(head) + 8
         return "\n\n".join(blocks)
 
     def answer(self, question: str, category: str | None = None,
@@ -332,11 +365,15 @@ class RAGEngine:
         try:
             model = client.pick_chat_model(s.chat_model)
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-            for h in (history or [])[-4:]:
-                messages.append({"role": "user", "content": h["question"]})
-                messages.append({"role": "assistant", "content": h["answer"][:800]})
-            messages.append({"role": "user", "content": f"[근거]\n{self.build_context(hits)}\n\n[질문]\n{question}"})
-            text = client.chat(messages, model, temperature=s.temperature, num_ctx=s.num_ctx, on_token=on_token)
+            # 이어지는 질문을 이해할 만큼만 최근 대화 2개를 짧게 넣는다 (입력이 길수록 느리다)
+            for h in (history or [])[-2:]:
+                messages.append({"role": "user", "content": h["question"][:300]})
+                messages.append({"role": "assistant", "content": h["answer"][:400]})
+            # 화면에는 찾은 근거를 모두 보여 주고, AI에게는 상위 4개만 질문 관련 부분 위주로 준다
+            ctx = self.build_context(hits[:4], question)
+            messages.append({"role": "user", "content": f"[근거]\n{ctx}\n\n[질문]\n{question}"})
+            text = client.chat(messages, model, temperature=s.temperature, num_ctx=s.num_ctx, on_token=on_token,
+                               max_tokens=900)
             return {"answer": text.strip(), "sources": sources, "mode": "llm", "model": model}
         except LLMError as e:
             lines = [f"⚠️ 로컬 AI 모델을 사용할 수 없어 관련 조문만 찾아 보여드립니다.\n({e})\n"]

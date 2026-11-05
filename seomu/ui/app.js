@@ -159,7 +159,7 @@ const state = { settings: {}, info: {}, notices: [], templates: [], tasks: [], c
 function go(page) {
   $$(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
   $$(".page").forEach((p) => p.classList.toggle("active", p.id === "page-" + page));
-  const loaders = { home: loadHome, ask: loadChat, collect: loadNotices, tasks: loadTasks, mail: loadMail, library: loadLibrary, settings: loadSettings };
+  const loaders = { home: loadHome, ask: loadChat, collect: loadNotices, tasks: loadTasks, mail: loadMail, report: loadReport, library: loadLibrary, settings: loadSettings };
   loaders[page] && loaders[page]();
 }
 
@@ -490,6 +490,57 @@ async function makeMail() {
     r.attachments.map((p) => `<div class="a" data-open="${esc(p)}">📎 ${esc(baseName(p))}</div>`).join("") : "";
 }
 
+// ------------------------------------------------------------------ 보고서 작성
+async function loadReport() {
+  const [r, notices] = await Promise.all([api("report_templates"), api("list_notices")]);
+  state.reportTpls = r.templates;
+  const cur = $("#rp-template").value;
+  $("#rp-template").innerHTML = r.templates.map((t) => `<option value="${esc(t.name)}" ${t.ok ? "" : "disabled"}>${esc(t.name)}${t.builtin ? " (기본)" : ""}${t.ok ? "" : " — 사용 불가"}</option>`).join("");
+  if (cur && r.templates.some((t) => t.name === cur)) $("#rp-template").value = cur;
+  else { const mine = r.templates.find((t) => t.ok && !t.builtin); if (mine) $("#rp-template").value = mine.name; }
+  const curN = $("#rp-notice").value;
+  $("#rp-notice").innerHTML = `<option value="">(공문 없이 추가 자료로)</option>` + notices.map((n) => `<option value="${n.id}">${esc((n.analysis || {}).folder_name || n.title)}</option>`).join("");
+  if (curN) $("#rp-notice").value = curN;
+  renderTplInfo();
+}
+function renderTplInfo() {
+  const t = (state.reportTpls || []).find((x) => x.name === $("#rp-template").value);
+  $("#rp-del").disabled = !t || t.builtin;
+  if (!t) { $("#rp-tpl-info").textContent = ""; return; }
+  if (!t.ok) { $("#rp-tpl-info").textContent = t.error; return; }
+  const lv = { 0: "□", 1: "○", 2: "-", 3: "․", 9: "※" };
+  $("#rp-tpl-info").textContent = `문단: ${t.levels.map((l) => lv[l]).join(" ")}${t.title_box ? " · 제목 상자" : ""}${t.summary_box ? " · 요약 상자" : ""}${t.has_table ? " · 표" : ""}` +
+    (t.headings.length ? ` · 대제목 예: ${t.headings.slice(0, 3).join(", ")}` : "");
+}
+async function addReportTemplates(paths) {
+  const hwpx = paths.filter((p) => /\.hwpx$/i.test(p));
+  if (paths.some((p) => /\.hwp$/i.test(p))) toast("HWP 파일은 한글에서 '다른 이름으로 저장 → HWPX'로 저장해 넣어 주세요", "err", 6000);
+  if (!hwpx.length) return;
+  const r = await api("add_report_templates", hwpx);
+  if (r.errors.length) toast(r.errors.join("\n"), "err", 7000); else toast("보고서 양식을 등록했습니다", "ok");
+  const added = baseName(hwpx[hwpx.length - 1]).replace(/\.hwpx$/i, "");
+  await loadReport();
+  if (r.templates.some((t) => t.name === added && t.ok)) { $("#rp-template").value = added; renderTplInfo(); }
+}
+async function makeReport() {
+  const tpl = $("#rp-template").value, nid = $("#rp-notice").value, material = $("#rp-material").value;
+  if (!tpl) return toast("보고서 양식을 먼저 넣어 주세요", "err");
+  if (!nid && !material.trim()) return toast("관련 공문을 고르거나 추가 자료를 입력해 주세요", "err");
+  hud("보고서를 만드는 중…");
+  try {
+    const r = await runJob("make_report", [tpl, nid ? Number(nid) : null, material, $("#rp-purpose").value, $("#rp-ai").checked], (st) => hud(st.message || "보고서를 만드는 중…"));
+    window.__lastReport = r; state.report = r;
+    $("#rp-empty").classList.add("hidden");
+    $("#rp-result").classList.remove("hidden");
+    $("#rp-result").textContent = r.preview;
+    $("#rp-meta").textContent = `${r.mode === "llm" ? "로컬 AI 작성" : "규칙 기반 작성"} · ${r.seconds}초 · ${baseName(r.path)}`;
+    $("#rp-open").disabled = $("#rp-folder").disabled = false;
+    if (r.llm_error) toast(`AI를 쓸 수 없어 공문 분석 결과로 작성했습니다 (${r.llm_error})`, "info", 6000);
+    else toast("보고서를 저장했습니다", "ok");
+  } catch (e) { toast(e.message, "err", 6000); }
+  finally { hud(false); }
+}
+
 // ------------------------------------------------------------------ 규정 저장소
 let libPoll = null;
 async function loadLibrary() {
@@ -766,6 +817,14 @@ function bind() {
   $("#export-ics").addEventListener("click", async () => { const p = await api("export_ics"); toast(`일정 파일을 저장했습니다: ${baseName(p)} (Outlook 등에서 열기)`, "ok", 6000); api("open_path", p.replace(/[\\/][^\\/]+$/, "")); });
 
   // 메일
+  $("#rp-template").addEventListener("change", renderTplInfo);
+  $("#rp-make").addEventListener("click", () => makeReport());
+  $("#rp-pick").addEventListener("click", async () => addReportTemplates(await pickFiles(true)));
+  $("#rp-del").addEventListener("click", async () => { const n = $("#rp-template").value; if (n && confirm(`'${n}' 양식을 삭제할까요?`)) { await api("delete_report_template", n); loadReport(); } });
+  $("#rp-open").addEventListener("click", () => state.report && api("open_path", state.report.path));
+  $("#rp-folder").addEventListener("click", () => state.report && api("open_path", state.report.folder));
+  setupDrop($("#drop-report"), addReportTemplates);
+  $("#nd-report").addEventListener("click", async () => { if (!currentNotice) return; const id = currentNotice.id; closeSheet(); go("report"); await loadReport(); $("#rp-notice").value = String(id); });
   segmented($("#mail-mode"), (v) => $$(".mail-pane").forEach((p) => p.classList.toggle("on", p.dataset.mode === v)));
   $("#mc-make").addEventListener("click", () => makeMail().catch((e) => toast(e.message, "err")));
   $("#mc-copy").addEventListener("click", async () => { await copyText(`제목: ${$("#mc-subject").value}\n\n${$("#mc-body").value}`); toast("메일 내용을 복사했습니다", "ok"); });

@@ -37,11 +37,13 @@ _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 class OllamaClient:
     def __init__(self, base_url: str = "http://127.0.0.1:11434", allow_remote: bool = False,
-                 timeout: float = 900.0, keep_alive: str = "30m"):
+                 timeout: float = 900.0, keep_alive: str = "30m", num_ctx: int = 0):
         self.base_url = base_url.rstrip("/")
         self.allow_remote = allow_remote
         self.timeout = timeout
         self.keep_alive = keep_alive   # 사용 후에도 모델을 메모리에 유지 (다음 요청 시 다시 불러오지 않음)
+        # Ollama는 num_ctx가 바뀌면 모델을 다시 불러온다(수 초~수십 초). 모든 요청에 같은 값을 쓴다.
+        self.num_ctx = int(num_ctx or 0)
 
     # ---------- 저수준 ----------
     def _check(self) -> None:
@@ -120,16 +122,30 @@ class OllamaClient:
 
     # ---------- 생성 ----------
     def chat(self, messages: list[dict], model: str, temperature: float = 0.2, num_ctx: int = 8192,
-             fmt: str | dict | None = None, on_token: Callable[[str], None] | None = None) -> str:
+             fmt: str | dict | None = None, on_token: Callable[[str], None] | None = None,
+             max_tokens: int = 0) -> str:
+        options = {"temperature": temperature, "num_ctx": self.num_ctx or num_ctx}
+        if max_tokens:
+            options["num_predict"] = int(max_tokens)   # 답변 길이 상한 → 생성 시간 상한
         payload = {
             "model": model,
             "messages": messages,
             "stream": on_token is not None,
-            "options": {"temperature": temperature, "num_ctx": num_ctx},
+            "options": options,
             "keep_alive": self.keep_alive,
+            "think": False,          # 생각(추론) 모드를 끈다: 숨은 토큰 생성 시간을 없앤다
         }
         if fmt:
             payload["format"] = fmt
+        try:
+            return self._chat(payload, on_token)
+        except LLMError as e:
+            if "think" not in str(e).lower():
+                raise
+            payload.pop("think", None)   # 생각 모드 옵션을 모르는 구버전/모델
+            return self._chat(payload, on_token)
+
+    def _chat(self, payload: dict, on_token: Callable[[str], None] | None) -> str:
         if on_token is None:
             data = self._json("/api/chat", payload)
             return data.get("message", {}).get("content", "")
@@ -155,7 +171,10 @@ class OllamaClient:
 
     def preload(self, model: str) -> None:
         """모델을 미리 메모리에 올린다 (프롬프트 없이 요청하면 로드만 한다)."""
-        self._json("/api/generate", {"model": model, "keep_alive": self.keep_alive}, timeout=600)
+        payload = {"model": model, "keep_alive": self.keep_alive}
+        if self.num_ctx:   # 실제 요청과 같은 num_ctx로 올려야 첫 요청에서 다시 불러오지 않는다
+            payload["options"] = {"num_ctx": self.num_ctx}
+        self._json("/api/generate", payload, timeout=600)
 
     def unload(self, model: str) -> None:
         self._json("/api/generate", {"model": model, "keep_alive": 0}, timeout=5)
