@@ -184,8 +184,21 @@ def _opener():
     return urllib.request.build_opener()
 
 
+def iri_to_uri(url: str) -> str:
+    """한글 등 ASCII가 아닌 문자가 든 주소를 퍼센트 인코딩한다 (이미 인코딩된 %XX는 그대로)."""
+    parts = urllib.parse.urlsplit(url)
+    host = parts.netloc
+    try:
+        host = host.encode("idna").decode("ascii") if not host.isascii() else host
+    except UnicodeError:
+        pass
+    q = lambda s, safe: urllib.parse.quote(s, safe=safe)  # noqa: E731
+    return urllib.parse.urlunsplit((parts.scheme, host, q(parts.path, "/%:@!$&'()*+,;="),
+                                    q(parts.query, "=&%:@!$'()*+,;/?"), q(parts.fragment, "%")))
+
+
 def download_url(url: str, dest_dir: Path, name_hint: str = "", timeout: float = 60) -> Path:
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 SeomuAI"})
+    req = urllib.request.Request(iri_to_uri(url), headers={"User-Agent": "Mozilla/5.0 SeomuAI"})
     with _opener().open(req, timeout=timeout) as r:
         name = filename_from_headers(r.headers.get("Content-Disposition"), r.geturl(), name_hint)
         if "." not in name and name_hint and "." in name_hint:
@@ -197,7 +210,7 @@ def download_url(url: str, dest_dir: Path, name_hint: str = "", timeout: float =
 
 
 def fetch_url(url: str, timeout: float = 30) -> tuple[str, str]:
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 SeomuAI"})
+    req = urllib.request.Request(iri_to_uri(url), headers={"User-Agent": "Mozilla/5.0 SeomuAI"})
     with _opener().open(req, timeout=timeout) as r:
         raw = r.read()
         ctype = r.headers.get("Content-Type", "")

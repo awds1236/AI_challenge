@@ -394,3 +394,9 @@ details.raw pre { white-space: pre-wrap; font-family: var(--font); font-size: 12
 .hud-files { font-size: 12px; opacity: .9; max-height: 120px; overflow: auto; text-align: left; width: 100%; }
 .hud-files div { padding: 1px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #hud-action { background: #fff; color: #1d1d1f; border-color: transparent; }
+
+/* 보고서 작성 */
+#drop-report { padding: 16px; margin: 4px 0 12px; }
+.report-preview { flex: 1; min-height: 360px; margin: 0 0 12px; padding: 16px 18px; border-radius: 12px; background: var(--fill, rgba(120,120,128,.08));
+  font: 13.5px/1.75 inherit; font-family: inherit; white-space: pre-wrap; word-break: keep-all; overflow: auto; }
+#rp-empty { min-height: 120px; padding: 18px 4px; line-height: 1.7; }

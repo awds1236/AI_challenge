@@ -29,8 +29,8 @@ SCHEMA = {
     "required": ["folder_name", "summary", "deadlines", "submissions", "actions"],
 }
 
-PROMPT = """다음은 공공기관에서 받은 공문 본문과 붙임 문서 일부입니다.
-담당 서무 직원이 놓치지 않도록 아래 항목을 JSON으로 정리하세요. 오늘 날짜: {today}
+# 고정 지시문은 system 메시지로 둔다: 내용이 매번 같아 엔진이 계산 결과를 재사용한다(프롬프트 캐시).
+SYSTEM = """당신은 공공기관 서무 직원을 돕는 비서입니다. 사용자가 주는 공문 본문과 붙임 발췌를 읽고 JSON으로 정리하세요.
 
 - folder_name: 폴더 이름으로 쓸 짧은 제목 (예: "OO행사 참여 요청", 25자 이내, 특수문자 금지)
 - summary: 이 공문이 '무엇을 요청·안내하는지'를 중심으로 2문장. 무엇을, 언제까지, 어떻게 해야 하는지 포함.
@@ -39,12 +39,15 @@ PROMPT = """다음은 공공기관에서 받은 공문 본문과 붙임 문서 �
 - deadlines: 우리 기관(수신자)이 지켜야 할 제출·회신·신청 기한. date는 YYYY-MM-DD, time은 HH:MM(없으면 빈 문자열),
   what은 '조사표 회신', '참가신청서 제출'처럼 짧은 할 일 문장 (항목 번호·'회신기한 :' 같은 표기 제외)
 - submissions: 제출해야 할 문서/자료. item(서류명), how(제출 방법: 공문, 전자우편 등), to(제출처)
-- actions: 담당자가 해야 할 일을 순서대로 (짧은 문장)
+- actions: 담당자가 해야 할 일을 순서대로 (짧은 문장, 5개 이내)
 - contact: 문의처 (부서, 전화, 메일)
 
 본문에 없는 내용은 만들지 말고 빈 값으로 두세요. 날짜에 연도가 없으면 오늘 기준으로 가장 가까운 미래 연도를 쓰세요.
+요청한 항목만 짧게 쓰세요."""
 
-[규칙으로 먼저 찾은 항목 (참고)]
+PROMPT = """오늘 날짜: {today}
+
+[규칙으로 먼저 찾은 기한 (참고)]
 {hints}
 
 [공문 본문]
@@ -53,6 +56,21 @@ PROMPT = """다음은 공공기관에서 받은 공문 본문과 붙임 문서 �
 [붙임 문서 발췌]
 {attach}
 """
+
+# 규칙 기반 추출로 이미 정확히 얻은 항목은 AI에게 다시 쓰게 하지 않는다 (생성 토큰 = 시간)
+_HINT_KEYS = ("제출기한", "회신기한", "신청기한", "제출서류", "회신자료", "제출자료")
+
+
+def ai_schema(base: dict) -> dict:
+    """규칙으로 이미 찾은 문의처·행사 정보는 빼고, AI가 채워야 할 항목만 담은 스키마."""
+    props = dict(SCHEMA["properties"])
+    if base.get("contact"):
+        props.pop("contact", None)
+    ev = base.get("event") or {}
+    if ev.get("name") and ev.get("date"):
+        props.pop("event", None)
+    return {"type": "object", "properties": props,
+            "required": [k for k in SCHEMA["required"] if k in props]}
 
 
 def read_attachments(files: list[dict], max_files: int = 2, max_chars: int = 700) -> list[dict]:
@@ -154,13 +172,15 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
     try:
         model = client.pick_chat_model(chat_model)
         attach_txt = "\n\n".join(f"<{a['name']}>\n{a['text']}" for a in attach) or "(없음)"
-        # CPU에서는 '입력 읽기'가 가장 오래 걸리므로 본문 핵심과 붙임 발췌만 넣는다
-        hints = "\n".join([f"- {k}: {v}" for k, v in list(base.get("fields", {}).items())[:12]] +
+        # CPU에서는 '입력 읽기'가 가장 오래 걸린다: 본문에 이미 있는 항목은 다시 넣지 않고,
+        # 기한 후보와 핵심 항목 몇 줄만 힌트로 준다
+        fields = base.get("fields", {})
+        hints = "\n".join([f"- {k}: {v}" for k, v in fields.items() if k in _HINT_KEYS][:4] +
                           [f"- 기한 후보: {d['date']} {d['what']}" for d in base["deadlines"][:5]]) or "(없음)"
         prompt = PROMPT.format(today=ref.isoformat(), body=trim_body(clean_body(body, title), 3000),
                                attach=attach_txt[:1400], hints=hints)
-        raw = client.chat([{"role": "user", "content": prompt}], model, temperature=0.1,
-                          num_ctx=min(num_ctx, 6144), fmt=SCHEMA)
+        raw = client.chat([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], model,
+                          temperature=0.1, num_ctx=num_ctx, fmt=ai_schema(base), max_tokens=700)
         data = extract_json(raw)
         if not isinstance(data, dict):
             raise LLMError("AI 응답을 해석할 수 없습니다")

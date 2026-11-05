@@ -29,6 +29,7 @@
       <button class="nav-item" data-page="collect"><i data-icon="tray"></i><span>공문 수집</span><em class="nav-badge" id="badge-notices"></em></button>
       <button class="nav-item" data-page="tasks"><i data-icon="check"></i><span>할 일·일정</span><em class="nav-badge red" id="badge-tasks"></em></button>
       <button class="nav-item" data-page="mail"><i data-icon="mail"></i><span>메일 양식</span></button>
+      <button class="nav-item" data-page="report"><i data-icon="doc"></i><span>보고서 작성</span></button>
       <div class="nav-label">관리</div>
       <button class="nav-item" data-page="library"><i data-icon="books"></i><span>규정 저장소</span></button>
       <button class="nav-item" data-page="settings"><i data-icon="gear"></i><span>설정</span></button>
@@ -276,6 +277,41 @@
       </div>
     </section>
 
+    <!-- 보고서 작성 -->
+    <section class="page" id="page-report">
+      <header class="page-head">
+        <div><div class="eyebrow">내 보고서 양식(HWPX) + 공문·자료 = 보고서</div><h1>보고서 작성</h1></div>
+      </header>
+      <div class="grid-mail">
+        <div class="card">
+          <label class="field"><span>보고서 양식</span><select class="input" id="rp-template"></select></label>
+          <div class="muted small" id="rp-tpl-info"></div>
+          <div class="dropzone" id="drop-report">
+            <i data-icon="doc"></i>
+            <div><b>한글 보고서 양식(.hwpx)을 끌어다 놓으세요</b></div>
+            <div class="muted small">□·○·- 문단 모양과 제목 상자·표를 그대로 살려 내용만 채웁니다</div>
+            <div class="row"><button class="btn sm" id="rp-pick">양식 파일 선택</button>
+              <button class="btn sm ghost danger" id="rp-del" title="선택한 양식 삭제"><i data-icon="trash"></i></button></div>
+          </div>
+          <label class="field"><span>관련 공문</span><select class="input" id="rp-notice"></select></label>
+          <label class="field"><span>보고 목적 (선택)</span><input class="input" id="rp-purpose" placeholder="예) 청렴 교육 참여 계획 보고"></label>
+          <label class="field"><span>추가 자료 (선택)</span><textarea class="input" id="rp-material" rows="5" placeholder="회의 메모, 추진 현황 등 보고서에 넣을 내용"></textarea></label>
+          <label class="switch-row"><span>로컬 AI로 작성</span><input type="checkbox" class="switch" id="rp-ai" checked></label>
+          <button class="btn primary full" id="rp-make"><i data-icon="sparkle"></i>보고서 만들기</button>
+        </div>
+        <div class="card mail-preview">
+          <div class="card-head"><h3>미리보기</h3><span class="muted small" id="rp-meta"></span></div>
+          <div class="empty-note muted" id="rp-empty">양식과 공문(또는 자료)을 고르고 [보고서 만들기]를 누르세요.<br>
+            만든 보고서는 공문 폴더(공문이 없으면 다운로드\서무비서\보고서)에 HWPX로 저장됩니다.</div>
+          <pre class="report-preview hidden" id="rp-result"></pre>
+          <div class="row end wrap">
+            <button class="btn" id="rp-folder" disabled><i data-icon="folder"></i>폴더 열기</button>
+            <button class="btn primary" id="rp-open" disabled><i data-icon="doc"></i>한글로 열기</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- 규정 저장소 -->
     <section class="page" id="page-library">
       <header class="page-head">
@@ -428,6 +464,7 @@
       <div class="spacer"></div>
       <button class="btn" id="nd-reanalyze"><i data-icon="sparkle"></i>다시 분석</button>
       <button class="btn" id="nd-folder"><i data-icon="folder"></i>폴더 열기</button>
+      <button class="btn" id="nd-report"><i data-icon="doc"></i>보고서 작성</button>
       <button class="btn primary" id="nd-mail"><i data-icon="mail"></i>메일 작성</button>
     </div>
   </div>

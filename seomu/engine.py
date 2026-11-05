@@ -116,7 +116,7 @@ class LocalEngine:
                 raise LLMError(f"모델 파일을 찾을 수 없습니다: {model}.gguf (models 폴더 확인)")
             port = _free_port()
             args = [server, "-m", str(path), "--host", "127.0.0.1", "--port", str(port),
-                    "-c", str(ctx), "--jinja"]
+                    "-c", str(ctx), "--jinja"] + self._speed_args(server, kind, ctx)
             if threads and threads > 0:
                 args += ["-t", str(threads)]
             if kind == "embed":
@@ -146,6 +146,35 @@ class LocalEngine:
                 pass
             time.sleep(0.5)
         raise LLMError("내장 AI 엔진이 시간 안에 준비되지 않았습니다.")
+
+    def _help(self, server: str) -> str:
+        """llama-server가 아는 옵션 목록 (버전마다 다르므로 실행 파일에 물어본다)."""
+        cache = self.__dict__.setdefault("_help_cache", {})
+        if server not in cache:
+            try:
+                r = subprocess.run(
+                    [server, "--help"], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL,
+                    encoding="utf-8", errors="ignore", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                cache[server] = (r.stdout or "") + (r.stderr or "")   # 버전에 따라 도움말이 stderr로 나온다
+            except (OSError, subprocess.SubprocessError):
+                cache[server] = ""
+        return cache[server]
+
+    def _speed_args(self, server: str, kind: str, ctx: int) -> list[str]:
+        """속도 옵션 — 엔진이 지원하는 것만 붙인다 (모르는 옵션을 주면 엔진이 켜지지 않는다)."""
+        h = self._help(server)
+        args: list[str] = []
+        if kind == "embed":
+            # 임베딩은 문단 하나를 한 번에 처리해야 한다: 배치를 문맥 길이만큼 키우면 긴 조문도 한 번에 계산
+            if "--ubatch-size" in h:
+                args += ["-b", str(ctx), "-ub", str(ctx)]
+        else:
+            # 앞부분이 같은 프롬프트(고정 지시문·대화 기록)는 계산해 둔 결과를 다시 쓴다
+            if "--cache-reuse" in h:
+                args += ["--cache-reuse", "256"]
+        if "--no-webui" in h:
+            args += ["--no-webui"]
+        return args
 
     def stop(self, kind: str | None = None) -> None:
         with self._lock:
@@ -230,10 +259,13 @@ class LocalClient:
             raise LLMError(f"내장 AI 엔진에 연결할 수 없습니다: {e}") from e
 
     def chat(self, messages: list[dict], model: str, temperature: float = 0.2, num_ctx: int = 8192,
-             fmt: str | dict | None = None, on_token: Callable[[str], None] | None = None) -> str:
+             fmt: str | dict | None = None, on_token: Callable[[str], None] | None = None,
+             max_tokens: int = 0) -> str:
         url = self.engine.ensure(model, "chat", ctx=max(self.ctx, 4096), threads=self.threads)
         payload: dict = {"messages": messages, "temperature": temperature, "stream": on_token is not None,
-                         "max_tokens": 1536}
+                         "max_tokens": int(max_tokens or 1536), "cache_prompt": True,
+                         # 생각(추론) 모드를 끈다: 답 전에 숨은 토큰을 만드느라 걸리는 시간을 없앤다
+                         "chat_template_kwargs": {"enable_thinking": False}}
         if isinstance(fmt, dict):
             payload["response_format"] = {"type": "json_schema", "json_schema": {"name": "result", "schema": fmt}}
         elif fmt:
