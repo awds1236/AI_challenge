@@ -400,3 +400,5 @@ details.raw pre { white-space: pre-wrap; font-family: var(--font); font-size: 12
 .report-preview { flex: 1; min-height: 360px; margin: 0 0 12px; padding: 16px 18px; border-radius: 12px; background: var(--fill, rgba(120,120,128,.08));
   font: 13.5px/1.75 inherit; font-family: inherit; white-space: pre-wrap; word-break: keep-all; overflow: auto; }
 #rp-empty { min-height: 120px; padding: 18px 4px; line-height: 1.7; }
+
+.engine-notice { grid-column: 1 / -1; padding: 12px 14px; border-radius: 12px; background: var(--blue-soft); font-size: 13.5px; line-height: 1.6; }

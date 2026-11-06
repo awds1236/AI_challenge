@@ -630,33 +630,38 @@ async function loadModels() {
   $$("#engine-seg button").forEach((b) => b.classList.toggle("on", b.dataset.v === (eng.setting || "auto")));
   $("#engine-status").innerHTML = eng.kind === "builtin"
     ? `내장 엔진 사용 중 (Ollama 불필요·인터넷 불필요) · 모델 폴더: <a data-open="${esc(eng.model_dir)}">${esc(eng.model_dir)}</a>`
-    : `Ollama 사용 중` + (eng.server ? "" : " · 내장 엔진 파일 없음 (engine 폴더에 llama-server를 넣으면 Ollama 없이 동작)");
+    : `Ollama 사용 중` + (eng.server ? "" : " · 내장 엔진 없음 — 모델 카드의 [받기]를 누르면 엔진과 모델을 함께 받아 Ollama 없이 동작합니다");
   const builtin = eng.kind === "builtin";
-  if (!c.engine_ok && !builtin) {
-    $("#model-grid").innerHTML = `<div class="muted">로컬 AI 엔진(Ollama)이 실행 중이 아닙니다. Ollama를 실행하거나, 위에서 '내장 엔진'을 선택하세요.<br><span class="small">${esc(c.engine_error)}</span></div>`;
-    return;
-  }
-  $("#model-grid").innerHTML = c.models.map((m) => `
+  // 내장 엔진을 쓰거나 Ollama가 꺼져 있으면: [받기]로 엔진+모델 파일을 자동으로 받는다
+  const dlMode = builtin || !c.engine_ok;
+  const notice = !c.engine_ok && !builtin
+    ? `<div class="engine-notice">Ollama가 실행 중이 아닙니다. 쓰실 모델의 <b>[받기]</b>를 누르면 Ollama 없이 동작하는 내장 엔진과 모델을 자동으로 받습니다.</div>` : "";
+  state.catalog = c.models;
+  $("#model-grid").innerHTML = notice + c.models.map((m) => {
+    const installed = dlMode ? (builtin && m.installed) : m.installed;
+    const gb = dlMode && m.dl ? m.dl.gb : m.download_gb;
+    return `
     <div class="model-card ${m.active ? "active" : ""}">
       <div class="top"><span class="name">${esc(m.name)}</span><span class="vendor">${esc(m.vendor)}</span><span class="spacer"></span>
         ${m.id === rec.model ? '<span class="badge green">내 PC 추천</span>' : ""}<span class="badge ${m.kind === "embed" ? "purple" : "blue"}">${esc(m.badge)}</span></div>
       <div class="desc">${esc(m.desc)}</div>
-      <div class="meta"><span class="badge">약 ${m.download_gb}GB</span><span class="badge">RAM ${m.min_ram_gb}GB+</span>
+      <div class="meta"><span class="badge">약 ${gb}GB</span><span class="badge">RAM ${m.min_ram_gb}GB+</span>
         <span class="badge">${esc(m.license)}</span><span class="badge">${esc(m.korean)}</span>${m.variant ? `<span class="badge green">${esc(m.variant)}</span>` : ""}
         ${m.installed && m.installed_id !== m.id && m.installed_id !== m.id + ":latest" ? `<span class="badge">설치됨: ${esc(m.installed_id)}</span>` : ""}</div>
       ${m.fits ? "" : '<div class="warn">⚠ 이 PC 메모리로는 느리거나 실행되지 않을 수 있습니다</div>'}
       <div class="actions">
-        ${m.installed
+        ${installed
           ? (m.active ? `<span class="badge green">${m.kind === "embed" ? "검색에 사용 중" : "사용 중"}</span>` : `<button class="btn primary sm" data-use="${esc(m.installed_id)}">사용</button>`) +
             `<button class="btn ghost sm danger" data-mdel="${esc(m.installed_id)}" title="${esc(m.installed_id)} 삭제">${svg("trash")}</button>`
-          : builtin
-            ? (m.ollama_blob ? `<button class="btn sm" data-oimport="${esc(m.id)}" title="Ollama로 받아 둔 ${esc(m.ollama_blob)}를 복사">Ollama에서 가져오기</button>` : "") +
-              `<button class="btn sm" data-gguf="${esc(m.id)}">${svg("download")} 파일 추가</button>`
+          : dlMode
+            ? (m.can_download ? `<button class="btn primary sm" data-dl="${esc(m.id)}">${svg("download")} 받기</button>` : "") +
+              (m.ollama_blob ? `<button class="btn sm" data-oimport="${esc(m.id)}" title="Ollama로 받아 둔 ${esc(m.ollama_blob)}를 복사">Ollama에서 가져오기</button>` : "") +
+              `<button class="btn ghost sm" data-gguf="${esc(m.id)}" title="이미 받은 .gguf 파일을 지정">파일 직접 지정</button>`
           : m.install === "gguf"
             ? `<button class="btn sm" data-gguf="${esc(m.id)}">${svg("download")} GGUF 등록</button>`
             : `<button class="btn sm" data-pull="${esc(m.id)}">${svg("download")} 받기</button>`}
       </div>
-    </div>`).join("");
+    </div>`; }).join("");
   $("#model-others").textContent = c.others.length ? `기타 설치된 모델: ${c.others.join(", ")} (아래 '직접 입력'으로 사용)` : "";
   const s = await api("get_settings");
   state.settings = s;
@@ -872,7 +877,13 @@ function bind() {
   $("#set-ai-check").addEventListener("click", () => { refreshAI(); loadModels(); });
   $("#model-grid").addEventListener("click", async (e) => {
     const u = e.target.closest("[data-use]"), p = e.target.closest("[data-pull]"), d = e.target.closest("[data-mdel]"), g = e.target.closest("[data-gguf]");
-    const oi = e.target.closest("[data-oimport]");
+    const oi = e.target.closest("[data-oimport]"), dl = e.target.closest("[data-dl]");
+    if (dl) {
+      const m = (state.catalog || []).find((x) => x.id === dl.dataset.dl) || {};
+      const size = m.dl ? m.dl.gb : m.download_gb;
+      if (!confirm(`${m.name} 모델(약 ${size}GB)을 인터넷에서 받습니다.\n내장 AI 엔진이 없으면 엔진(약 30MB)도 함께 받습니다.\n받는 동안 다른 작업을 해도 되며, 끊기면 다시 누를 때 이어서 받습니다.`)) return;
+      return modelJob("download_model", [m.id], `${m.name} 모델을 받았습니다. 바로 사용할 수 있습니다 (Ollama 불필요).`);
+    }
     if (oi) return modelJob("import_from_ollama", [oi.dataset.oimport], "Ollama의 모델 파일을 내장 엔진으로 옮겼습니다. '사용'을 눌러 적용하세요.");
     if (u) { await api("use_model", u.dataset.use); toast(`${u.dataset.use} 모델을 사용합니다`, "ok"); loadModels(); refreshAI(); }
     if (p) modelJob("pull_model", [p.dataset.pull], `${p.dataset.pull} 모델을 받았습니다. '사용'을 눌러 적용하세요.`);
@@ -884,6 +895,9 @@ function bind() {
       ggufTarget = g.dataset.gguf;
       const m = (await api("model_catalog")).models.find((x) => x.id === ggufTarget);
       $("#gguf-title").textContent = `${m.name} 등록`;
+      const q = m.quant || "Q4_K_M";
+      $("#gguf-quant").textContent = q; $("#gguf-hfq").textContent = `hf.co/사용자/저장소:${q}`;
+      $("#gguf-path").placeholder = `C:\\Users\\...\\Downloads\\${m.dl ? m.dl.file : "모델-" + q + ".gguf"}` + (state.engine === "builtin" ? "" : " 또는 hf.co/...");
       $("#gguf-hf").dataset.href = m.hf || "https://huggingface.co";
       $("#gguf-box").classList.remove("hidden");
       $("#gguf-path").focus();
