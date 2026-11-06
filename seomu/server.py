@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import mimetypes
 import secrets
 import threading
@@ -66,14 +67,26 @@ def make_handler(api, token: str):
                 body = json.dumps({"ok": True, "result": result}, ensure_ascii=False, default=str)
                 self._send(200, body.encode("utf-8"))
             except Exception as e:  # API 오류를 화면에 전달
+                logging.getLogger("seomu.api").warning("API %s 오류", name, exc_info=True)
                 body = json.dumps({"ok": False, "error": str(e) or e.__class__.__name__}, ensure_ascii=False)
                 self._send(200, body.encode("utf-8"))
 
     return Handler
 
 
+class _Server(ThreadingHTTPServer):
+    # Windows는 대기 중인 연결이 큐(기본 5개)를 넘으면 바로 거절한다 → 화면이 여러 요청을 동시에 보내면
+    # 일부가 'Failed to fetch'로 실패했다. 큐를 넉넉히 둔다.
+    request_queue_size = 128
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # pythonw로 실행하면 콘솔(stderr)이 없어 기본 처리기가 다시 오류를 낸다 → 로그로만 남긴다
+        logging.getLogger("seomu.server").warning("요청 처리 중 연결 오류", exc_info=True)
+
+
 def start_server(api, port: int = 0) -> tuple[ThreadingHTTPServer, str]:
     token = secrets.token_urlsafe(24)
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(api, token))
+    httpd = _Server(("127.0.0.1", port), make_handler(api, token))
     threading.Thread(target=httpd.serve_forever, daemon=True, name="seomu-http").start()
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/"

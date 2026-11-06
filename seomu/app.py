@@ -60,6 +60,36 @@ def run_app_window(url: str, profile: Path) -> bool:
     return True
 
 
+def setup_logging() -> Path:
+    """오류 기록 파일(앱 데이터 폴더의 seomu.log). pythonw로 실행하면 콘솔이 없어 오류가 사라지기 때문."""
+    import faulthandler
+    import logging
+    import logging.handlers
+    import threading
+    from .config import default_home
+    home = default_home()
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / "seomu.log"
+    h = logging.handlers.RotatingFileHandler(path, maxBytes=1 << 20, backupCount=2, encoding="utf-8")
+    h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.addHandler(h)
+    root.setLevel(logging.INFO)
+    if sys.stderr is None or sys.stdout is None:          # pythonw: print·traceback이 오류를 내지 않도록
+        stream = open(path.with_suffix(".out.log"), "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stdout or stream
+        sys.stderr = sys.stderr or stream
+    try:
+        faulthandler.enable(open(path.with_suffix(".crash.log"), "a", encoding="utf-8"))  # 비정상 종료 기록
+    except OSError:
+        pass
+    sys.excepthook = lambda t, v, tb: logging.getLogger("seomu").critical("처리되지 않은 오류", exc_info=(t, v, tb))
+    threading.excepthook = lambda a: logging.getLogger("seomu").error(
+        "작업 스레드 오류 (%s)", a.thread.name if a.thread else "?", exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
+    logging.getLogger("seomu").info("시작 (Python %s, %s)", sys.version.split()[0], sys.platform)
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="seomu", description=f"{APP_NAME} - 로컬 경량 AI 서무 보조 프로그램")
     ap.add_argument("--browser", action="store_true", help="프로그램 창 대신 기본 브라우저로 실행")
@@ -69,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args(argv)
 
+    setup_logging()
     api = Api()
     api.preload_model()          # 답변 모델을 미리 메모리에 올려 첫 분석·질문을 빠르게
     httpd, url = start_server(api, args.port)

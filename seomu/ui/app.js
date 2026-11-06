@@ -45,11 +45,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WD = "일월화수목금토";
 
 async function api(name, ...args) {
-  const r = await fetch("/api/" + name, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Seomu-Token": window.SEOMU_TOKEN || "" },
-    body: JSON.stringify({ args }),
-  });
+  let r;
+  // 내부 서버가 잠깐 바쁘거나 연결을 거절하면(Failed to fetch) 조금 기다렸다 다시 시도한다
+  for (let i = 0; ; i++) {
+    try {
+      r = await fetch("/api/" + name, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Seomu-Token": window.SEOMU_TOKEN || "" },
+        body: JSON.stringify({ args }),
+      });
+      break;
+    } catch (e) {
+      if (i >= 3) throw new Error("프로그램 내부 연결이 끊겼습니다. 창을 닫고 run.bat으로 다시 실행해 주세요. 계속되면 설정 맨 아래 '데이터 폴더'의 seomu.log 파일을 보내 주세요.");
+      await sleep(300 * (i + 1));
+    }
+  }
   const j = await r.json();
   if (!j.ok) throw new Error(j.error || "오류가 발생했습니다");
   return j.result;
