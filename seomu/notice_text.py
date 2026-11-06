@@ -139,3 +139,38 @@ def clean_what(context: str, raw_date: str, fields: dict, title: str) -> str:
     s = re.sub(r"\t+", " · ", s)
     s = re.sub(r"\s{2,}", " ", s).strip(" ·.,:")
     return s[:120] or title
+
+
+# ---------------------------------------------------------------- 할 일 제목
+_PURPOSE = re.compile(r"^.*?(?:을|를)?\s*(?:위해서?|위하여|위한|관련하여|관련|에\s*따라|에\s*의거하여|에\s*의거|하고자)\s+")
+_SUBJECT = re.compile(r"^(?:각|귀|해당)?\s*[^\s]{0,12}?(?:에서는|에서|께서는)\s+")
+_YEAR = re.compile(r"(?:20\d{2}|'\d{2})\s*년\s*(?:도)?\s*(?:부터|까지|에|중)?\s*")
+_ENDING = re.compile(r"\s*(?:하여|해)\s*주(?:시기\s*바랍니다|시기\s*바람|십시오|시기|시고|길|시)?\s*\.?\s*$"
+                     r"|\s*(?:하시기\s*)?(?:바랍니다|바람|요망)\.?\s*$")
+
+
+def short_task(text: str, limit: int = 34) -> str:
+    """공문 문장을 '서비스 개선과제 발굴·작성·제출'처럼 짧은 할 일 제목으로 줄인다.
+    목적절(~을 위해), 주어(각 처·실에서는), 연도, 공문 어미(~하여 주시기 바랍니다), 붙임 표시를 뺀다."""
+    s = re.sub(r"^\[[^\]]{1,60}\]\s*", "", (text or "").strip())          # 앞의 [공문 이름]
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"\(\s*(?:붙\s*임|첨\s*부|별\s*첨|서\s*식)\s*\d*\s*(?:서식)?\s*\)", "", s)
+    s = re.sub(r"(?:붙\s*임|별\s*첨)\s*\d*\s*(?=\S*서식)", "", s)
+    before = s
+    s = _PURPOSE.sub("", s)
+    if len(s) < 6:
+        s = before
+    s = _SUBJECT.sub("", s)
+    s = _YEAR.sub("", s)
+    s = re.sub(r"^(?:추진|제출|작성|시행|실시|개최|운영)(?:할|한|될|된)\s+", "", s)     # '추진할 서비스…'
+    s = _ENDING.sub("", s)
+    s = re.sub(r"(?:을|를)\s+(발굴|작성|검토|취합|파악|조사|정리|확인)하여\s+", r" \1·", s)
+    s = re.sub(r"\S*서식(?:으로|에)\s*", "", s)
+    s = re.sub(r"\s*,\s*", "·", s)
+    s = re.sub(r"(?:하여|하고)\s+(제출|회신|보고|신청|통보)$", r"·\1", s)
+    s = re.sub(r"·+", "·", s).strip(" ·.,:")
+    if len(s) > limit:                       # 단어 중간에서 자르지 않는다
+        cut = s[:limit]
+        sp = max(cut.rfind(" "), cut.rfind("·"))
+        s = (cut[:sp] if sp > limit // 2 else cut).rstrip(" ·,") + "…"
+    return s or (text or "").strip()[:limit]

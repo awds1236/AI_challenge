@@ -22,8 +22,57 @@ from pathlib import Path
 
 try:
     from lxml import etree
-except ImportError:  # pragma: no cover - requirements에 포함
-    etree = None  # type: ignore
+    HAVE_LXML = True
+except ImportError:  # lxml이 없어도 Python 기본 XML 기능으로 동작한다
+    import xml.etree.ElementTree as etree  # type: ignore[no-redef]
+    HAVE_LXML = False
+
+_XML_DECL = re.compile(rb"^\s*<\?xml[^>]*\?>")
+_ROOT_TAG = re.compile(rb"<(?![?!])[^>]*>")
+
+
+def _local(tag) -> str:
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _ns(tag: str) -> str:
+    return tag[1:].split("}", 1)[0] if tag.startswith("{") else ""
+
+
+def _parse(data: bytes):
+    """XML을 읽는다. 기본 XML 기능을 쓸 때는 원래 접두어(hp:, hs: 등)를 등록해 그대로 쓰게 한다."""
+    if HAVE_LXML:
+        return etree.parse(io.BytesIO(data), etree.XMLParser(remove_blank_text=False, huge_tree=True))
+    for _ev, (prefix, uri) in etree.iterparse(io.BytesIO(data), events=("start-ns",)):
+        if prefix and not re.fullmatch(r"ns\d+", prefix):
+            try:
+                etree.register_namespace(prefix, uri)
+            except ValueError:
+                pass
+    return etree.ElementTree(etree.fromstring(data))
+
+
+def _serialize(tree, original: bytes) -> bytes:
+    """XML을 쓴다. 원본의 XML 선언과 루트 태그(이름공간 선언 전부)를 그대로 살린다."""
+    if HAVE_LXML:
+        return etree.tostring(tree, xml_declaration=True, encoding="UTF-8", standalone=tree.docinfo.standalone)
+    body = etree.tostring(tree.getroot(), encoding="unicode").encode("utf-8")
+    decl = _XML_DECL.match(original)
+    head = decl.group(0).strip() if decl else b'<?xml version="1.0" encoding="UTF-8"?>'
+    m_orig = _ROOT_TAG.search(original, decl.end() if decl else 0)
+    m_new = _ROOT_TAG.search(body)
+    if m_orig and m_new and not m_orig.group(0).endswith(b"/>"):
+        kept = m_orig.group(0) + body[m_new.end():]   # 쓰지 않는 이름공간 선언도 원본대로 남긴다
+        try:
+            etree.fromstring(kept)
+            body = kept
+        except etree.ParseError:
+            pass                                      # 원본 루트로 바꿀 수 없으면 기본 출력 그대로
+    return head + body
+
+
+def _insert_after(parent, anchor, el) -> None:
+    parent.insert(list(parent).index(anchor) + 1, el)
 
 SECTION = "Contents/section0.xml"
 
@@ -49,7 +98,7 @@ def builtin_template() -> Path | None:
 
 
 def _L(e) -> str:
-    return etree.QName(e.tag).localname if isinstance(e.tag, str) else ""
+    return _local(e.tag)
 
 
 def _kids(e, name: str) -> list:
@@ -155,7 +204,7 @@ class Proto:
 
 
 def _make_run(proto_run, p, cpid: str, text: str):
-    ns = etree.QName(p.tag).namespace
+    ns = _ns(p.tag)
     if proto_run is not None:
         r = copy.deepcopy(proto_run)
         for c in list(r):
@@ -203,7 +252,7 @@ def set_cell_text(tc, text: str) -> None:
     if first and ps:                       # 글자 자리가 없는 빈 칸
         p = ps[0]
         runs = _kids(p, "run")
-        ns = etree.QName(p.tag).namespace
+        ns = _ns(p.tag)
         r = runs[0] if runs else etree.SubElement(p, f"{{{ns}}}run")
         t = etree.SubElement(r, f"{{{ns}}}t")
         t.text = text
@@ -235,7 +284,7 @@ def fill_table(tbl_p, rows: list[list[str]]):
         for ca in tr.iter():
             if _L(ca) == "cellAddr":
                 ca.set("rowAddr", str(i))
-        anchor.addnext(tr)
+        _insert_after(tbl, anchor, tr)
         anchor = tr
     tbl.set("rowCnt", str(1 + len(want)))
     # 표 전체 높이 = 행 높이 합 (한글이 열 때 다시 맞추지만, 값이 크게 틀리면 빈 공간이 생긴다)
@@ -292,16 +341,16 @@ def _read_zip(path: Path) -> tuple[dict[str, bytes], list[str]]:
 
 
 def load_template(path: str | Path) -> Template:
-    if etree is None:
-        raise ReportError("보고서 작성에는 lxml 패키지가 필요합니다 (pip install lxml).")
     path = Path(path)
     if path.suffix.lower() == ".hwp":
         raise ReportError("HWP 파일은 지원하지 않습니다. 한글에서 '다른 이름으로 저장 → HWPX'로 저장해 넣어 주세요.")
     files, order = _read_zip(path)
     if SECTION not in files:
         raise ReportError("양식에서 본문(Contents/section0.xml)을 찾지 못했습니다.")
-    parser = etree.XMLParser(remove_blank_text=False, huge_tree=True)
-    tree = etree.parse(io.BytesIO(files[SECTION]), parser)
+    try:
+        tree = _parse(files[SECTION])
+    except etree.ParseError as e:
+        raise ReportError(f"양식 본문을 읽지 못했습니다: {e}") from e
     sec = tree.getroot()
     if _L(sec) != "sec":
         sec = next((e for e in sec.iter() if _L(e) == "sec"), None)
@@ -504,8 +553,7 @@ def fill(t: Template, outline: dict, dept: str = "", today: date | None = None) 
     for p in ([secpr_holder] if secpr_holder is not None else []) + header + body + tail:
         sec.append(p)
 
-    xml = etree.tostring(tree, xml_declaration=True, encoding="UTF-8",
-                         standalone=t.tree.docinfo.standalone)
+    xml = _serialize(tree, t.files[SECTION])
     preview = "\r\n".join(_own_text(p) or " ".join(x.text or "" for x in p.iter() if _L(x) == "t")
                           for p in [c for c in sec if _L(c) == "p"])
     return _pack(t, {SECTION: xml, "Preview/PrvText.txt": preview.encode("utf-8")})
@@ -528,7 +576,7 @@ def _pack(t: Template, replace: dict[str, bytes]) -> bytes:
     with zipfile.ZipFile(io.BytesIO(data)) as z:   # 검증
         if z.testzip() is not None:
             raise ReportError("보고서 파일을 만드는 중 오류가 났습니다.")
-        etree.parse(io.BytesIO(z.read(SECTION)))
+        etree.fromstring(z.read(SECTION))
     return data
 
 

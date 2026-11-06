@@ -26,6 +26,7 @@ from .collector import (BrowserWorker, Captured, collect_from_files, collect_fro
                         make_notice_folder, safe_name, save_body, unique_path)
 from .config import Config
 from .deadlines import dday
+from .notice_text import short_task
 from .engine import LocalClient, LocalEngine, add_model_file, ollama_model_blob
 from .llm import LLMError, OllamaClient
 from . import models as model_catalog
@@ -63,9 +64,21 @@ class Api:
         self._jobs: dict[str, Job] = {}
         self._browser: BrowserWorker | None = None
         self._window = None
+        self._tidy_task_titles()
         if not self._store.list_templates():
             for t in DEFAULT_TEMPLATES:
                 self._store.save_template(t["name"], t["subject"], t["body"])
+
+    def _tidy_task_titles(self) -> None:
+        """예전 형식('[공문 이름] 긴 문장')으로 자동 등록된 할 일 제목을 짧은 제목으로 바꾼다 (한 번만 바뀐다)."""
+        try:
+            for t in self._store.list_tasks():
+                title = t.get("title") or ""
+                if t.get("notice_id") and title.startswith("["):
+                    self._store.update_task(t["id"], title=short_task(title),
+                                            detail=(t.get("detail") or "") + f"\n내용: {title}")
+        except Exception:  # 정리 실패가 시작을 막지 않게
+            logging.getLogger("seomu").warning("할 일 제목 정리 실패", exc_info=True)
 
     # ------------------------------------------------------------ 내부 유틸
     def _engine_kind(self) -> str:
@@ -444,12 +457,12 @@ class Api:
         for t in tasks:
             if not t.get("done"):
                 self._store.delete_task(t["id"])
-        label = analysis.get("folder_name") or title
         for d in analysis.get("deadlines") or []:
             if d["date"] in done:
                 continue
-            self._store.add_task(f"[{label}] {d['what'][:80]}",
-                                 detail=f"공문: {title}" + (f"\n시각: {d['time']}" if d.get("time") else ""),
+            # 제목은 '무엇을 할지'만 짧게 (공문 이름은 화면에서 따로 보여 준다), 원문은 상세에 둔다
+            self._store.add_task(short_task(d["what"]),
+                                 detail=f"공문: {title}\n내용: {d['what']}" + (f"\n시각: {d['time']}" if d.get("time") else ""),
                                  due=d["date"], notice_id=nid)
 
     def _finish_capture(self, job: Job, cap: Captured, use_ai: bool) -> dict:

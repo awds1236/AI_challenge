@@ -206,7 +206,7 @@ async function loadHome() {
   $("#home-docs").textContent = `색인된 규정 ${d.documents}건`;
   const tasks = d.tasks.filter((t) => t.due).slice(0, 6);
   $("#home-tasks").innerHTML = tasks.length ? tasks.map((t) => `
-    <li class="clickable" data-goto="tasks"><div class="main-col"><div class="t">${esc(t.title)}</div>
+    <li class="clickable" data-goto="tasks"><div class="main-col"><div class="t">${esc(taskTitle(t))}</div>
     <div class="s">${fmtDate(t.due)}${t.notice_title ? " · " + esc(t.notice_title) : ""}</div></div>${ddayBadge(t.dday)}</li>`).join("")
     : `<li class="empty">다가오는 기한이 없습니다 🎉</li>`;
   $("#home-notices").innerHTML = d.notices.length ? d.notices.map((n) => noticeRow(n)).join("") : `<li class="empty">수집한 공문이 없습니다</li>`;
@@ -427,6 +427,8 @@ async function watchAI(id) {
 }
 
 // ------------------------------------------------------------------ 할 일
+// 할 일 제목: 공문 이름은 아래 줄에 따로 보이므로 제목 앞의 [공문 이름]은 뺀다
+function taskTitle(t) { return t.notice_id ? String(t.title || "").replace(/^\[[^\]]{1,60}\]\s*/, "") : t.title; }
 async function loadTasks() {
   const filter = segValue($("#task-filter"));
   const all = await api("list_tasks", true);
@@ -435,9 +437,9 @@ async function loadTasks() {
   $("#task-list").innerHTML = list.length ? list.map((t) => `
     <li class="${t.done ? "done" : ""}" data-id="${t.id}">
       <input type="checkbox" class="task-check" ${t.done ? "checked" : ""}>
-      <div class="body"><div class="title">${esc(t.title)}</div>
+      <div class="body"><div class="title" title="${esc(t.detail || t.title)}">${esc(taskTitle(t))}</div>
         <div class="sub">${t.due ? `<span class="due ${t.dday !== null && t.dday <= 0 && !t.done ? "red" : ""}">${svg("calendar")} ${fmtDate(t.due)}</span>` : ""}
-        ${t.notice_title ? `<span class="link" data-notice="${t.notice_id}">${svg("doc")} ${esc(t.notice_title.slice(0, 40))}</span>` : ""}</div></div>
+        ${t.notice_title ? `<span class="link notice-name" data-notice="${t.notice_id}" title="${esc(t.notice_title)}">${svg("doc")} ${esc(t.notice_title)}</span>` : ""}</div></div>
       ${t.done ? "" : ddayBadge(t.dday)}
       <div class="actions"><button class="btn ghost sm" data-edit="${t.id}" title="기한 변경">${svg("edit")}</button>
       <button class="btn ghost sm danger" data-del="${t.id}" title="삭제">${svg("trash")}</button></div>
@@ -465,7 +467,7 @@ function renderCalendar() {
   const sel = state.calSel || todayKey;
   const items = byDate[sel] || [];
   $("#cal-day").innerHTML = `<div class="muted small" style="margin-bottom:4px">${fmtDate(sel)}</div>` +
-    (items.length ? items.map((t) => `<div class="item">${svg("clock")}<span>${esc(t.title)}</span></div>`).join("") : `<div class="muted">일정 없음</div>`);
+    (items.length ? items.map((t) => `<div class="item">${svg("clock")}<span><b>${esc(taskTitle(t))}</b>${t.notice_title ? `<span class="cal-notice">${esc(t.notice_title)}</span>` : ""}</span></div>`).join("") : `<div class="muted">일정 없음</div>`);
 }
 
 // ------------------------------------------------------------------ 메일

@@ -44,7 +44,7 @@ if defined FAILED (
   echo [경고] 설치하지 못한 패키지:%FAILED%
   echo        - pywebview 실패: 프로그램이 기본 브라우저 창으로 열립니다.
   echo        - playwright 실패: 공문 '브라우저 연동' 수집만 사용할 수 없습니다.
-  echo        - lxml 실패: '보고서 작성'만 사용할 수 없습니다.
+  echo        - lxml 실패: 보고서 작성은 기본 기능으로 계속 동작합니다.
 echo        - uiautomation 실패: 열린 창 수집에서 버튼 자동 누르기만 생략됩니다.
   echo        모든 기능을 쓰려면 Python 3.13 설치 후 ^(py install 3.13^) .venv 폴더를 지우고 다시 실행하세요.
 ) else (
