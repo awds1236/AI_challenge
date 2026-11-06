@@ -690,7 +690,7 @@ async function modelJob(name, args, doneMsg) {
     });
     toast(doneMsg, "ok");
     $("#gguf-box").classList.add("hidden");
-  } catch (e) { toast(e.message, "err", 8000); }
+  } catch (e) { toast(e.message, "err", e.message.length > 120 ? 20000 : 8000); }
   finally { modelBusy = false; box.classList.add("hidden"); loadModels(); refreshAI(); }
 }
 
