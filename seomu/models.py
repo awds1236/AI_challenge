@@ -10,9 +10,11 @@ import subprocess
 import sys
 
 # install: "pull" = Ollama 저장소에서 내려받기, "gguf" = GGUF 파일을 받아 등록
+# dl: 내장 엔진용 공식 GGUF 파일 (Hugging Face 저장소·파일 이름, 저장할 이름 as, 크기 GB) — [받기]로 자동 다운로드
 CATALOG: list[dict] = [
     {
-        "id": "gemma4:e2b-it-qat", "name": "Gemma 4 E2B", "vendor": "Google", "kind": "chat",
+        "id": "gemma4:e2b-it-qat",
+        "dl": {"repo": "google/gemma-4-E2B-it-qat-q4_0-gguf", "file": "gemma-4-E2B_q4_0-it.gguf", "as": "gemma-4-E2B-it-QAT-Q4_0", "gb": 3.3}, "quant": "Q4_0", "name": "Gemma 4 E2B", "vendor": "Google", "kind": "chat",
         "install": "pull", "download_gb": 4.5, "min_ram_gb": 8, "license": "Apache 2.0",
         "badge": "기본 · 추천", "korean": "다국어", "variant": "QAT 경량판",
         "alt": ["gemma4:e2b", "gemma4:e2b-it-q4_K_M"],
@@ -23,7 +25,8 @@ CATALOG: list[dict] = [
                 "(일반판 gemma4:e2b를 받아도 사용할 수 있습니다)",
     },
     {
-        "id": "gemma4:e4b-it-qat", "name": "Gemma 4 E4B", "vendor": "Google", "kind": "chat",
+        "id": "gemma4:e4b-it-qat",
+        "dl": {"repo": "google/gemma-4-E4B-it-qat-q4_0-gguf", "file": "gemma-4-E4B_q4_0-it.gguf", "as": "gemma-4-E4B-it-QAT-Q4_0", "gb": 5.2}, "quant": "Q4_0", "name": "Gemma 4 E4B", "vendor": "Google", "kind": "chat",
         "install": "pull", "download_gb": 6.1, "min_ram_gb": 16, "license": "Apache 2.0",
         "badge": "고성능", "korean": "다국어", "variant": "QAT 경량판",
         "alt": ["gemma4:e4b", "gemma4:latest", "gemma4:e4b-it-q4_K_M"],
@@ -33,7 +36,8 @@ CATALOG: list[dict] = [
                 "구형 CPU에서는 답변이 느릴 수 있습니다.",
     },
     {
-        "id": "kanana-2:3b", "name": "Kanana-2 3B", "vendor": "Kakao", "kind": "chat",
+        "id": "kanana-2:3b",
+        "dl": {"repo": "mradermacher/kanana-2-3b-instruct-GGUF", "file": "kanana-2-3b-instruct.Q4_K_M.gguf", "as": "kanana-2-3b-instruct-Q4_K_M", "gb": 2.2}, "quant": "Q4_K_M", "name": "Kanana-2 3B", "vendor": "Kakao", "kind": "chat",
         "install": "gguf", "download_gb": 2.0, "min_ram_gb": 6, "license": "Kanana Open License",
         "badge": "국산 · 한국어 특화", "korean": "한국어 특화",
         "hf": "https://huggingface.co/models?search=kanana-2-3b-instruct%20gguf",
@@ -42,7 +46,8 @@ CATALOG: list[dict] = [
                 "기관 배포 전 라이선스 원문을 확인하세요.",
     },
     {
-        "id": "kanana-2:1.3b", "name": "Kanana-2 1.3B", "vendor": "Kakao", "kind": "chat",
+        "id": "kanana-2:1.3b",
+        "dl": {"repo": "winwinplatform/Kanana-2-1.3b-instruct-GGUF", "file": "kanana2tiny-Q4_K_M.gguf", "as": "kanana-2-1.3b-instruct-Q4_K_M", "gb": 0.9}, "quant": "Q4_K_M", "name": "Kanana-2 1.3B", "vendor": "Kakao", "kind": "chat",
         "install": "gguf", "download_gb": 1.0, "min_ram_gb": 4, "license": "Kanana Open License",
         "badge": "국산 · 초경량", "korean": "한국어 특화",
         "hf": "https://huggingface.co/models?search=kanana-2-1.3b-instruct%20gguf",
@@ -50,7 +55,8 @@ CATALOG: list[dict] = [
         "desc": "가장 가벼운 한국어 모델. 저사양 PC에서 빠르게 동작합니다.",
     },
     {
-        "id": "embeddinggemma", "name": "EmbeddingGemma", "vendor": "Google", "kind": "embed",
+        "id": "embeddinggemma",
+        "dl": {"repo": "ggml-org/embeddinggemma-300m-qat-q8_0-GGUF", "file": "embeddinggemma-300m-qat-Q8_0.gguf", "as": "embeddinggemma-300m-qat-Q8_0", "gb": 0.33}, "quant": "Q8_0", "name": "EmbeddingGemma", "vendor": "Google", "kind": "embed",
         "install": "pull", "download_gb": 0.6, "min_ram_gb": 2, "license": "Gemma Terms",
         "badge": "검색 보조", "korean": "다국어", "gguf": ["embeddinggemma"],
         "hf": "https://huggingface.co/models?search=embeddinggemma-300m%20gguf",

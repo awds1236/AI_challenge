@@ -82,6 +82,18 @@ class LocalEngine:
             d.mkdir(parents=True, exist_ok=True)
             return d
 
+    def writable_engine_dir(self) -> Path:
+        """엔진을 받아 둘 폴더: 프로그램 폴더의 engine (쓸 수 없으면 앱 데이터 폴더)."""
+        d = app_dir() / "engine"
+        try:
+            d.parent.mkdir(parents=True, exist_ok=True)
+            probe = d.parent / ".write_test"
+            probe.write_text("ok")
+            probe.unlink()
+            return d
+        except OSError:
+            return self.home / "engine"
+
     def models(self) -> dict[str, Path]:
         """{모델 이름(파일 이름에서 .gguf 뺀 것): 경로}. 이미지용 보조 파일(mmproj)은 제외."""
         out: dict[str, Path] = {}

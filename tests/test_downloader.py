@@ -1,0 +1,175 @@
+"""[받기] 자동 다운로드 테스트 — 가짜 GitHub/Hugging Face 서버 사용."""
+import hashlib
+import io
+import json
+import sys
+import threading
+import time
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+from seomu import downloader
+from seomu.llm import LLMError
+
+HERE = Path(__file__).parent
+MODEL = b"GGUF" + bytes(range(256)) * 4000          # 약 1MB 가짜 모델
+
+
+def _engine_zip() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("build/bin/llama-server", f"#!/bin/sh\nexec {sys.executable} {HERE / 'fake_llama_server.py'} \"$@\"\n")
+        z.writestr("build/bin/libllama.so", b"lib")
+    return buf.getvalue()
+
+
+class Fake(BaseHTTPRequestHandler):
+    hits: list = []
+    corrupt = False
+    cut = 0           # 0이 아니면 그 바이트에서 연결을 끊는다 (이어 받기 시험)
+
+    def log_message(self, *a):
+        pass
+
+    def _send(self, body: bytes, code=200, ctype="application/octet-stream", extra=None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        Fake.hits.append((self.path, self.headers.get("Range")))
+        port = self.server.server_address[1]
+        if self.path == "/gh/latest":
+            name = {"win32": "llama-b1-bin-win-cpu-x64.zip", "darwin": "llama-b1-bin-macos-arm64.zip"}.get(
+                sys.platform, "llama-b1-bin-ubuntu-x64.zip")
+            z = _engine_zip()
+            return self._send(json.dumps({"tag_name": "b1", "assets": [
+                {"name": "llama-b1-bin-win-cuda-x64.zip", "size": 1, "browser_download_url": "x"},
+                {"name": name, "size": len(z), "browser_download_url": f"http://127.0.0.1:{port}/engine.zip"}]}).encode(),
+                ctype="application/json")
+        if self.path == "/engine.zip":
+            return self._send(_engine_zip())
+        if self.path.startswith("/api/models/"):
+            return self._send(json.dumps({"siblings": [{"rfilename": "m.gguf", "size": len(MODEL),
+                                                        "lfs": {"sha256": hashlib.sha256(MODEL).hexdigest()}}]}).encode(),
+                              ctype="application/json")
+        if self.path.endswith("/resolve/main/m.gguf"):
+            data = MODEL[:-1] + b"X" if Fake.corrupt else MODEL
+            rng = self.headers.get("Range")
+            start = int(rng.split("=")[1].rstrip("-")) if rng else 0
+            body = data[start:]
+            if Fake.cut and not rng:                       # 첫 요청은 중간에 끊는다
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body[:Fake.cut])
+                self.wfile.flush()
+                self.connection.close()
+                return
+            return self._send(body, 206 if rng else 200,
+                              extra={"Content-Range": f"bytes {start}-{len(data) - 1}/{len(data)}"} if rng else None)
+        self._send(b"no", 404)
+
+
+@pytest.fixture()
+def server(monkeypatch):
+    Fake.hits, Fake.corrupt, Fake.cut = [], False, 0
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Fake)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    monkeypatch.setattr(downloader, "HF_BASE", base)
+    monkeypatch.setattr(downloader, "GH_RELEASE_API", base + "/gh/latest")
+    yield base
+    srv.shutdown()
+
+
+SPEC = {"repo": "google/x", "file": "m.gguf", "as": "gemma-4-E2B-it-QAT-Q4_0"}
+
+
+def test_download_model_checks_and_progress(server, tmp_path):
+    seen = []
+    p = downloader.download_model(SPEC, tmp_path, seen.append)
+    assert p.name == "gemma-4-E2B-it-QAT-Q4_0.gguf" and p.read_bytes() == MODEL
+    assert seen[-1]["status"] == "파일 확인 중" and any(x["status"] == "AI 모델 받는 중" for x in seen)
+    assert not list(tmp_path.glob("*.part"))
+    n = len(Fake.hits)
+    downloader.download_model(SPEC, tmp_path)                 # 이미 있으면 다시 받지 않는다
+    assert len(Fake.hits) == n
+
+
+def test_download_resumes_after_cut(server, tmp_path):
+    Fake.cut = 300_000
+    with pytest.raises(LLMError, match="이어서"):
+        downloader.download_model(SPEC, tmp_path)
+    part = tmp_path / "gemma-4-E2B-it-QAT-Q4_0.gguf.part"
+    assert part.exists() and part.stat().st_size == 300_000
+    p = downloader.download_model(SPEC, tmp_path)
+    assert p.read_bytes() == MODEL
+    assert Fake.hits[-1][1] == "bytes=300000-"                # 받은 곳부터 이어서 요청
+
+
+def test_corrupt_download_is_rejected(server, tmp_path):
+    Fake.corrupt = True
+    with pytest.raises(LLMError, match="손상"):
+        downloader.download_model(SPEC, tmp_path)
+    assert not list(tmp_path.glob("*"))
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="가짜 엔진은 POSIX 셸 스크립트")
+def test_install_engine(server, tmp_path):
+    exe = downloader.install_engine(tmp_path / "engine")
+    assert exe == tmp_path / "engine" / "llama-server" and exe.exists()
+    assert exe.stat().st_mode & 0o100 and (tmp_path / "engine" / "libllama.so").exists()
+
+
+def test_extract_blocks_path_traversal(tmp_path):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("../evil.txt", "x")
+    a = tmp_path / "a.zip"
+    a.write_bytes(buf.getvalue())
+    (tmp_path / "d").mkdir()
+    with pytest.raises(LLMError):
+        downloader._extract(a, tmp_path / "d")
+    assert not (tmp_path / "evil.txt").exists()
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="가짜 엔진은 POSIX 셸 스크립트")
+def test_api_download_without_ollama(server, tmp_path, monkeypatch):
+    """Ollama가 꺼진 PC에서 [받기] → 엔진+모델을 받고 내장 엔진으로 바로 동작."""
+    from seomu import engine as engine_mod
+    from seomu import models as catalog
+    from seomu.api import Api
+    monkeypatch.setattr(engine_mod, "app_dir", lambda: tmp_path / "app")
+    entry = catalog.find("gemma4:e2b-it-qat")
+    monkeypatch.setitem(entry, "dl", {**entry["dl"], "repo": "google/x", "file": "m.gguf"})
+    api = Api(tmp_path / "home")
+    api.save_settings({"engine": "ollama", "ollama_url": "http://127.0.0.1:9"})
+    c = api.model_catalog()
+    assert not c["engine_ok"] and next(m for m in c["models"] if m["id"] == "gemma4:e2b-it-qat")["can_download"]
+    job = api.download_model("gemma4:e2b-it-qat")
+    for _ in range(200):
+        st = api.job_status(job["job_id"])
+        if st["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert st["status"] == "done", st
+    assert (tmp_path / "app" / "engine" / "llama-server").exists()
+    assert (tmp_path / "app" / "models" / "gemma-4-E2B-it-QAT-Q4_0.gguf").exists()
+    s = api.get_settings()
+    assert s["engine"] == "auto" and s["chat_model"] == "gemma-4-E2B-it-QAT-Q4_0"
+    cat = st["result"]
+    assert cat["engine"]["kind"] == "builtin" and cat["engine_ok"]
+    m = next(m for m in cat["models"] if m["id"] == "gemma4:e2b-it-qat")
+    assert m["installed"] and m["active"]
+    assert api.llm_status()["ok"] and api.llm_status()["engine"] == "builtin"
+    with pytest.raises(ValueError):
+        api.download_model("없는-모델")
+    api.shutdown()

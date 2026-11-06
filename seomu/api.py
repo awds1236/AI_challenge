@@ -29,7 +29,7 @@ from .deadlines import dday
 from .engine import LocalClient, LocalEngine, add_model_file, ollama_model_blob
 from .llm import LLMError, OllamaClient
 from . import models as model_catalog
-from . import attach, winwindow
+from . import attach, downloader, winwindow
 from .mail import DEFAULT_TEMPLATES, POLISH_PROMPT, VARIABLES, build_variables, render, tasks_to_ics
 from .parsers import SUPPORTED
 from .rag import RAGEngine
@@ -175,11 +175,17 @@ class Api:
             d["active"] = any(n in (active_chat, active_embed) for n in all_names) or \
                 (bool(d["installed_id"]) and d["installed_id"] in (active_chat, active_embed))
             d["fits"] = info["ram_total_gb"] == 0 or info["ram_total_gb"] >= m["min_ram_gb"] * 0.9
+            d["can_download"] = bool(m.get("dl"))
             items.append(d)
         if self._engine_kind() == "builtin":
             for d in items:            # Ollama에 받아 둔 모델이면 내장 엔진으로 옮겨올 수 있다
                 d["ollama_blob"] = next((n for n in model_catalog.names(d) if ollama_model_blob(n)), "")
         known.update(n for d in items if d["installed_id"] for n in [d["installed_id"]])
+        if self._engine_kind() == "builtin" or not st["ok"]:
+            # 내장 엔진(또는 Ollama가 꺼져 있어 내장 엔진으로 받을 때)은 이 PC의 모델 파일로 설치 여부를 본다
+            files = list(self._engine.models())
+            for d in items:
+                d["file_installed"] = model_catalog.installed_id(model_catalog.find(d["id"]) or d, files)
         return {"engine_ok": st["ok"], "engine_error": st.get("error", ""), "models": items,
                 "engine": self.engine_info(),
                 "others": [m for m in installed if m not in known], "active_chat": active_chat,
@@ -197,6 +203,8 @@ class Api:
         def cb(obj: dict):
             total, done = obj.get("total"), obj.get("completed")
             pct = f" {done / total * 100:.0f}%" if total and done is not None else ""
+            if total and done is not None and total > 50 << 20:   # 큰 파일은 받은 용량도 보여 준다
+                pct += f" ({done / (1 << 30):.1f}/{total / (1 << 30):.1f}GB)"
             job.message = f"{obj.get('status', '진행 중')}{pct}"
             job.text = f"{done or 0}/{total or 0}"
         return cb
@@ -216,6 +224,28 @@ class Api:
                 client.delete(model_id)
             return self.model_catalog()
         return self._run_job("pull", work)
+
+    def download_model(self, model_id: str) -> dict:
+        """[받기]: 내장 엔진이 없으면 엔진부터 받고, 모델 공식 파일(GGUF)을 받아 바로 쓰게 한다 (Ollama 불필요)."""
+        m = model_catalog.find(model_id)
+        if not m or not m.get("dl"):
+            raise ValueError("자동으로 받을 수 없는 모델입니다. '파일 추가'로 GGUF 파일을 지정해 주세요.")
+
+        def work(job: Job):
+            cb = self._progress(job)
+            self._engine.stop()
+            if not self._engine.server_path():
+                job.message = "AI 엔진 받는 중…"
+                downloader.install_engine(self._engine.writable_engine_dir(), cb)
+            path = downloader.download_model(m["dl"], self._engine.writable_model_dir(), cb)
+            values = {"embed_model" if m["kind"] == "embed" else "chat_model": path.stem}
+            if self._cfg.settings.engine == "ollama":
+                values["engine"] = "auto"        # 받은 내장 엔진을 바로 쓰도록
+            self.save_settings(values)
+            if m["kind"] == "embed":
+                self._rag.invalidate()
+            return self.model_catalog()
+        return self._run_job("download", work)
 
     def import_gguf(self, path: str, model_id: str) -> dict:
         p = Path(path or "")
