@@ -53,17 +53,35 @@ class Fake(BaseHTTPRequestHandler):
     def do_GET(self):
         Fake.hits.append((self.path, self.headers.get("Range")))
         port = self.server.server_address[1]
-        if self.path == "/gh/latest" and Fake.api_limited:
-            return self._send(json.dumps({"message": "API rate limit exceeded for 1.2.3.4."}).encode(), 403,
-                              ctype="application/json")
+        if self.path == "/gh/releases":
+            if Fake.api_limited:
+                return self._send(json.dumps({"message": "API rate limit exceeded for 1.2.3.4."}).encode(), 403,
+                                  ctype="application/json")
+            z = _engine_zip()
+            return self._send(json.dumps([
+                # 최신 버전: 파일이 아직 다 올라오지 않음 (CPU 빌드 없음)
+                {"tag_name": "b2", "assets": [{"name": "llama-b2-bin-win-cuda-12.4-x64.zip", "size": 1,
+                                               "browser_download_url": "x"}]},
+                {"tag_name": "b1", "assets": [
+                    {"name": "llama-b1-bin-win-cuda-12.4-x64.zip", "size": 1, "browser_download_url": "x"},
+                    {"name": _asset_name(), "size": len(z), "browser_download_url": f"http://127.0.0.1:{port}/engine.zip"}]},
+            ]).encode(), ctype="application/json")
+        if self.path == "/repo/releases":
+            if not Fake.page_list:
+                return self._send(b"no", 404)
+            return self._send(b'<a href="/ggml-org/llama.cpp/releases/tag/b2">b2</a>'
+                              b'<a href="/ggml-org/llama.cpp/releases/tag/b1">b1</a>', ctype="text/html")
         if self.path == "/repo/releases/latest":
             self.send_response(302)
             self.send_header("Location", f"http://127.0.0.1:{port}/repo/releases/tag/b1")
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        if self.path == "/repo/releases/tag/b1":
+        if self.path.startswith("/repo/releases/tag/"):
             return self._send(b"<html>release</html>", ctype="text/html")
+        if self.path == "/repo/releases/expanded_assets/b2":
+            return self._send(b'<a href="/ggml-org/llama.cpp/releases/download/b2/llama-b2-bin-win-cuda-12.4-x64.zip">x</a>',
+                              ctype="text/html")
         if self.path == "/repo/releases/expanded_assets/b1":
             if not Fake.page_list:
                 return self._send(b"no", 404)
@@ -72,13 +90,6 @@ class Fake(BaseHTTPRequestHandler):
             return self._send(links.encode(), ctype="text/html")
         if self.path == "/repo/releases/download/b1/" + _asset_name():
             return self._send(_engine_zip())
-        if self.path == "/gh/latest":
-            name = _asset_name()
-            z = _engine_zip()
-            return self._send(json.dumps({"tag_name": "b1", "assets": [
-                {"name": "llama-b1-bin-win-cuda-x64.zip", "size": 1, "browser_download_url": "x"},
-                {"name": name, "size": len(z), "browser_download_url": f"http://127.0.0.1:{port}/engine.zip"}]}).encode(),
-                ctype="application/json")
         if self.path == "/engine.zip":
             return self._send(_engine_zip())
         if self.path.startswith("/api/models/"):
@@ -110,7 +121,7 @@ def server(monkeypatch):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     monkeypatch.setattr(downloader, "HF_BASE", base)
-    monkeypatch.setattr(downloader, "GH_RELEASE_API", base + "/gh/latest")
+    monkeypatch.setattr(downloader, "GH_RELEASES_API", base + "/gh/releases")
     monkeypatch.setattr(downloader, "GH_REPO_URL", base + "/repo")
     yield base
     srv.shutdown()
@@ -209,7 +220,7 @@ def test_install_engine_when_api_rate_limited(server, tmp_path, page_list):
     exe = downloader.install_engine(tmp_path / "engine")
     assert exe.exists()
     paths = [h[0] for h in Fake.hits]
-    assert "/repo/releases/latest" in paths and "/repo/releases/download/b1/" + _asset_name() in paths
+    assert "/repo/releases/download/b1/" + _asset_name() in paths
     assert not any("cuda" in p or "vulkan" in p for p in paths)          # GPU 전용 빌드는 받지 않는다
 
 
@@ -235,3 +246,18 @@ def test_engine_asset_choice_by_platform():
     rel2 = {"assets": [{"name": "llama-b9-bin-win-cuda-x64.zip"}, {"name": "llama-b9-bin-win-x64.zip"}]}
     assert downloader.pick_engine_asset(rel2, "win", "x64")["name"] == "llama-b9-bin-win-x64.zip"
     assert downloader.pick_engine_asset({"message": "rate limit"}, "win", "x64") is None
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="가짜 엔진은 POSIX 셸 스크립트")
+def test_install_engine_skips_release_still_uploading(server, tmp_path):
+    """최신 버전에 이 PC용 파일이 아직 안 올라왔으면 바로 전 버전을 받는다."""
+    exe = downloader.install_engine(tmp_path / "engine")
+    assert exe.exists() and "/engine.zip" in [h[0] for h in Fake.hits]
+
+
+def test_engine_not_found_message_lists_seen_files(server, tmp_path, monkeypatch):
+    monkeypatch.setattr(downloader, "engine_asset_score", lambda n, p, a: None)   # 어떤 이름도 안 맞는 경우
+    monkeypatch.setattr(downloader, "GH_REPO_URL", "http://127.0.0.1:9/repo")
+    with pytest.raises(LLMError) as e:
+        downloader.install_engine(tmp_path / "engine")
+    assert "찾은 파일: llama-b2-bin-win-cuda-12.4-x64.zip" in str(e.value)
