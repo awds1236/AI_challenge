@@ -28,6 +28,7 @@ from .llm import LLMError
 
 HF_BASE = "https://huggingface.co"
 GH_RELEASE_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+GH_REPO_URL = "https://github.com/ggml-org/llama.cpp"
 UA = {"User-Agent": "SeomuAI"}
 Progress = Callable[[dict], None] | None
 
@@ -42,6 +43,11 @@ def _get_json(url: str, timeout: float = 30) -> dict | list:
     try:
         with _opener().open(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "ignore")[:300]
+        if "rate limit" in body.lower():
+            raise LLMError("GitHub 조회 한도 초과 — 같은 인터넷 주소를 쓰는 PC가 많으면 생깁니다") from e
+        raise LLMError(f"인터넷에서 정보를 받지 못했습니다 ({url.split('/')[2]}, {e.code})") from e
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise LLMError(f"인터넷에서 정보를 받지 못했습니다 ({url.split('/')[2]}): {e}") from e
 
@@ -129,21 +135,87 @@ def download_model(spec: dict, model_dir: Path, on_progress: Progress = None) ->
 
 
 # ---------------------------------------------------------------- 엔진
-def _engine_asset_pattern() -> str:
-    if sys.platform.startswith("win"):
-        return r"bin-win-cpu-x64\.zip$"
-    if sys.platform == "darwin":
-        return r"bin-macos-(arm64|x64)\.(zip|tar\.gz)$"
-    return r"bin-ubuntu-x64\.(zip|tar\.gz)$"
+_GPU_ONLY = ("cuda", "cudart", "vulkan", "hip", "rocm", "radeon", "sycl", "opencl", "kompute", "musa",
+             "openvino", "cann", "npu", "metal-")
 
 
-def pick_engine_asset(release: dict) -> dict | None:
-    pat = re.compile(_engine_asset_pattern())
-    arm = sys.platform == "darwin" and os.uname().machine == "arm64"
-    assets = [a for a in release.get("assets") or [] if pat.search(a.get("name", ""))]
-    if sys.platform == "darwin":
-        assets.sort(key=lambda a: ("arm64" in a["name"]) != arm)
-    return assets[0] if assets else None
+def _platform() -> tuple[str, str]:
+    plat = "win" if sys.platform.startswith("win") else "mac" if sys.platform == "darwin" else "linux"
+    try:
+        machine = os.uname().machine.lower() if hasattr(os, "uname") else (os.environ.get("PROCESSOR_ARCHITECTURE") or "").lower()
+    except OSError:
+        machine = ""
+    return plat, "arm64" if machine in ("arm64", "aarch64") else "x64"
+
+
+def engine_asset_score(name: str, plat: str, arch: str) -> int | None:
+    """llama.cpp 배포 파일 이름이 이 PC용 CPU 빌드인지 점수로 판단 (아니면 None).
+    파일 이름 규칙이 바뀌어도 찾을 수 있게 운영체제·CPU 종류·GPU 전용 여부로 고른다."""
+    n = name.lower()
+    if not (n.endswith(".zip") or n.endswith(".tar.gz")) or "bin" not in n:
+        return None
+    if plat == "win" and ("win" not in n or not n.endswith(".zip")):
+        return None
+    if plat == "mac" and not any(k in n for k in ("macos", "osx", "darwin")):
+        return None
+    if plat == "linux" and not any(k in n for k in ("ubuntu", "linux")):
+        return None
+    if any(k in n for k in _GPU_ONLY):
+        return None
+    is_arm = "arm64" in n or "aarch64" in n
+    if (arch == "arm64") != is_arm and not (plat == "mac" and not is_arm and "x64" not in n):
+        return None
+    score = 1
+    if "cpu" in n:
+        score += 4
+    if "avx2" in n:
+        score += 1
+    if n.endswith(".zip"):
+        score += 1
+    return score
+
+
+def pick_engine_asset(release: dict, plat: str | None = None, arch: str | None = None) -> dict | None:
+    if plat is None or arch is None:
+        plat, arch = _platform()
+    scored = []
+    for a in release.get("assets") or []:
+        sc = engine_asset_score(a.get("name", ""), plat, arch)
+        if sc is not None:
+            scored.append((sc, a))
+    scored.sort(key=lambda x: -x[0])
+    return scored[0][1] if scored else None
+
+
+def _release_from_page() -> dict:
+    """API 조회 한도(시간당 60회)에 걸렸을 때: 공개 배포 페이지에서 최신 버전과 파일 목록을 읽는다."""
+    req = urllib.request.Request(f"{GH_REPO_URL}/releases/latest", headers=UA)
+    with _opener().open(req, timeout=30) as r:
+        final = r.geturl()
+    m = re.search(r"/releases/tag/([^/?#]+)", final)
+    if not m:
+        raise LLMError("최신 엔진 버전을 확인하지 못했습니다.")
+    tag = m.group(1)
+    names: list[str] = []
+    try:
+        req = urllib.request.Request(f"{GH_REPO_URL}/releases/expanded_assets/{tag}", headers=UA)
+        with _opener().open(req, timeout=30) as r:
+            html = r.read().decode("utf-8", "ignore")
+        names = sorted(set(re.findall(rf"/releases/download/{re.escape(tag)}/([^\"'<>\s]+)", html)))
+    except (urllib.error.URLError, OSError):
+        pass
+    if not names:     # 목록도 못 읽으면 흔한 이름을 직접 시도
+        names = [f"llama-{tag}-bin-win-cpu-x64.zip", f"llama-{tag}-bin-win-x64.zip",
+                 f"llama-{tag}-bin-ubuntu-x64.zip", f"llama-{tag}-bin-ubuntu-x64.tar.gz",
+                 f"llama-{tag}-bin-macos-arm64.zip", f"llama-{tag}-bin-macos-arm64.tar.gz",
+                 f"llama-{tag}-bin-macos-x64.zip"]
+    return {"tag_name": tag, "assets": [{"name": n, "size": 0,
+                                         "browser_download_url": f"{GH_REPO_URL}/releases/download/{tag}/{n}"}
+                                        for n in names]}
+
+
+MANUAL_ENGINE = ("직접 넣는 방법: {repo}/releases 에서 이름에 'bin-win-cpu-x64'가 들어간 zip 파일을 받아 "
+                 "압축을 풀고, 안의 파일을 프로그램 폴더의 engine 폴더({dir})에 넣은 뒤 다시 확인을 누르세요.")
 
 
 def _extract(archive: Path, dest: Path) -> None:
@@ -171,26 +243,53 @@ def _extract(archive: Path, dest: Path) -> None:
 
 def install_engine(engine_dir: Path, on_progress: Progress = None) -> Path:
     """llama.cpp 최신 공식 빌드(CPU)를 받아 engine_dir에 푼다. llama-server 경로를 돌려준다."""
+    engine_dir = Path(engine_dir)
+    manual = MANUAL_ENGINE.format(repo=GH_REPO_URL, dir=engine_dir)
     if on_progress:
         on_progress({"status": "AI 엔진 정보 확인 중"})
-    rel = _get_json(GH_RELEASE_API)
-    asset = pick_engine_asset(rel if isinstance(rel, dict) else {})
-    if not asset:
-        raise LLMError("이 PC에 맞는 AI 엔진(llama.cpp) 파일을 찾지 못했습니다.")
-    engine_dir = Path(engine_dir)
+    why = ""
+    try:
+        rel = _get_json(GH_RELEASE_API)
+        if not isinstance(rel, dict) or not rel.get("assets"):
+            why = (rel.get("message") if isinstance(rel, dict) else "") or "배포 목록이 비어 있음"
+            rel = {}
+    except LLMError as e:
+        why, rel = str(e), {}
+    candidates = [a for a in [pick_engine_asset(rel)] if a]
+    if not candidates:                       # API 한도 초과·차단 → 배포 페이지에서 직접 찾기
+        try:
+            page = _release_from_page()
+            plat, arch = _platform()
+            candidates = sorted((a for a in page["assets"] if engine_asset_score(a["name"], plat, arch) is not None),
+                                key=lambda a: -(engine_asset_score(a["name"], plat, arch) or 0))
+        except (LLMError, urllib.error.URLError, OSError) as e:
+            why = why or str(e)
+    if not candidates:
+        raise LLMError(f"이 PC에 맞는 AI 엔진(llama.cpp) 파일을 찾지 못했습니다{f' ({why})' if why else ''}. {manual}")
+    exe = "llama-server.exe" if sys.platform.startswith("win") else "llama-server"
+    last = ""
     with tempfile.TemporaryDirectory() as tmp:
-        archive = download(asset["browser_download_url"], Path(tmp) / asset["name"], on_progress,
-                           "AI 엔진 받는 중", int(asset.get("size") or 0))
-        staging = Path(tmp) / "x"
-        staging.mkdir()
-        _extract(archive, staging)
-        exe = "llama-server.exe" if sys.platform.startswith("win") else "llama-server"
-        found = next(staging.rglob(exe), None)
-        if not found:
-            raise LLMError("받은 엔진 파일에 llama-server가 없습니다.")
-        if engine_dir.exists():
-            shutil.rmtree(engine_dir, ignore_errors=True)
-        shutil.copytree(found.parent, engine_dir)
+        for asset in candidates[:4]:
+            try:
+                archive = download(asset["browser_download_url"], Path(tmp) / asset["name"], on_progress,
+                                   "AI 엔진 받는 중", int(asset.get("size") or 0))
+            except LLMError as e:
+                last = str(e)
+                continue
+            staging = Path(tmp) / "x"
+            shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir()
+            _extract(archive, staging)
+            found = next(staging.rglob(exe), None)
+            if not found:
+                last = f"{asset['name']}에 llama-server가 없습니다"
+                continue
+            if engine_dir.exists():
+                shutil.rmtree(engine_dir, ignore_errors=True)
+            shutil.copytree(found.parent, engine_dir)
+            break
+        else:
+            raise LLMError(f"AI 엔진을 받지 못했습니다 ({last}). {manual}")
     server = engine_dir / exe
     if not sys.platform.startswith("win"):
         for p in engine_dir.iterdir():

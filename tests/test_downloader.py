@@ -26,10 +26,17 @@ def _engine_zip() -> bytes:
     return buf.getvalue()
 
 
+def _asset_name():
+    return {"win32": "llama-b1-bin-win-cpu-x64.zip", "darwin": "llama-b1-bin-macos-arm64.zip"}.get(
+        sys.platform, "llama-b1-bin-ubuntu-x64.zip")
+
+
 class Fake(BaseHTTPRequestHandler):
     hits: list = []
     corrupt = False
     cut = 0           # 0이 아니면 그 바이트에서 연결을 끊는다 (이어 받기 시험)
+    api_limited = False   # GitHub API 조회 한도 초과 흉내
+    page_list = True      # 배포 페이지 파일 목록 제공 여부
 
     def log_message(self, *a):
         pass
@@ -46,9 +53,27 @@ class Fake(BaseHTTPRequestHandler):
     def do_GET(self):
         Fake.hits.append((self.path, self.headers.get("Range")))
         port = self.server.server_address[1]
+        if self.path == "/gh/latest" and Fake.api_limited:
+            return self._send(json.dumps({"message": "API rate limit exceeded for 1.2.3.4."}).encode(), 403,
+                              ctype="application/json")
+        if self.path == "/repo/releases/latest":
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{port}/repo/releases/tag/b1")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path == "/repo/releases/tag/b1":
+            return self._send(b"<html>release</html>", ctype="text/html")
+        if self.path == "/repo/releases/expanded_assets/b1":
+            if not Fake.page_list:
+                return self._send(b"no", 404)
+            links = "".join(f'<a href="/ggml-org/llama.cpp/releases/download/b1/{n}">{n}</a>' for n in
+                            ["llama-b1-bin-win-cuda-12.4-x64.zip", "llama-b1-bin-win-vulkan-x64.zip", _asset_name()])
+            return self._send(links.encode(), ctype="text/html")
+        if self.path == "/repo/releases/download/b1/" + _asset_name():
+            return self._send(_engine_zip())
         if self.path == "/gh/latest":
-            name = {"win32": "llama-b1-bin-win-cpu-x64.zip", "darwin": "llama-b1-bin-macos-arm64.zip"}.get(
-                sys.platform, "llama-b1-bin-ubuntu-x64.zip")
+            name = _asset_name()
             z = _engine_zip()
             return self._send(json.dumps({"tag_name": "b1", "assets": [
                 {"name": "llama-b1-bin-win-cuda-x64.zip", "size": 1, "browser_download_url": "x"},
@@ -80,12 +105,13 @@ class Fake(BaseHTTPRequestHandler):
 
 @pytest.fixture()
 def server(monkeypatch):
-    Fake.hits, Fake.corrupt, Fake.cut = [], False, 0
+    Fake.hits, Fake.corrupt, Fake.cut, Fake.api_limited, Fake.page_list = [], False, 0, False, True
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Fake)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     monkeypatch.setattr(downloader, "HF_BASE", base)
     monkeypatch.setattr(downloader, "GH_RELEASE_API", base + "/gh/latest")
+    monkeypatch.setattr(downloader, "GH_REPO_URL", base + "/repo")
     yield base
     srv.shutdown()
 
@@ -173,3 +199,39 @@ def test_api_download_without_ollama(server, tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         api.download_model("없는-모델")
     api.shutdown()
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="가짜 엔진은 POSIX 셸 스크립트")
+@pytest.mark.parametrize("page_list", [True, False])
+def test_install_engine_when_api_rate_limited(server, tmp_path, page_list):
+    """GitHub API 한도 초과(기관망 공용 주소에서 흔함) → 배포 페이지 목록, 그것도 없으면 흔한 이름으로 받는다."""
+    Fake.api_limited, Fake.page_list = True, page_list
+    exe = downloader.install_engine(tmp_path / "engine")
+    assert exe.exists()
+    paths = [h[0] for h in Fake.hits]
+    assert "/repo/releases/latest" in paths and "/repo/releases/download/b1/" + _asset_name() in paths
+    assert not any("cuda" in p or "vulkan" in p for p in paths)          # GPU 전용 빌드는 받지 않는다
+
+
+def test_install_engine_failure_explains_manual_steps(server, tmp_path, monkeypatch):
+    Fake.api_limited = True
+    monkeypatch.setattr(downloader, "GH_REPO_URL", "http://127.0.0.1:9/repo")       # 배포 페이지도 접속 불가
+    with pytest.raises(LLMError) as e:
+        downloader.install_engine(tmp_path / "engine")
+    msg = str(e.value)
+    assert "조회 한도 초과" in msg and "bin-win-cpu-x64" in msg and str(tmp_path / "engine") in msg
+
+
+def test_engine_asset_choice_by_platform():
+    rel = {"assets": [{"name": n} for n in [
+        "cudart-llama-bin-win-cuda-12.4-x64.zip", "llama-b9-bin-win-vulkan-x64.zip", "llama-b9-bin-win-cpu-arm64.zip",
+        "llama-b9-bin-win-x64.zip", "llama-b9-bin-win-cpu-x64.zip", "llama-b9-bin-ubuntu-x64.zip",
+        "llama-b9-bin-ubuntu-vulkan-x64.zip", "llama-b9-bin-macos-arm64.zip", "llama-b9-bin-macos-x64.zip"]]}
+    assert downloader.pick_engine_asset(rel, "win", "x64")["name"] == "llama-b9-bin-win-cpu-x64.zip"
+    assert downloader.pick_engine_asset(rel, "win", "arm64")["name"] == "llama-b9-bin-win-cpu-arm64.zip"
+    assert downloader.pick_engine_asset(rel, "linux", "x64")["name"] == "llama-b9-bin-ubuntu-x64.zip"
+    assert downloader.pick_engine_asset(rel, "mac", "arm64")["name"] == "llama-b9-bin-macos-arm64.zip"
+    # 이름 규칙이 바뀌어 cpu 표시가 없어도 Windows x64 빌드를 찾는다
+    rel2 = {"assets": [{"name": "llama-b9-bin-win-cuda-x64.zip"}, {"name": "llama-b9-bin-win-x64.zip"}]}
+    assert downloader.pick_engine_asset(rel2, "win", "x64")["name"] == "llama-b9-bin-win-x64.zip"
+    assert downloader.pick_engine_asset({"message": "rate limit"}, "win", "x64") is None
