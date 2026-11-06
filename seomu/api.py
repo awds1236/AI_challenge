@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import shutil
@@ -14,7 +15,6 @@ import subprocess
 import sys
 import threading
 import time
-import traceback
 import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -96,7 +96,7 @@ class Api:
             except Exception as e:  # 모든 오류를 화면에 전달
                 job.error = str(e) or e.__class__.__name__
                 job.status = "error"
-                traceback.print_exc()
+                logging.getLogger("seomu.job").warning("작업 %s 오류", kind, exc_info=True)
         threading.Thread(target=runner, daemon=True, name=f"job-{kind}").start()
         # 오래된 작업 정리
         if len(self._jobs) > 50:
