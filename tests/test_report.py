@@ -225,3 +225,33 @@ def test_engine_speed_args_only_when_supported(tmp_path, monkeypatch):
     monkeypatch.setattr(e, "_help", lambda server: "--cache-reuse N\n--ubatch-size N\n--no-webui")
     assert e._speed_args("x", "chat", 8192) == ["--cache-reuse", "256", "--no-webui"]
     assert e._speed_args("x", "embed", 2048)[:4] == ["-b", "2048", "-ub", "2048"]
+
+
+def test_works_without_lxml(tmp_path):
+    """lxml이 설치되지 않은 PC에서도 Python 기본 XML 기능으로 같은 결과를 만든다."""
+    import subprocess
+    import sys as _sys
+    root = Path(__file__).resolve().parents[1]
+    out_std = tmp_path / "std.hwpx"
+    src = tmp_path / "outline.json"
+    src.write_text(json.dumps(OUTLINE, ensure_ascii=False), encoding="utf-8")
+    code = ("import sys, json; sys.modules['lxml'] = None\n"
+            "from seomu import report as rp\n"
+            "assert rp.HAVE_LXML is False\n"
+            "from datetime import date\n"
+            f"o = json.load(open({str(src)!r}, encoding='utf-8'))\n"
+            "t = rp.load_template(rp.builtin_template()); data = rp.fill(t, o, dept='총무과', today=date(2026, 11, 5))\n"
+            f"open({str(out_std)!r}, 'wb').write(data)\n")
+    subprocess.run([_sys.executable, "-c", code], cwd=root, check=True)
+    lx = rp.fill(rp.load_template(TPL), OUTLINE, dept="총무과", today=date(2026, 11, 5))
+    z_std, sec_std = _section(out_std.read_bytes())
+    _, sec_lx = _section(lx)
+    texts = lambda sec: [("".join(p.itertext()), p.get("paraPrIDRef")) for p in sec if _L(p) == "p"]  # noqa: E731
+    assert texts(sec_std) == texts(sec_lx)                         # 같은 내용·같은 문단 모양
+    tags = lambda sec: [(_L(e), e.get("charPrIDRef")) for e in sec.iter()]  # noqa: E731
+    assert tags(sec_std) == tags(sec_lx)                           # 같은 구조·같은 글자 모양
+    raw = z_std.read(rp.SECTION)
+    orig = zipfile.ZipFile(TPL).read(rp.SECTION)
+    first = lambda b: rp._ROOT_TAG.search(b, rp._XML_DECL.match(b).end()).group(0)  # noqa: E731
+    assert first(raw) == first(orig)                               # 이름공간 선언·접두어 그대로
+    assert b"<hp:p " in raw and b"ns0:" not in raw
