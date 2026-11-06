@@ -42,7 +42,30 @@ def find_app_browser() -> str:
     return next((c for c in cands if c and os.path.exists(c)), "")
 
 
-def run_app_window(url: str, profile: Path) -> bool:
+def wait_for_window(proc, last_seen, started: float, first_wait: float = 90, idle: float = 180,
+                    tick: float = 1.0) -> None:
+    """앱 창이 닫힐 때까지 기다린다.
+
+    Edge/Chrome이 이미 실행 중이면(이전 창, 백그라운드 실행) 새로 띄운 프로세스는 기존 프로세스에 창을 넘기고
+    바로 끝난다. 프로세스 종료만 보고 서버를 끄면 창은 남았는데 화면이 'Failed to fetch'가 된다.
+    그래서 화면이 보내는 신호(heartbeat)가 끊길 때까지 기다린다. 최소화한 창은 브라우저가 타이머를
+    1분에 한 번 정도로 늦추므로, 신호가 3분 동안 없을 때 닫힌 것으로 본다.
+    """
+    while True:
+        time.sleep(tick)
+        if proc.poll() is None:
+            continue                                    # 창 프로세스가 살아 있음
+        seen = last_seen()
+        now = time.time()
+        if seen:
+            if now - seen < idle:
+                continue                                # 다른 브라우저 프로세스 안에서 창이 열려 있음
+        elif now - started < first_wait:
+            continue                                    # 아직 첫 신호 전 (창이 뜨는 중)
+        return
+
+
+def run_app_window(url: str, profile: Path, last_seen=lambda: 0.0) -> bool:
     """브라우저 앱 모드로 독립 창을 띄우고, 창이 닫힐 때까지 기다린다."""
     exe = find_app_browser()
     if not exe:
@@ -56,7 +79,7 @@ def run_app_window(url: str, profile: Path) -> bool:
         proc = subprocess.Popen(args, creationflags=flags)
     except OSError:
         return False
-    proc.wait()  # 전용 프로필이라 이 창만의 프로세스 → 창을 닫으면 종료
+    wait_for_window(proc, last_seen, time.time())
     return True
 
 
@@ -122,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as e:  # 설치 안 됨 / WebView2 문제 등 → 앱 모드로
                 print(f"내장 창을 열 수 없어 앱 모드 창으로 실행합니다: {e}")
         if not opened and not args.browser:
-            opened = run_app_window(url, api._cfg.home / "app_window")
+            opened = run_app_window(url, api._cfg.home / "app_window", api.last_heartbeat)
         if not opened:
             print(f"{APP_NAME} 실행 중: {url}  (종료: Ctrl+C)")
             webbrowser.open(url)

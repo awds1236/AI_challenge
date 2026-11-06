@@ -105,6 +105,14 @@ class Api:
                     self._jobs.pop(k, None)
         return {"job_id": job.id}
 
+    def heartbeat(self) -> bool:
+        """화면이 몇 초마다 보내는 신호 (앱 창이 열려 있는지 판단)."""
+        self._heartbeat = time.time()
+        return True
+
+    def last_heartbeat(self) -> float:
+        return getattr(self, "_heartbeat", 0.0)
+
     def job_status(self, job_id: str) -> dict:
         job = self._jobs.get(job_id)
         return job.to_dict() if job else {"status": "error", "error": "작업을 찾을 수 없습니다"}

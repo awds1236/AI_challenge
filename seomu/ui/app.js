@@ -934,6 +934,10 @@ function bind() {
 }
 
 // ------------------------------------------------------------------ 시작
+// 창이 열려 있다는 신호: 프로그램은 이 신호가 끊기면 창이 닫힌 것으로 보고 종료한다
+async function heartbeat() { try { await fetch("/api/heartbeat", { method: "POST", headers: { "Content-Type": "application/json", "X-Seomu-Token": window.SEOMU_TOKEN || "" }, body: "{}" }); } catch (e) { /* 다음 신호에서 다시 */ } }
+heartbeat(); setInterval(heartbeat, 5000);
+
 (async function init() {
   paintIcons();
   bind();
