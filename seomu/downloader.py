@@ -27,7 +27,7 @@ from typing import Callable
 from .llm import LLMError
 
 HF_BASE = "https://huggingface.co"
-GH_RELEASE_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+GH_RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10"
 GH_REPO_URL = "https://github.com/ggml-org/llama.cpp"
 UA = {"User-Agent": "SeomuAI"}
 Progress = Callable[[dict], None] | None
@@ -187,31 +187,87 @@ def pick_engine_asset(release: dict, plat: str | None = None, arch: str | None =
     return scored[0][1] if scored else None
 
 
-def _release_from_page() -> dict:
-    """API 조회 한도(시간당 60회)에 걸렸을 때: 공개 배포 페이지에서 최신 버전과 파일 목록을 읽는다."""
-    req = urllib.request.Request(f"{GH_REPO_URL}/releases/latest", headers=UA)
+def _page_assets(tag: str) -> list[str]:
+    """배포 페이지에서 한 버전의 파일 이름 목록 (API 조회 한도와 무관)."""
+    req = urllib.request.Request(f"{GH_REPO_URL}/releases/expanded_assets/{tag}", headers=UA)
     with _opener().open(req, timeout=30) as r:
-        final = r.geturl()
-    m = re.search(r"/releases/tag/([^/?#]+)", final)
-    if not m:
-        raise LLMError("최신 엔진 버전을 확인하지 못했습니다.")
-    tag = m.group(1)
-    names: list[str] = []
+        html = r.read().decode("utf-8", "ignore")
+    return sorted(set(re.findall(rf"/releases/download/{re.escape(tag)}/([^\"'<>\s]+)", html)))
+
+
+def _releases_from_page(limit: int = 6) -> list[dict]:
+    """API 조회 한도(시간당 60회)에 걸렸을 때: 공개 배포 페이지에서 최근 버전들과 파일 목록을 읽는다."""
+    tags: list[str] = []
     try:
-        req = urllib.request.Request(f"{GH_REPO_URL}/releases/expanded_assets/{tag}", headers=UA)
+        req = urllib.request.Request(f"{GH_REPO_URL}/releases", headers=UA)
         with _opener().open(req, timeout=30) as r:
             html = r.read().decode("utf-8", "ignore")
-        names = sorted(set(re.findall(rf"/releases/download/{re.escape(tag)}/([^\"'<>\s]+)", html)))
+        for t in re.findall(r"/releases/tag/([^/?#\"'<>\s]+)", html):
+            if t not in tags:
+                tags.append(t)
     except (urllib.error.URLError, OSError):
         pass
-    if not names:     # 목록도 못 읽으면 흔한 이름을 직접 시도
-        names = [f"llama-{tag}-bin-win-cpu-x64.zip", f"llama-{tag}-bin-win-x64.zip",
-                 f"llama-{tag}-bin-ubuntu-x64.zip", f"llama-{tag}-bin-ubuntu-x64.tar.gz",
-                 f"llama-{tag}-bin-macos-arm64.zip", f"llama-{tag}-bin-macos-arm64.tar.gz",
-                 f"llama-{tag}-bin-macos-x64.zip"]
-    return {"tag_name": tag, "assets": [{"name": n, "size": 0,
-                                         "browser_download_url": f"{GH_REPO_URL}/releases/download/{tag}/{n}"}
-                                        for n in names]}
+    if not tags:
+        req = urllib.request.Request(f"{GH_REPO_URL}/releases/latest", headers=UA)
+        with _opener().open(req, timeout=30) as r:
+            m = re.search(r"/releases/tag/([^/?#]+)", r.geturl())
+        if not m:
+            raise LLMError("최신 엔진 버전을 확인하지 못했습니다.")
+        tags = [m.group(1)]
+    out = []
+    for tag in tags[:limit]:
+        try:
+            names = _page_assets(tag)
+        except (urllib.error.URLError, OSError):
+            names = []
+        if not names and tag == tags[0]:     # 목록도 못 읽으면 흔한 이름을 직접 시도
+            names = [f"llama-{tag}-bin-win-cpu-x64.zip", f"llama-{tag}-bin-win-x64.zip",
+                     f"llama-{tag}-bin-ubuntu-x64.zip", f"llama-{tag}-bin-ubuntu-x64.tar.gz",
+                     f"llama-{tag}-bin-macos-arm64.zip", f"llama-{tag}-bin-macos-arm64.tar.gz",
+                     f"llama-{tag}-bin-macos-x64.zip"]
+        out.append({"tag_name": tag, "assets": [
+            {"name": n, "size": 0, "browser_download_url": f"{GH_REPO_URL}/releases/download/{tag}/{n}"}
+            for n in names]})
+    return out
+
+
+def find_engine_candidates() -> tuple[list[dict], str, list[str]]:
+    """최근 버전부터 이 PC용 엔진 파일을 찾는다. (후보, 실패 이유, 최신 버전에서 본 파일 이름)
+    llama.cpp는 하루에도 여러 번 새 버전을 내고 파일은 몇십 분에 걸쳐 올라오므로, 최신 버전에 아직
+    Windows 파일이 없으면 그 전 버전을 쓴다."""
+    plat, arch = _platform()
+    why, seen = "", []
+
+    def search(releases: list) -> list[dict]:
+        for rel in releases:
+            if not isinstance(rel, dict) or rel.get("draft") or rel.get("prerelease"):
+                continue
+            if not seen:
+                seen.extend(a.get("name", "") for a in rel.get("assets") or [])
+            scored = sorted(((engine_asset_score(a.get("name", ""), plat, arch), a) for a in rel.get("assets") or []),
+                            key=lambda x: -(x[0] or 0))
+            found = [a for sc, a in scored if sc is not None]
+            if found:
+                return found
+        return []
+    try:
+        data = _get_json(GH_RELEASES_API)
+        if isinstance(data, list):
+            cands = search(data)
+            if cands:
+                return cands, "", seen
+            why = "최근 버전에 이 PC용 파일이 없음" if data else "배포 목록이 비어 있음"
+        else:
+            why = (data.get("message") if isinstance(data, dict) else "") or "배포 목록을 읽지 못함"
+    except LLMError as e:
+        why = str(e)
+    try:                                       # API 한도 초과·차단 → 배포 페이지에서 직접 찾기
+        cands = search(_releases_from_page())
+        if cands:
+            return cands, "", seen
+    except (LLMError, urllib.error.URLError, OSError) as e:
+        why = why or str(e)
+    return [], why, seen
 
 
 MANUAL_ENGINE = ("직접 넣는 방법: {repo}/releases 에서 이름에 'bin-win-cpu-x64'가 들어간 zip 파일을 받아 "
@@ -247,25 +303,11 @@ def install_engine(engine_dir: Path, on_progress: Progress = None) -> Path:
     manual = MANUAL_ENGINE.format(repo=GH_REPO_URL, dir=engine_dir)
     if on_progress:
         on_progress({"status": "AI 엔진 정보 확인 중"})
-    why = ""
-    try:
-        rel = _get_json(GH_RELEASE_API)
-        if not isinstance(rel, dict) or not rel.get("assets"):
-            why = (rel.get("message") if isinstance(rel, dict) else "") or "배포 목록이 비어 있음"
-            rel = {}
-    except LLMError as e:
-        why, rel = str(e), {}
-    candidates = [a for a in [pick_engine_asset(rel)] if a]
-    if not candidates:                       # API 한도 초과·차단 → 배포 페이지에서 직접 찾기
-        try:
-            page = _release_from_page()
-            plat, arch = _platform()
-            candidates = sorted((a for a in page["assets"] if engine_asset_score(a["name"], plat, arch) is not None),
-                                key=lambda a: -(engine_asset_score(a["name"], plat, arch) or 0))
-        except (LLMError, urllib.error.URLError, OSError) as e:
-            why = why or str(e)
+    candidates, why, seen = find_engine_candidates()
     if not candidates:
-        raise LLMError(f"이 PC에 맞는 AI 엔진(llama.cpp) 파일을 찾지 못했습니다{f' ({why})' if why else ''}. {manual}")
+        shown = [n for n in seen if "win" in n.lower()][:6] or seen[:6]
+        detail = "; ".join(x for x in (why, f"찾은 파일: {', '.join(shown)}" if shown else "") if x)
+        raise LLMError(f"이 PC에 맞는 AI 엔진(llama.cpp) 파일을 찾지 못했습니다{f' ({detail})' if detail else ''}. {manual}")
     exe = "llama-server.exe" if sys.platform.startswith("win") else "llama-server"
     last = ""
     with tempfile.TemporaryDirectory() as tmp:
