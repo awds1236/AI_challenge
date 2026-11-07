@@ -142,6 +142,50 @@ def test_odt_pptx_rtf(tmp_path):
     assert parse_file(rtf) == "제목: 행사\nend"
 
 
+def test_fix_ocr_text():
+    from seomu.parsers import fix_ocr_text
+    raw = "나. 제출 서류 점검표(붙임 서식) 1丁\n다. 문의세 총무과(ß 02-000-1234)\n붙임 점검표 1丁\n曰 그"
+    assert fix_ocr_text(raw).splitlines() == ["나. 제출 서류: 점검표(붙임 서식) 1부", "다. 문의처: 총무과(☎ 02-000-1234)",
+                                              "붙임 점검표 1부  끝."]
+
+
+_DRAW_PS = r"""param([string]$Out)
+Add-Type -AssemblyName System.Drawing
+$bmp = New-Object System.Drawing.Bitmap 1400, 420
+$g = [System.Drawing.Graphics]::FromImage($bmp); $g.Clear([System.Drawing.Color]::White)
+$font = New-Object System.Drawing.Font("Malgun Gothic", 22); $y = 30
+foreach ($l in @("제목 에너지 절약 점검 결과 제출 요청", "가. 제출 기한: 2026. 11. 27.(금) 18:00까지",
+                 "나. 제출 서류: 에너지 절약 점검표 1부", "붙임 에너지 절약 점검표 1부. 끝.")) {
+  $g.DrawString($l, $font, [System.Drawing.Brushes]::Black, 40, $y); $y += 90 }
+$bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
+"""
+
+
+def test_scanned_image_notice_ocr(tmp_path):
+    """사진·스캔 공문: Windows 내장 한국어 OCR로 읽어 기한을 찾는다 (Windows가 아니거나 OCR이 없으면 건너뜀)."""
+    import subprocess
+    import sys
+    from seomu.analyzer import rule_analysis
+    from seomu.parsers import ParseError, parse_file
+    if not sys.platform.startswith("win"):
+        pytest.skip("Windows 전용")
+    ps, img = tmp_path / "draw.ps1", tmp_path / "scan.png"
+    ps.write_text(_DRAW_PS, encoding="utf-8-sig")        # PowerShell 5.1은 BOM이 없으면 한글을 CP949로 읽는다
+    subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps), str(img)],
+                   capture_output=True, timeout=60)
+    if not img.exists():
+        pytest.skip("이미지를 만들 수 없음 (System.Drawing 없음)")
+    try:
+        text = parse_file(img)
+    except ParseError as e:
+        if "OCR" in str(e):
+            pytest.skip(f"한국어 OCR 기능 없음: {e}")
+        raise
+    assert "제출 기한" in text and "점검표" in text
+    a = rule_analysis("에너지 절약 점검 결과 제출 요청", text, [], REF)
+    assert [(d["date"], d["time"]) for d in a["deadlines"]] == [("2026-11-27", "18:00")]
+
+
 # ---------------------------------------------------------------- 수집 흐름
 def test_eml_attachments_and_zip_expand(tmp_path):
     from seomu.collector import collect_from_files, expand_archives

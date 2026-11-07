@@ -316,6 +316,30 @@ def parse_rtf(path: Path) -> str:
     return normalize("".join(out))
 
 
+_OCR_LABELS = (r"제출\s*서류|제출\s*자료|제출\s*기한|제출\s*방법|회신\s*자료|회신\s*기한|회신\s*방법|신청\s*기한|"
+               r"신청\s*방법|접수\s*기한|문의\s*처|문의|담당자|연락처|일\s*시|장\s*소|대\s*상|행사명|교육명|기\s*간")
+
+
+def fix_ocr_text(text: str) -> str:
+    """OCR이 공문에서 자주 틀리는 표기를 바로잡는다 (1부→'1丁', 끝.→'曰', ☎→'ß', 항목 뒤 쌍점 누락 등).
+    일반 단어의 오인식은 고칠 수 없으므로 공문 서식 표기에만 적용한다."""
+    t = re.sub(r"(\d)\s*[丁卩部]", r"\1부", text)
+    t = re.sub(r"\(\s*[ßβ帀]\s*", "(☎ ", t)
+    t = re.sub(r"문의\s*[세제체치]\s*(?=[:：\s])", "문의처", t)
+    lines = []
+    for l in t.splitlines():
+        s = l.strip()
+        junk = bool(s) and len(s) <= 4 and not re.search(r"[가-힣A-Za-z0-9]", s.replace("그", ""))
+        if junk or re.fullmatch(r"[曰日目口]\s*그?", s):
+            if lines and not re.search(r"끝\s*\.\s*$", lines[-1]):
+                lines[-1] += "  끝."                     # '끝.'이 '曰 그' 같은 글자로 읽힌 줄
+            continue
+        # '나. 제출 서류 ○○' → '나. 제출 서류: ○○' (쌍점이 빠지면 항목으로 읽지 못한다)
+        l = re.sub(r"^(\s*(?:[가-하]\s*[.)]|\d{1,2}\s*[.)]|[-·○□])?\s*(?:" + _OCR_LABELS + r"))\s+(?=[^\s:：])", r"\1: ", l)
+        lines.append(l)
+    return "\n".join(lines)
+
+
 def parse_image(path: Path) -> str:
     """사진·스캔 이미지 공문: Windows 내장 OCR로 글자를 읽는다 (인터넷 불필요)."""
     from . import winwindow
@@ -324,7 +348,7 @@ def parse_image(path: Path) -> str:
     text = winwindow.ocr_body(0, image=Path(path))
     if not text.strip():
         raise ParseError("이미지에서 글자를 읽지 못했습니다 (Windows 한국어 OCR 기능이 필요합니다)")
-    return normalize(text)
+    return normalize(fix_ocr_text(text))
 
 
 def _ocr_pdf_images(reader, max_pages: int = 8) -> str:
@@ -505,7 +529,7 @@ def parse_pdf(path: Path) -> str:
     if len(re.sub(r"\s", "", text)) < 20:
         ocr = _ocr_pdf_images(reader)            # 스캔 PDF → 그림 글자 읽기
         if ocr.strip():
-            return normalize(ocr)
+            return normalize(fix_ocr_text(ocr))
         raise ParseError("PDF에 텍스트가 없습니다(스캔 이미지일 수 있음)")
     return normalize(text)
 
