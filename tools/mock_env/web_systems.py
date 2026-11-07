@@ -29,7 +29,7 @@ ATTACH = {   # 붙임 id → (보여 줄 이름, files_dir 안의 파일)
     "a1": ("집행잔액 현황표 서식.hwpx", "onnara_form.hwpx"),
     "a2": ("결산 일정 안내문.pdf", "onnara_guide.pdf"),
     "d1": ("참석자 명단 서식.xlsx", "doc24_list.xlsx"),
-    "e1": ("안전교육 실적 보고서 서식.hwpx", "edu_form.hwpx"),
+    "e1": ("안전교육 실적 보고서 서식.hwp", "edu_form.hwp"),      # 학교 공문 붙임은 한글 5.0 파일이 흔하다
     "g1": ("부서별 추진과제 작성표.xlsx", "gw_form.xlsx"),
 }
 

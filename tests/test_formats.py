@@ -4,6 +4,7 @@
 기업 전자결재 협조문, 붙여넣기, PDF식 강제 줄바꿈 본문을 같은 규칙으로 정리·분석하는지 확인한다.
 """
 import io
+import sys
 import time
 import unicodedata
 import zipfile
@@ -161,6 +162,22 @@ def test_mojibake_filename_and_sniffed_formats(tmp_path):
     with zipfile.ZipFile(noext, "w") as z:
         z.writestr("Contents/section0.xml", '<hs:sec xmlns:hs="s" xmlns:hp="p"><hp:p><hp:run><hp:t>붙임 서식</hp:t></hp:run></hp:p></hs:sec>')
     assert parse_file(noext) == "붙임 서식"
+
+
+def test_hwp5_binary(tmp_path):
+    """한글 5.0(.hwp, OLE 복합 문서): 압축·비압축, 미니 스트림·일반 섹터 모두 읽는다."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    from mock_env.hwp5 import write_hwp
+    from seomu.parsers import parse_file
+    lines = ["제목 안전교육 실적 제출", "가. 제출 기한: 2026. 12. 9.(수)까지", "학교명\t인원"]
+    p = tmp_path / "공문.hwp"
+    write_hwp(p, lines)
+    assert parse_file(p) == "\n".join(lines)
+    write_hwp(p, lines * 60, compressed=False)            # 4096바이트를 넘는 본문 스트림
+    assert parse_file(p).count("제출 기한") == 60
+    renamed = tmp_path / "download.do"                    # 확장자 없이 받은 HWP도 내용으로 판별
+    renamed.write_bytes(p.read_bytes())
+    assert parse_file(renamed).count("제출 기한") == 60
 
 
 def test_reference_attachments_are_not_submissions():

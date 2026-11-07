@@ -165,6 +165,11 @@ def build_samples() -> dict:
         hi.unlink()
     s["bad"] = OUT / "10_손상된_파일.hwpx"
     s["bad"].write_bytes(b"PK\x03\x04 broken")
+    from mock_env.hwp5 import write_hwp
+    s["hwp"] = OUT / "12_한글5_공문.hwp"                                      # 한글 5.0 바이너리 (OLE 복합 문서)
+    write_hwp(s["hwp"], N6["lines"])
+    s["hwp_attach"] = OUT / "붙임_안전교육_실적_보고서.hwp"
+    write_hwp(s["hwp_attach"], ["안전교육 실적 보고서", "학교명\t교육 일자\t참여 인원", "○○초등학교\t2026. 11. 20.\t320명"])
     s["hwx"] = OUT / "11_전자결재_문서.hwx"                                  # 확장자로 알 수 없는 전자결재 문서
     s["hwx"].write_text(f'<?xml version="1.0" encoding="utf-8"?><HWX><BODY>{"".join(f"<P>{l}</P>" for l in N7["lines"])}</BODY></HWX>',
                         encoding="utf-8")
@@ -374,7 +379,7 @@ def main() -> int:
     make_hwpx(wf / "onnara_form.hwpx", N1)
     shutil.copy2(s["pdf"] if s.get("pdf_ok") else s["hwpx"], wf / "onnara_guide.pdf")
     make_xlsx(wf / "doc24_list.xlsx", "명단")
-    make_hwpx(wf / "edu_form.hwpx", N6)
+    shutil.copy2(s["hwp_attach"], wf / "edu_form.hwp")
     make_xlsx(wf / "gw_form.xlsx", "추진과제")
     if s["png"].exists():
         shutil.copy2(s["png"], wf / "page1.png")
@@ -422,6 +427,9 @@ def main() -> int:
         {"path": F, "fmt": "TXT (기업 전자결재 협조전)", "run": files(SAMPLES / "formats" / "회사_전자결재_협조문.txt"),
          "expect": {"dates": ["2026-11-19"]}},
         {"path": F, "fmt": "HWX (전자결재 문서, 내용으로 형식 판별)", "run": files(s["hwx"]), "expect": {**N7}},
+        {"path": F, "fmt": "HWP (한글 5.0 바이너리, 압축 본문)", "run": files(s["hwp"]), "expect": {**N6}},
+        {"path": F, "fmt": "본문 HWPX + 붙임 HWP (한글 뷰어 없이 붙임 미리보기)", "run": files(s["hwpx"], s["hwp_attach"]),
+         "expect": {"dates": N1["dates"], "att_ok": 1}, "preview_ext": (".hwp", "320명")},
         {"path": F, "fmt": "TXT (기한 두 개)", "run": files(s["txt_two"]), "expect": N4},
         {"path": F, "fmt": "TXT (기한 없는 안내, CP949)", "run": files(s["txt_none"]), "expect": {**N5}},
         {"path": F, "fmt": "본문 + 붙임 여러 개 (XLSX 미리보기)", "run": files(s["hwpx"], s["xlsx"], s["docx"]),
@@ -450,7 +458,7 @@ def main() -> int:
             {"path": B, "fmt": "문서24형 (머리 표·UTF-8 붙임)", "run": browser("/doc24/view"),
              "expect": {**N2, "att_names": ["참석자 명단 서식.xlsx"]}},
             {"path": B, "fmt": "K-에듀파인형 (iframe 3단·POST 붙임)", "run": browser("/edufine/view"),
-             "expect": {**N6, "att_names": ["안전교육 실적 보고서 서식.hwpx"]}},
+             "expect": {**N6, "att_names": ["안전교육 실적 보고서 서식.hwp"]}, "preview_ext": (".hwp", "320명")},
             {"path": B, "fmt": "그룹웨어 전자결재 (늦게 그려지는 화면·로그인 쿠키 붙임)", "run": browser("/groupware/view", 0.0),
              "expect": {**N7, "att_names": ["부서별 추진과제 작성표.xlsx"]}},
             {"path": B, "fmt": "사이냅식 변환 뷰어 (위치로 배치한 낱말·뒤섞인 순서)", "run": browser("/synap/view"),
@@ -512,11 +520,12 @@ def main() -> int:
             probs = [p for p in probs if not p.startswith("요약")]
             if "본문을 읽지 못했습니다" not in (n.get("body") or ""):
                 probs.append("손상 파일 안내 문구 없음")
-        if c.get("preview") and n:
-            x = next((f for f in n["attachments"] if f["name"].endswith(".xlsx")), None)
+        if (c.get("preview") or c.get("preview_ext")) and n:
+            ext, word = c.get("preview_ext") or (".xlsx", "총무과")
+            x = next((f for f in n["attachments"] if f["name"].endswith(ext)), None)
             pv = api.preview_file(x["path"]) if x else {"text": ""}
-            if "총무과" not in pv.get("text", ""):
-                probs.append("XLSX 붙임 미리보기 실패")
+            if word not in pv.get("text", ""):
+                probs.append(f"{ext} 붙임 미리보기 실패")
         probs += [f"화면 가로챔: {e}" for e in screen]
         sec = time.time() - t0
         results.append((c, n, err, probs, sec, screen))
