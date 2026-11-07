@@ -138,6 +138,31 @@ def test_ocr_request_ending_and_corrupt_title(tmp_path):
     assert cap.title == "10 손상된 파일" and "본문을 읽지 못했습니다" in cap.text
 
 
+def test_layout_text_rebuilds_lines_and_spaces():
+    """변환 뷰어·PDF.js 글자 층: 위치로만 띄운 낱말, 뒤섞인 순서를 읽는 순서·띄어쓰기로 되살린다."""
+    from seomu.collector import layout_text
+    items = [{"t": "협조", "x": 140, "y": 40, "w": 30, "h": 15}, {"t": "제목:", "x": 50, "y": 40, "w": 34, "h": 15},
+             {"t": "바랍니다.", "x": 120, "y": 66, "w": 60, "h": 15}, {"t": "비상연락망", "x": 93, "y": 40, "w": 40, "h": 15},
+             {"t": "주시기", "x": 50, "y": 66, "w": 45, "h": 15}]
+    assert layout_text(items) == "제목: 비상연락망 협조\n주시기 바랍니다."
+    assert layout_text([{"t": "제", "x": 0, "y": 0, "w": 15, "h": 15}, {"t": "출", "x": 15, "y": 0, "w": 15, "h": 15}]) == "제출"
+
+
+def test_mojibake_filename_and_sniffed_formats(tmp_path):
+    from seomu.collector import fix_mojibake
+    from seomu.parsers import parse_file
+    assert fix_mojibake("집행잔액 서식.hwpx".encode("cp949").decode("latin-1")) == "집행잔액 서식.hwpx"
+    assert fix_mojibake("참석자 명단.xlsx".encode("utf-8").decode("latin-1")) == "참석자 명단.xlsx"
+    assert fix_mojibake("report.pdf") == "report.pdf"
+    hwx = tmp_path / "결재문서.hwx"
+    hwx.write_text('<?xml version="1.0"?><HWX><BODY><P>제목: 자료 제출 요청</P></BODY></HWX>', encoding="utf-8")
+    assert "제목: 자료 제출 요청" in parse_file(hwx)
+    noext = tmp_path / "download.do"                       # 확장자 없이 받은 HWPX
+    with zipfile.ZipFile(noext, "w") as z:
+        z.writestr("Contents/section0.xml", '<hs:sec xmlns:hs="s" xmlns:hp="p"><hp:p><hp:run><hp:t>붙임 서식</hp:t></hp:run></hp:p></hs:sec>')
+    assert parse_file(noext) == "붙임 서식"
+
+
 def test_reference_attachments_are_not_submissions():
     _t, a = analyze_file("문서24_공문.txt")
     items = [s["item"] for s in a["submissions"]]
@@ -226,7 +251,7 @@ def test_scanned_image_notice_ocr(tmp_path):
     ps, img = tmp_path / "draw.ps1", tmp_path / "scan.png"
     ps.write_text(_DRAW_PS, encoding="utf-8-sig")        # PowerShell 5.1은 BOM이 없으면 한글을 CP949로 읽는다
     subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps), str(img)],
-                   capture_output=True, timeout=60)
+                   capture_output=True, timeout=60, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if not img.exists():
         pytest.skip("이미지를 만들 수 없음 (System.Drawing 없음)")
     try:

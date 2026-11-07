@@ -38,6 +38,21 @@ def available() -> bool:
     return IS_WIN
 
 
+# 창을 앞으로 가져오거나 실제 마우스·키보드를 쓰는 방법(최후 수단)을 허용할지.
+# 기본은 '허용 안 함': 사용자가 보던 화면(영상·문서)을 가로채지 않고 뒤에 있는 창에서 바로 읽는다.
+# 환경 변수 SEOMU_NO_FOREGROUND=1 이면 설정과 상관없이 항상 막는다 (검증·테스트용).
+_FOREGROUND_OK = False
+
+
+def set_foreground_allowed(value: bool) -> None:
+    global _FOREGROUND_OK
+    _FOREGROUND_OK = bool(value) and not os.environ.get("SEOMU_NO_FOREGROUND")
+
+
+def foreground_allowed() -> bool:
+    return _FOREGROUND_OK and not os.environ.get("SEOMU_NO_FOREGROUND")
+
+
 # ---------------------------------------------------------------- Win32 (ctypes)
 if IS_WIN:
     import ctypes
@@ -90,6 +105,12 @@ if IS_WIN:
     gdi32.SelectObject.restype = wintypes.HGDIOBJ
     gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
     gdi32.DeleteDC.argtypes = [wintypes.HDC]
+    # 64비트에서 핸들 값이 크면 형식 선언 없이는 'int too long to convert'로 캡처가 운에 따라 실패했다
+    gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p,
+                                ctypes.c_void_p, ctypes.c_uint]
+    gdi32.GetDIBits.restype = ctypes.c_int
+    user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 
     GWL_EXSTYLE = -20
     WS_EX_TOOLWINDOW = 0x00000080
@@ -114,6 +135,9 @@ if IS_WIN:
     user32.GetForegroundWindow.restype = wintypes.HWND
     user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
     user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+    user32.SendMessageTimeoutW.argtypes = [wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM,
+                                           ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_size_t)]
+    user32.SendMessageTimeoutW.restype = wintypes.LPARAM
     kernel32.VirtualAllocEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t, wintypes.DWORD,
                                         wintypes.DWORD]
     kernel32.VirtualAllocEx.restype = wintypes.LPVOID
@@ -316,9 +340,11 @@ def _png(path: Path, width: int, height: int, bgra: bytes) -> None:
                      + chunk(b"IDAT", raw) + chunk(b"IEND", b""))
 
 
-def save_window_image(hwnd: int, path: Path, crop: tuple[float, float] | None = None, scale: int = 1) -> bool:
-    """창을 PNG로 저장. crop=(위쪽 비율, 아래쪽 비율)로 세로 일부만, scale배 확대 가능."""
-    grab = _grab(hwnd)
+def save_window_image(hwnd: int, path: Path, crop: tuple[float, float] | None = None, scale: int = 1,
+                      client: bool = False) -> bool:
+    """창을 PNG로 저장. crop=(위쪽 비율, 아래쪽 비율)로 세로 일부만, scale배 확대 가능.
+    client=True면 제목줄·테두리를 뺀 안쪽 영역만 (본문 글자 인식용)."""
+    grab = _grab(hwnd, client)
     if not grab:
         return False
     w, h, data = grab
@@ -339,12 +365,15 @@ def save_window_image(hwnd: int, path: Path, crop: tuple[float, float] | None = 
         return False
 
 
-def _grab(hwnd: int):
-    """(너비, 높이, BGRA 바이트) — 창이 가려져 있어도 PrintWindow로 그린다."""
+def _grab(hwnd: int, client: bool = False):
+    """(너비, 높이, BGRA 바이트) — 창이 가려져 있거나 화면 밖에 있어도 PrintWindow로 그린다 (앞으로 가져오지 않음)."""
     if not IS_WIN:
         return None
     rect = wintypes.RECT()
-    user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    if client:
+        user32.GetClientRect(hwnd, ctypes.byref(rect))
+    else:
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
     w, h = rect.right - rect.left, rect.bottom - rect.top
     if w <= 0 or h <= 0:
         return None
@@ -353,8 +382,6 @@ def _grab(hwnd: int):
     bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
     old = gdi32.SelectObject(mdc, bmp)
     try:
-        user32.PrintWindow(hwnd, mdc, 2)  # PW_RENDERFULLCONTENT
-
         class BITMAPINFOHEADER(ctypes.Structure):
             _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
                         ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD),
@@ -365,7 +392,15 @@ def _grab(hwnd: int):
         bi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
         bi.biWidth, bi.biHeight, bi.biPlanes, bi.biBitCount = w, -h, 1, 32
         buf = ctypes.create_string_buffer(w * h * 4)
-        gdi32.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(bi), 0)
+        # ① 화면 합성 결과(PW_RENDERFULLCONTENT: 브라우저·GPU 그리기 창도 됨)
+        # ② 비어 있으면 프로그램이 직접 그리게(WM_PRINT): 화면 밖·아직 합성 전인 창도 됨
+        for flags in ((3, 1) if client else (2, 0)):
+            user32.PrintWindow(hwnd, mdc, flags)
+            gdi32.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(bi), 0)
+            raw = buf.raw
+            step = max(4, (len(raw) // 4000) // 4 * 4)          # 일부 화소만 훑어 한 가지 색뿐인지 확인
+            if len({raw[i:i + 3] for i in range(0, len(raw), step)}) > 1:
+                return w, h, raw
         return w, h, buf.raw
     except Exception:
         return None
@@ -378,11 +413,18 @@ def _grab(hwnd: int):
 
 # ---------------------------------------------------------------- UI Automation (선택: uiautomation 패키지)
 def _uia():
+    if os.environ.get("SEOMU_DISABLE_UIA"):          # UI Automation이 없는 PC를 흉내 낼 때
+        return None
     try:
         import uiautomation as auto  # type: ignore
-        return auto
     except Exception:
         return None
+    try:   # 이 라이브러리는 기본으로 실행 폴더에 @AutomationLog.txt를 만든다 → 임시 폴더로
+        import tempfile
+        auto.Logger.SetLogFile(os.path.join(tempfile.gettempdir(), "seomu_uia.log"))
+    except Exception:
+        pass
+    return auto
 
 
 def uia_available() -> bool:
@@ -410,9 +452,10 @@ def _press(control, timeout: float = 4.0) -> bool:
         try:
             with auto.UIAutomationInitializerInThread():
                 try:
-                    control.GetInvokePattern().Invoke()
+                    control.GetInvokePattern().Invoke()          # 창을 앞으로 가져오지 않고 누른다
                 except Exception:
-                    control.Click(simulateMove=False)
+                    if foreground_allowed():                     # 실제 마우스 클릭은 허용했을 때만
+                        control.Click(simulateMove=False)
         except Exception:
             pass
         finally:
@@ -515,7 +558,8 @@ def toolbar_buttons(hwnd: int) -> list[dict]:
     out: list[dict] = []
     is64 = sys.maxsize > 2**32
     for tb in children(hwnd):
-        if _class(tb) != "ToolbarWindow32" or not user32.IsWindowVisible(tb):
+        # WinForms·MFC 등은 'WindowsForms10.ToolbarWindow32.app…'처럼 이름을 감싼다
+        if "ToolbarWindow32" not in _class(tb) or not user32.IsWindowVisible(tb):
             continue
         h = kernel32.OpenProcess(0x0008 | 0x0010 | 0x0020 | 0x0400, False, _pid(tb))
         if not h:
@@ -674,7 +718,7 @@ def ocr_body(hwnd: int, image: Path | None = None) -> str:
     """최후 수단: 창 화면을 OCR해 본문 글자를 읽는다 (화면에 보이는 부분만)."""
     import tempfile
     img = image or Path(tempfile.gettempdir()) / "seomu_body.png"
-    if image is None and not save_window_image(hwnd, img):
+    if image is None and not save_window_image(hwnd, img, client=True):       # 제목줄 글자는 빼고
         return ""
     lines = ocr_image(img)
     if not lines:
@@ -732,8 +776,10 @@ def click_any(hwnd: int, names: tuple[str, ...], check: Callable[[], bool] | Non
             trace.append(f"UI Automation 오류: {e}")
     else:
         trace.append("UI Automation: uiautomation 패키지 없음")
-    # ④ 화면 글자 인식(OCR)으로 버튼 위치를 찾아 실제 클릭
-    if use_ocr:
+    # ④ 화면 글자 인식(OCR)으로 버튼 위치를 찾아 실제 클릭 (창을 앞으로 가져와야 하므로 허용했을 때만)
+    if use_ocr and not foreground_allowed():
+        trace.append("화면 클릭 생략: 창을 앞으로 가져오지 않는 설정")
+    elif use_ocr:
         log(f"화면에서 '{names[0]}' 버튼 글자를 찾는 중… (글자 인식)")
         pos = _ocr_find(hwnd, names)
         trace.append(f"OCR 버튼 위치: {pos}")
@@ -748,7 +794,7 @@ def click_any(hwnd: int, names: tuple[str, ...], check: Callable[[], bool] | Non
 def _largest_child(hwnd: int) -> int:
     best, area = 0, 0
     for c in children(hwnd):
-        if not user32.IsWindowVisible(c) or _class(c) in ("ToolbarWindow32", "ReBarWindow32", "msctls_statusbar32"):
+        if not user32.IsWindowVisible(c) or any(k in _class(c) for k in ("ToolbarWindow32", "ReBarWindow32", "msctls_statusbar32")):
             continue
         l, t, r, b = _rect(c)
         a = max(0, r - l) * max(0, b - t)
@@ -771,8 +817,8 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
         return t if t and t != marker and len(t.strip()) > 20 else ""
 
     try:
-        trace.append(f"창 맨 앞으로: {activate(hwnd)}")
-        # ① 본문복사 버튼 (여러 방법)
+        # 창을 앞으로 가져오지 않는 방법부터 (사용자가 보던 화면을 가로채지 않는다)
+        # ① 본문복사 버튼 (도구모음·버튼 메시지, UI Automation 호출 — 모두 창이 뒤에 있어도 동작)
         log("뷰어의 '본문복사' 버튼을 누르는 중…")
         set_clipboard(marker)
         how = click_any(hwnd, BODY_COPY_NAMES, check=lambda: bool(fresh()), log=log, trace=trace)
@@ -785,10 +831,24 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
             trace.append(f"UI Automation 글자: {len(t)}자")
             if len(t) > 80:
                 return t, "화면 글자 정보"
-        # ③ 문서 영역 클릭 후 Ctrl+A / Ctrl+C
+        # ③ 표준 편집 칸(Edit·RichEdit)의 글자를 메시지로 읽기
+        t = edit_text(hwnd)
+        trace.append(f"편집 칸 글자: {len(t)}자")
+        if len(t) > 80:
+            return t, "편집 칸 글자"
+        # ④ 창 화면을 그려 받아(PrintWindow, 가려져 있어도 됨) 글자 인식
+        log("화면 글자 인식(OCR)으로 본문을 읽는 중…")
+        t = ocr_body(hwnd)
+        trace.append(f"OCR 본문: {len(t)}자")
+        if len(t) > 80:
+            return t, "화면 글자 인식(OCR) — 보이는 부분만"
+        # ⑤ 최후 수단: 창을 앞으로 가져와 전체 선택·복사 (설정에서 허용했을 때만)
+        if not foreground_allowed():
+            trace.append("전체 선택·복사 생략: 창을 앞으로 가져오지 않는 설정")
+            return "", ""
         log("문서를 전체 선택·복사하는 중…")
         set_clipboard(marker)
-        activate(hwnd)
+        trace.append(f"창 맨 앞으로: {activate(hwnd)}")
         doc = _largest_child(hwnd) or hwnd
         l, t, r, b = _rect(doc)
         if r - l > 50 and b - t > 50:
@@ -800,16 +860,32 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
         if _wait(lambda: bool(fresh()), 2.5):
             return fresh(), "전체 선택·복사"
         trace.append(f"전체 선택·복사 실패 (문서 영역 클래스: {_class(doc)})")
-        # ④ 화면 OCR
-        log("화면 글자 인식(OCR)으로 본문을 읽는 중…")
-        t = ocr_body(hwnd)
-        trace.append(f"OCR 본문: {len(t)}자")
-        if len(t) > 80:
-            return t, "화면 글자 인식(OCR) — 보이는 부분만"
         return "", ""
     finally:
         if previous:
             set_clipboard(previous)
+
+
+def edit_text(hwnd: int) -> str:
+    """창 안의 표준 편집 칸(Edit·RichEdit·WinForms TextBox)에서 가장 긴 글자를 읽는다 (창이 뒤에 있어도 됨)."""
+    best = ""
+    res = ctypes.c_size_t()
+
+    def send(c, msg, wp, lp) -> int:
+        # 응답 없는 프로그램에 막히지 않도록 1초 제한 (SMTO_ABORTIFHUNG)
+        ok = user32.SendMessageTimeoutW(c, msg, wp, lp, 0x0002, 1000, ctypes.byref(res))
+        return int(res.value) if ok else 0
+    for c in children(hwnd):
+        if not re.search(r"(edit|richedit|textbox)", _class(c), re.I):
+            continue
+        n = send(c, 0x000E, 0, 0)                                      # WM_GETTEXTLENGTH
+        if n <= len(best) or n > 2_000_000:
+            continue
+        buf = ctypes.create_unicode_buffer(n + 1)
+        send(c, 0x000D, n + 1, ctypes.cast(buf, ctypes.c_void_p).value)   # WM_GETTEXT
+        if len(buf.value) > len(best):
+            best = buf.value
+    return best.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 def diagnose(hwnd: int) -> str:
@@ -864,8 +940,7 @@ def try_save_attachments(hwnd: int, folder: Path, log: Callable[[str], None] = l
         return ""
     pid = _pid(hwnd)
     before = set(_dialogs_of(pid))
-    activate(hwnd)
-    log("뷰어의 'PC저장' 버튼을 누르는 중…")
+    log("뷰어의 'PC저장' 버튼을 누르는 중…")       # 창을 앞으로 가져오지 않고 버튼 메시지·UI Automation으로
     if not click_any(hwnd, SAVE_NAMES, check=lambda: bool(set(_dialogs_of(pid)) - before), log=log, trace=trace):
         return ""
     for _ in range(25):
@@ -1054,6 +1129,9 @@ def open_named_on_screen(hwnd: int, names: list[str], log: Callable[[str], None]
     from . import attach
     trace = trace if trace is not None else []
     if not IS_WIN or not names:
+        return []
+    if not foreground_allowed():           # 실제 더블클릭이 필요하므로 허용했을 때만
+        trace.append("화면의 붙임 이름 더블클릭 생략: 창을 앞으로 가져오지 않는 설정 (폴더 감시로 수집)")
         return []
     log("화면에서 붙임 이름을 찾는 중… (글자 인식)")
     lines = ocr_window(hwnd)

@@ -342,6 +342,7 @@ function renderPendingFiles() {
 let winSel = null, winAll = [];
 const NOTICE_WORDS = /(알림|요청|협조|안내|제출|회신|통보|개최|계획|시행|공문|문서|조사|의뢰)/;
 async function loadWindows() {
+  try { const s = await api("get_settings"); $("#win-foreground").checked = !!s.capture_foreground; } catch { /* 설정 읽기 실패는 무시 */ }
   if (!state.info.windows_available) {
     $("#win-list").innerHTML = '<li class="empty">열린 창 수집은 Windows에서 사용할 수 있습니다.</li>';
     return;
@@ -781,6 +782,10 @@ function bind() {
   // 공문 수집
   segmented($("#collect-mode"), (v) => { $$(".mode-pane").forEach((p) => p.classList.toggle("on", p.dataset.mode === v)); if (v === "window") loadWindows(); });
   $("#win-refresh").addEventListener("click", loadWindows);
+  $("#win-foreground").addEventListener("change", async (e) => {
+    await api("save_settings", { capture_foreground: e.target.checked });
+    toast(e.target.checked ? "PC저장을 자동으로 누릅니다 (저장 창이 잠깐 앞에 뜹니다)" : "창을 앞으로 가져오지 않고 뒤에서만 읽습니다", "info");
+  });
   $("#win-filter").addEventListener("input", renderWindows);
   $("#win-list").addEventListener("click", (e) => { const li = e.target.closest("[data-hwnd]"); if (li) { winSel = Number(li.dataset.hwnd); renderWindows(); } });
   $("#win-list").addEventListener("dblclick", (e) => { if (e.target.closest("[data-hwnd]")) $("#win-capture").click(); });

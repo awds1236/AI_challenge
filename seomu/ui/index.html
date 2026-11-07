@@ -131,7 +131,7 @@
           <ol class="steps">
             <li><b>공문 열기</b> — 업무 프로그램(전자문서 뷰어, 브라우저 등)에서 수집할 공문을 화면에 띄웁니다.</li>
             <li><b>창 선택</b> — 아래 목록에서 그 창을 고르고 <b>[이 창 수집]</b>을 누릅니다.</li>
-            <li><b>자동 정리</b> — 본문을 읽고(본문복사·화면 글자), 붙임 저장(PC저장)을 시도합니다. 직접 저장한 붙임파일도 자동으로 공문 폴더에 모읍니다.</li>
+            <li><b>자동 정리</b> — 창을 앞으로 가져오지 않고 뒤에서 본문을 읽습니다(본문복사·화면 글자). 보고 있던 화면은 그대로입니다. 붙임은 뷰어가 PC에 받아 둔 파일을 찾아 모으고, 뷰어에서 직접 저장한 붙임파일도 자동으로 공문 폴더에 모읍니다.</li>
           </ol>
           <div class="win-toolbar row">
             <input class="input grow" id="win-filter" placeholder="창 이름 검색 (예: 알림, 요청, 협조)">
@@ -140,6 +140,8 @@
           <ul class="win-list" id="win-list"></ul>
           <div class="row end">
             <span class="muted small grow" id="win-hint"></span>
+            <label class="switch-row" title="기본은 창을 앞으로 가져오지 않고 뒤에서 읽고, 붙임은 PC에 받아진 파일과 직접 저장한 파일을 모읍니다. 켜면 'PC저장' 버튼을 자동으로 눌러 저장 창을 처리하고, 본문을 못 읽었을 때 창을 잠깐 앞으로 가져와 전체 선택·복사를 시도합니다.">
+              <span>PC저장 자동 누르기 (저장 창이 앞에 뜸)</span><input type="checkbox" class="switch" id="win-foreground"></label>
             <button class="btn primary" id="win-capture" disabled><i data-icon="download"></i>이 창 수집</button>
           </div>
         </div>

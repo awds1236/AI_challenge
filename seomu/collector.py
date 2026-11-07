@@ -423,6 +423,100 @@ _JS_LINKS = r"""
 """
 
 
+# 글자 조각을 화면 위치로 배치하는 변환 뷰어(사이냅식·PDF.js 글자 층 등)용: 글자마다 화면 좌표를 모은다
+_JS_LAYOUT = r"""
+() => {
+  const out = []; let positioned = 0, total = 0;
+  if (!document.body) return {items: out, positioned: 0, total: 0};
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = walker.nextNode())) {
+    const t = n.textContent; if (!t || !t.trim()) continue;
+    const el = n.parentElement; if (!el) continue;
+    const st = getComputedStyle(el);
+    if (st.display === 'none' || st.visibility === 'hidden' || ['SCRIPT','STYLE','NOSCRIPT'].includes(el.tagName)) continue;
+    const r = document.createRange(); r.selectNodeContents(n);
+    const b = r.getBoundingClientRect(); if (!b.width && !b.height) continue;
+    total++;
+    let p = el, abs = false;
+    for (let i = 0; i < 2 && p; i++, p = p.parentElement) { const ps = getComputedStyle(p).position; if (ps === 'absolute' || ps === 'fixed') { abs = true; break; } }
+    if (abs) positioned++;
+    out.push({t: t, x: b.left + scrollX, y: b.top + scrollY, w: b.width, h: b.height});
+  }
+  return {items: out, positioned: positioned, total: total};
+}
+"""
+
+_JS_PDF_SOURCES = r"""
+() => Array.from(document.querySelectorAll('embed, object, iframe')).map(e => e.src || e.data || '')
+     .filter(s => /\.pdf(\?|#|$)/i.test(s) || /application\/pdf/i.test(s))
+"""
+
+
+def _in_pdf(frame) -> bool:
+    """PDF 문서 프레임이거나 그 안(PDF 뷰어가 만든 about:blank 프레임)인지."""
+    f = frame
+    for _ in range(6):
+        if f is None:
+            return False
+        if re.search(r"\.pdf(\?|#|$)", f.url or "", re.I):
+            return True
+        try:
+            f = f.parent_frame
+        except Exception:
+            return False
+    return False
+
+
+def layout_text(items: list[dict]) -> str:
+    """화면 좌표를 가진 글자 조각을 읽는 순서(위→아래, 왼쪽→오른쪽)로 줄을 만들고,
+    조각 사이 간격이 넓으면 띄어쓰기를 넣는다 (띄어쓰기 문자 없이 위치로만 띄운 변환 뷰어 대응)."""
+    items = sorted((i for i in items if i["t"].strip()), key=lambda i: (i["y"] + i["h"] / 2, i["x"]))
+    lines: list[list[dict]] = []
+    for it in items:
+        cy = it["y"] + it["h"] / 2
+        if lines and abs(cy - lines[-1][0]["_cy"]) < max(4.0, min(it["h"], lines[-1][0]["h"]) * 0.5):
+            lines[-1].append(it)
+        else:
+            it = dict(it)
+            it["_cy"] = cy
+            lines.append([it])
+    out = []
+    for ln in lines:
+        ln.sort(key=lambda i: i["x"])
+        s, right = "", None
+        for it in ln:
+            t = it["t"]
+            if right is not None:
+                gap = it["x"] - right
+                if gap > it["h"] * 0.22 and not s.endswith((" ", "\t")) and not t.startswith((" ", "\t")):
+                    s += " "
+            s += t
+            right = it["x"] + it["w"]
+        out.append(re.sub(r"[ \t]+", " ", s).strip())
+    return "\n".join(l for l in out if l)
+
+
+def fix_mojibake(name: str) -> str:
+    """옛 서버가 인코딩 표시 없이 보낸 CP949·UTF-8 파일 이름이 깨져 보이면 복원한다 ('Áý' → '집')."""
+    if not name or re.search(r"[가-힣]", name):
+        return name
+    if not re.search(r"[\u0080-ÿ]", name):
+        return name
+    try:
+        raw = name.encode("latin-1")
+    except UnicodeEncodeError:
+        return name
+    for enc in ("utf-8", "cp949"):
+        try:
+            fixed = raw.decode(enc)
+            if re.search(r"[가-힣]", fixed):
+                return fixed
+        except UnicodeDecodeError:
+            continue
+    return name
+
+
 class BrowserWorker:
     """Playwright는 생성한 스레드에서만 써야 하므로 전용 스레드에서 명령을 처리한다."""
 
@@ -546,14 +640,17 @@ class BrowserWorker:
             ctx = self._ensure()
             pages = [p for p in ctx.pages if not p.is_closed()]
             page = pages[page_index] if page_index is not None and 0 <= page_index < len(pages) else self._active_page()
-            try:
-                page.wait_for_load_state("domcontentloaded", timeout=10000)
-            except Exception:
-                pass
             say = progress or (lambda m: None)
+            say("페이지가 다 그려질 때까지 기다리는 중…")
+            self._wait_settled(page)
             say("페이지 본문을 읽는 중…")
-            html_parts, texts, candidates = [], [], []
+            html_parts, texts, candidates, pdf_urls, headings, images = [], [], [], [], [], []
+            how = "브라우저 화면 글자"
             for fr in page.frames:
+                if _in_pdf(fr):                      # PDF 프레임(과 그 안의 뷰어 프레임)은 글자 읽기 명령에 응답하지 않는다
+                    if re.search(r"\.pdf(\?|#|$)", fr.url or "", re.I):
+                        pdf_urls.append(fr.url)      # → 원본을 받아 읽는다
+                    continue
                 try:
                     h = fr.content()
                 except Exception:
@@ -563,8 +660,35 @@ class BrowserWorker:
                     t = fr.evaluate("() => document.body ? document.body.innerText : ''")
                 except Exception:
                     t = html_to_text(h)
+                # 메뉴·머리말·꼬리말을 뺀 본문 영역이 충분하면 그것을 쓴다 (업무포털·문서24 화면의 메뉴 글자 제거)
+                try:
+                    from .parsers import main_text
+                    m = main_text(h)
+                    if len(m) >= 40 and len(m) >= len(t or "") * 0.4:
+                        t = m
+                except Exception:
+                    pass
+                # 변환 뷰어(글자 조각을 위치로 배치)는 화면 좌표로 줄·띄어쓰기를 다시 맞춘다
+                try:
+                    lay = fr.evaluate(_JS_LAYOUT)
+                    if lay["total"] >= 10 and lay["positioned"] >= lay["total"] * 0.5:
+                        t = layout_text(lay["items"])
+                        how = "변환 뷰어 화면 배치"
+                except Exception:
+                    pass
+                try:
+                    headings += [x.strip() for x in fr.evaluate(
+                        "() => Array.from(document.querySelectorAll('h1,h2,h3,.subject,.title,.tit')).map(e => e.innerText)") if x]
+                    images += [urllib.parse.urljoin(fr.url, u) for u in fr.evaluate(
+                        "() => Array.from(document.images).filter(i => i.naturalWidth > 500).map(i => i.currentSrc || i.src)")]
+                except Exception:
+                    pass
                 if t and t.strip():
                     texts.append(t)
+                try:
+                    pdf_urls += [urllib.parse.urljoin(fr.url, u) for u in fr.evaluate(_JS_PDF_SOURCES)]
+                except Exception:
+                    pass
                 try:
                     for l in fr.evaluate(_JS_LINKS):
                         if is_attachment_link({"href": l["href"], "text": l["text"], "title": l["title"],
@@ -576,19 +700,76 @@ class BrowserWorker:
             # 가장 긴 본문 텍스트(공문 본문 iframe)를 앞에 둔다
             texts.sort(key=len, reverse=True)
             text = normalize("\n\n".join(dict.fromkeys(texts)))
+            # 화면에 삽입된 PDF 문서(PDF 변환 뷰어): 원본을 받아 글자를 읽는다
+            pdf_body = None
+            for u in dict.fromkeys(pdf_urls):
+                try:
+                    resp = page.context.request.get(u, timeout=30000)
+                    if resp.ok and resp.body()[:4] == b"%PDF":
+                        pdf_body = resp.body()
+                        break
+                except Exception:
+                    continue
+            if pdf_body:
+                from .parsers import ParseError, parse_pdf
+                import tempfile
+                tmp = Path(tempfile.gettempdir()) / "seomu_embedded.pdf"
+                tmp.write_bytes(pdf_body)
+                try:
+                    pt = parse_pdf(tmp)
+                    if len(pt) > len(text) * 0.5:
+                        text = normalize(pt + "\n\n" + text) if len(text) < 200 else normalize(pt)
+                        how = "화면에 삽입된 PDF"
+                except ParseError:
+                    pass
+            # 화면 캡처 (그림뿐인 이미지 뷰어면 캡처를 글자 인식)
+            import tempfile
+            shot_tmp = Path(tempfile.gettempdir()) / f"seomu_shot_{os.getpid()}.png"
+            try:
+                page.screenshot(path=str(shot_tmp), full_page=True)
+            except Exception:
+                shot_tmp = None
+            if len(re.sub(r"\s", "", text)) < 60:
+                say("글자가 없는 화면이라 그림에서 글자를 읽는 중…")
+                from .parsers import ParseError, parse_image
+                # 화면에 축소돼 보이는 그림보다 원본 그림이 글자 인식이 정확하다
+                srcs = []
+                for i, u in enumerate(dict.fromkeys(images)):
+                    try:
+                        resp = page.context.request.get(u, timeout=30000)
+                        if resp.ok:
+                            p = Path(tempfile.gettempdir()) / f"seomu_page_{os.getpid()}_{i}.png"
+                            p.write_bytes(resp.body())
+                            srcs.append(p)
+                    except Exception:
+                        continue
+                if not srcs and shot_tmp and shot_tmp.exists():
+                    srcs = [shot_tmp]
+                parts = []
+                for p in srcs[:10]:
+                    try:
+                        parts.append(parse_image(p))
+                    except ParseError:
+                        pass
+                ocr = "\n\n".join(parts)
+                if len(ocr) > len(text):
+                    text, how = ocr, "화면 그림 글자 인식(OCR)"
             info = analyze_html(html_parts[0] if html_parts else "", page.url)
-            title = title_override or extract_title(text, page.title(), [])
-            if title in ("공문", "") and info["title"]:
-                title = info["title"]
+            # 제목: 본문의 '제목' 줄 > 화면 안의 제목(h1·h2) > 탭 제목
+            heads = [h for h in headings if 8 <= len(h) <= 120]
+            title = title_override or extract_title(text, "", heads)
+            if title in ("공문", "") or (not re.search(r"^\s*(제\s*목|건\s*명)", text, re.M) and not heads):
+                title = title_override or extract_title(text, page.title(), heads) or info["title"]
             folder = make_notice_folder(root, title)
             save_body(folder, title, text, "\n<!-- frame -->\n".join(html_parts), page.url)
+            if pdf_body:
+                (folder / "본문_원문.pdf").write_bytes(pdf_body)
             shot = ""
-            try:
+            if shot_tmp and shot_tmp.exists():
                 shot_path = folder / "본문_화면.png"
-                page.screenshot(path=str(shot_path), full_page=True)
+                shutil.move(str(shot_tmp), shot_path)
                 shot = str(shot_path)
-            except Exception:
-                pass
+            (folder / "수집기록.txt").write_text(f"본문 읽은 방법: {how}\n주소: {page.url}\n", encoding="utf-8")
             files, seen = [], set()
             for c in candidates:
                 key = c["abs"] or (c["text"] + c["onclick"])
@@ -599,6 +780,35 @@ class BrowserWorker:
                 files.append(self._download(page, c, folder / "붙임"))
             return Captured(title, text, "", page.url, folder, files, shot)
         return self._call(_do)
+
+    @staticmethod
+    def _wait_settled(page, limit: float = 8.0) -> None:
+        """그룹웨어처럼 내용을 나중에 그리는 화면: 통신이 잦아들고 글자 수가 더 늘지 않을 때까지 기다린다."""
+        import time as _t
+        for state, ms in (("domcontentloaded", 10000), ("networkidle", 5000)):
+            try:
+                page.wait_for_load_state(state, timeout=ms)
+            except Exception:
+                pass
+
+        def size() -> int:
+            n = 0
+            for fr in page.frames:
+                if _in_pdf(fr):                                            # PDF 프레임은 응답하지 않는다
+                    continue
+                try:
+                    n += int(fr.evaluate("() => document.body ? document.body.innerText.length : 0"))
+                except Exception:
+                    pass
+            return n
+        end, last, stable = _t.time() + limit, -1, 0
+        while _t.time() < end:
+            cur = size()
+            stable = stable + 1 if cur == last and cur > 0 else 0
+            if stable >= 2 and not re.search(r"(불러오는|로딩|loading)", page.content()[:20000], re.I):
+                return
+            last = cur
+            _t.sleep(0.4)
 
     def _download(self, page, c: dict, dest: Path) -> dict:
         name_hint = c["text"] or c["title"] or "붙임파일"
@@ -627,7 +837,7 @@ class BrowserWorker:
             with page.expect_download(timeout=15000) as dl_info:
                 fr.click(f'[data-seomu-idx="{c["idx"]}"]', timeout=5000)
             dl = dl_info.value
-            path = unique_path(dest / safe_name(dl.suggested_filename or name_hint, 120))
+            path = unique_path(dest / safe_name(fix_mojibake(dl.suggested_filename) or name_hint, 120))
             dl.save_as(str(path))
             return {"name": path.name, "path": str(path), "ok": True}
         except Exception as e:

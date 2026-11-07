@@ -53,6 +53,9 @@ class Settings:
     # 공문 수집
     browser_channel: str = ""     # "msedge" / "chrome" / "" (내장 Chromium)
     browser_headless: bool = False
+    # 열린 창 수집에서 본문을 못 읽었을 때 창을 앞으로 가져와 전체 선택·복사·화면 클릭까지 시도할지
+    # (기본: 하지 않음 — 보고 있던 화면을 가로채지 않고 뒤에 있는 창에서만 읽는다)
+    capture_foreground: bool = False
 
     # 사용자 정보 (메일 서명 등)
     user_name: str = ""

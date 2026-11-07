@@ -16,7 +16,7 @@ from xml.etree import ElementTree as ET
 
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff"}
 SUPPORTED = {".txt", ".md", ".csv", ".hwp", ".hwpx", ".pdf", ".docx", ".xlsx", ".html", ".htm", ".xhtml",
-             ".mht", ".mhtml", ".eml", ".odt", ".pptx", ".rtf", ".xml"} | IMAGE_EXT
+             ".mht", ".mhtml", ".eml", ".odt", ".pptx", ".rtf", ".xml", ".hwx"} | IMAGE_EXT
 # 규정 색인·붙임 미리 읽기용 (이미지 OCR은 느리므로 공문 본문으로 직접 가져올 때만 쓴다)
 READABLE_EXT = SUPPORTED - IMAGE_EXT - {".xml"}
 
@@ -618,7 +618,44 @@ def parse_file(path: str | Path) -> str:
         return parse_docx(path)
     if ext == ".xlsx":
         return parse_xlsx(path)
-    raise ParseError(f"지원하지 않는 형식입니다: {ext}")
+    return parse_sniffed(path)          # .hwx·확장자 없음 등은 내용으로 판별
+
+
+def parse_sniffed(path: Path) -> str:
+    """확장자로 알 수 없는 파일(.hwx 전자결재 문서, 확장자 없이 받은 'download.do' 등)은 내용으로 형식을 판별한다."""
+    try:
+        head = path.read_bytes()[:8]
+    except OSError as e:
+        raise ParseError(f"파일을 읽을 수 없습니다: {e}") from e
+    if head[:4] == b"%PDF":
+        return parse_pdf(path)
+    if head[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":          # OLE: 한글 5.0(HWP)
+        return parse_hwp(path)
+    if head[:2] == b"PK":
+        try:
+            with zipfile.ZipFile(path) as z:
+                names = z.namelist()
+        except zipfile.BadZipFile as e:
+            raise ParseError(f"손상된 압축 형식 파일입니다: {e}") from e
+        if any(re.match(r"Contents/section\d+\.xml$", n) for n in names):
+            return parse_hwpx(path)
+        if "word/document.xml" in names:
+            return parse_docx(path)
+        if "content.xml" in names:
+            return parse_odt(path)
+        if any(n.startswith("ppt/slides/") for n in names):
+            return parse_pptx(path)
+        if any(n.startswith("xl/") for n in names):
+            return parse_xlsx(path)
+        raise ParseError("압축 파일입니다 (붙임으로 가져오면 자동으로 풉니다)")
+    raw = read_text_file(path)
+    if raw[:200].lstrip().startswith("<"):
+        return main_text(raw) if re.search(r"<(html|body|p|div|table)\b", raw[:5000], re.I) else \
+            normalize(re.sub(r"<[^>]+>", "\n", raw))
+    printable = sum(1 for c in raw[:2000] if c.isprintable() or c in "\r\n\t")
+    if raw and printable / min(len(raw), 2000) > 0.95:
+        return normalize(raw)
+    raise ParseError(f"지원하지 않는 형식입니다: {path.suffix or '(확장자 없음)'}")
 
 
 def guess_category(path: Path, text: str = "") -> str:

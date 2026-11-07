@@ -619,9 +619,11 @@ class Api:
         if not win:
             raise ValueError("선택한 창을 찾을 수 없습니다. 창 목록을 새로고침하세요.")
 
+        winwindow.set_foreground_allowed(self._cfg.settings.capture_foreground)
+
         def work(job: Job):
             say = lambda m: setattr(job, "message", m)  # noqa: E731
-            trace: list[str] = []
+            trace: list[str] = [f"창을 앞으로 가져오는 방법 허용: {winwindow.foreground_allowed()}"]
             hwnd_ = win["hwnd"]
             started = time.time()
             text, how = winwindow.extract_text(hwnd_, say, trace)
@@ -700,7 +702,11 @@ class Api:
             harvest(started - 3 * 3600)
             # ② 저장/다운로드 버튼
             state = ""
-            if missing() or not expected:
+            # 'PC저장'을 누르면 뷰어가 띄운 저장 창이 화면 맨 앞에 뜬다 (뷰어 프로그램이 하는 일이라 막을 수 없다)
+            # → 창을 앞으로 가져와도 된다고 설정했을 때만 자동으로 누르고, 아니면 PC 안 파일 찾기·폴더 감시로 모은다
+            if (missing() or not expected) and not winwindow.foreground_allowed():
+                trace.append("PC저장 자동 누르기 생략: 저장 창이 화면 앞에 뜨므로 (설정에서 허용하면 자동으로 누름)")
+            elif missing() or not expected:
                 try:
                     state = winwindow.try_save_attachments(hwnd_, dest, say, trace)
                 except Exception as e:          # 뷰어마다 화면이 달라 실패할 수 있다 → 다음 단계로
