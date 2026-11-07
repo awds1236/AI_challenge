@@ -384,12 +384,16 @@ async function openNotice(id) {
   const acts = (a.actions || []).map((x) => `<li>${esc(x)}</li>`).join("");
   const ev = a.event || {};
   const evRows = [["행사명", ev.name], ["일시", ev.date], ["장소", ev.place]].filter((r) => r[1]);
-  const files = (n.attachments || []).map((f) => `<div class="attach" ${f.ok ? `data-open="${esc(f.path)}"` : ""}>
+  // 붙임: 누르면 앱 안에서 내용 미리보기 (한글·PDF 뷰어가 없는 PC에서도 확인), [열기]는 PC 프로그램으로
+  const files = (n.attachments || []).map((f) => `<div class="attach" ${f.ok ? `data-preview="${esc(f.path)}"` : ""}>
       <div class="ext ${extOf(f.name)}">${esc(extOf(f.name)).slice(0, 4)}</div>
-      <div class="main-col"><div>${esc(f.name)}</div><div class="muted small">${f.ok ? "다운로드 완료 · 눌러서 열기" : "실패: " + esc(f.error || "")}</div></div></div>`).join("")
+      <div class="main-col"><div>${esc(f.name)}</div><div class="muted small">${f.ok ? "받기 완료 · 눌러서 내용 보기" : "받지 못함: " + esc(f.error || "")}</div></div>
+      ${f.ok ? `<div class="acts"><button class="btn ghost sm" data-open="${esc(f.path)}">열기</button></div>` : ""}</div>`).join("")
     || `<div class="muted">붙임 파일이 없습니다.</div>`;
+  const sumLines = String(a.summary || "-").split("\n");
+  const summary = `${esc(sumLines[0])}${sumLines.length > 1 ? `<span class="sub">${esc(sumLines.slice(1).join(" · "))}</span>` : ""}`;
   $("#nd-body").innerHTML = `
-    <div class="section"><h4>요약</h4><div class="summary-box">${esc(a.summary || "-")}</div></div>
+    <div class="section"><h4>요약</h4><div class="summary-box">${summary}</div></div>
     <div class="section"><h4>제출 기한</h4>${dls}</div>
     <div class="grid-2">
       <div class="section"><h4>제출물</h4>${subs ? `<ul class="check-list">${subs}</ul>` : '<div class="muted">확인된 제출물 없음</div>'}</div>
@@ -398,12 +402,34 @@ async function openNotice(id) {
     ${evRows.length ? `<div class="section"><h4>행사 정보</h4><dl class="kv">${evRows.map((r) => `<dt>${r[0]}</dt><dd>${esc(r[1])}</dd>`).join("")}</dl></div>` : ""}
     ${a.contact ? `<div class="section"><h4>문의처</h4><div>${esc(a.contact)}</div></div>` : ""}
     <div class="section"><h4>붙임 파일 · ${esc(baseName(n.folder))}</h4>${files}</div>
-    ${a.llm_error ? `<div class="section muted small">AI 분석 불가로 규칙 기반 결과를 표시합니다: ${esc(a.llm_error)}</div>` : ""}
+    ${a.llm_error ? `<div class="section muted small">로컬 AI를 쓰지 못해 규칙 기반 분석 결과를 보여 줍니다. (원인: ${esc(a.llm_error)})</div>` : ""}
     <details class="raw"><summary>본문 원문 보기</summary><pre>${esc(n.body || "")}</pre></details>`;
   $("#sheet").classList.remove("hidden");
   if (a.ai_status === "running") watchAI(n.id);
 }
 function closeSheet() { $("#sheet").classList.add("hidden"); }
+
+// 파일 미리보기
+let previewPath = "";
+async function previewFile(path) {
+  previewPath = path;
+  $("#pv-title").textContent = baseName(path);
+  $("#pv-meta").textContent = "내용을 읽는 중…";
+  $("#pv-body").textContent = ""; $("#pv-body").classList.remove("err"); $("#pv-hint").textContent = "";
+  $("#pv-sheet").classList.remove("hidden");
+  try {
+    const r = await api("preview_file", path);
+    if (r.error) {
+      $("#pv-meta").textContent = "미리보기";
+      $("#pv-body").textContent = r.error; $("#pv-body").classList.add("err");
+      $("#pv-hint").textContent = r.hint || "";
+    } else {
+      $("#pv-meta").textContent = `글자 ${r.chars.toLocaleString()}자${r.truncated ? " · 앞부분만 표시" : ""} · 서식 없이 글자만 보여 줍니다`;
+      $("#pv-body").textContent = r.text;
+    }
+  } catch (e) { $("#pv-meta").textContent = "미리보기"; $("#pv-body").textContent = e.message; $("#pv-body").classList.add("err"); }
+}
+function closePreview() { $("#pv-sheet").classList.add("hidden"); }
 
 // 백그라운드 AI 분석이 끝나면 화면 갱신
 const aiWatching = new Set();
@@ -728,6 +754,7 @@ function bind() {
     const g = t.closest("[data-goto]"); if (g && !t.closest("[data-notice]")) return go(g.dataset.goto);
     const n = t.closest("[data-notice]"); if (n) return openNotice(Number(n.dataset.notice));
     const o = t.closest("[data-open]"); if (o) { const ok = await api("open_path", o.dataset.open); if (!ok) toast("파일을 열 수 없습니다", "err"); return; }
+    const pv = t.closest("[data-preview]"); if (pv) return previewFile(pv.dataset.preview);
     const cite = t.closest(".cite");
     if (cite) {
       const src = $(`.source[data-n="${cite.dataset.n}"]`, cite.closest(".msg"));
@@ -782,12 +809,39 @@ function bind() {
     renderPendingFiles();
   });
   $("#file-collect").addEventListener("click", async () => { const paths = state.pendingFiles.slice(); state.pendingFiles = []; renderPendingFiles(); await doCollect("collect_files", [paths, title(), 0, useAI()]); });
+  // 본문 붙여넣기: 웹 페이지에서 복사하면 HTML(표·붙임 링크)도 함께 받아 둔다
+  let pasteHtml = "";
+  const pasteInfo = () => {
+    const t = $("#paste-text").value.trim();
+    $("#paste-collect").disabled = t.length < 10;
+    $("#paste-info").textContent = t ? `${t.length.toLocaleString()}자${pasteHtml ? " · 웹 서식 포함" : ""}` : "";
+  };
+  $("#paste-text").addEventListener("paste", (e) => {
+    const h = e.clipboardData && e.clipboardData.getData("text/html");
+    pasteHtml = h && h.length < 3000000 ? h : "";
+    setTimeout(pasteInfo, 0);
+  });
+  $("#paste-text").addEventListener("input", () => { if (!$("#paste-text").value.trim()) pasteHtml = ""; pasteInfo(); });
+  $("#paste-clear").addEventListener("click", () => { $("#paste-text").value = ""; pasteHtml = ""; pasteInfo(); });
+  $("#paste-collect").addEventListener("click", async () => {
+    const text = $("#paste-text").value, html = pasteHtml;
+    await doCollect("collect_text", [text, title(), useAI(), html]);
+    $("#paste-text").value = ""; pasteHtml = ""; pasteInfo();
+  });
   $("#open-root").addEventListener("click", async () => { const s = await api("get_settings"); if (!(await api("open_path", s._download_root))) toast("아직 폴더가 없습니다. 공문을 먼저 수집하세요.", "info"); });
 
   // 시트
   $("#nd-close").addEventListener("click", closeSheet);
   $("#sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") closeSheet(); });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSheet(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!$("#pv-sheet").classList.contains("hidden")) return closePreview();   // 미리보기부터 닫는다
+    closeSheet();
+  });
+  $("#pv-close").addEventListener("click", closePreview);
+  $("#pv-sheet").addEventListener("click", (e) => { if (e.target.id === "pv-sheet") closePreview(); });
+  $("#pv-open").addEventListener("click", async () => { if (previewPath && !(await api("open_path", previewPath))) toast("파일을 열 수 없습니다", "err"); });
+  $("#pv-copy").addEventListener("click", async () => { await copyText($("#pv-body").textContent); toast("글자를 복사했습니다", "ok"); });
   $("#nd-folder").addEventListener("click", () => currentNotice && api("open_notice_folder", currentNotice.id));
   $("#nd-mail").addEventListener("click", async () => { if (!currentNotice) return; const id = currentNotice.id; closeSheet(); go("mail"); await loadMail(); $("#mc-notice").value = String(id); makeMail(); });
   $("#nd-reanalyze").addEventListener("click", async () => {

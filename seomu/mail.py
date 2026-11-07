@@ -108,7 +108,8 @@ def build_variables(notice: dict | None, settings, today: date | None = None) ->
         return v
     a = notice.get("analysis") or {}
     v["공문제목"] = notice.get("title", "")
-    v["요약"] = a.get("summary", "")
+    lines = [l.strip() for l in (a.get("summary") or "").splitlines() if l.strip()]
+    v["요약"] = "\n".join(f"  - {l}" for l in lines) if len(lines) > 1 else (lines[0] if lines else "")
     dls = a.get("deadlines") or []
     upcoming = [d for d in dls if d.get("date", "") >= today.isoformat()] or dls
     if upcoming:
@@ -131,8 +132,30 @@ def build_variables(notice: dict | None, settings, today: date | None = None) ->
     return v
 
 
+_PARTICLES = {"과": ("과", "와"), "와": ("과", "와"), "을": ("을", "를"), "를": ("을", "를"), "이": ("이", "가"),
+              "가": ("이", "가"), "은": ("은", "는"), "는": ("은", "는"), "으로": ("으로", "로"), "로": ("으로", "로")}
+# 변수 바로 뒤의 조사: 「{{공문제목}}」과 / {{행사명}}을 …
+_VAR_PARTICLE = re.compile(r"(「?\{\{\s*([^{}\s]+)\s*\}\}[」』\"']?)(으로|과|와|을|를|이|가|은|는|로)(?![가-힣])")
+
+
+def josa(word: str, particle: str) -> str:
+    """앞말의 받침에 맞는 조사: josa('행사 안내', '과') → '와', josa('제출 요청', '와') → '과'."""
+    pair = _PARTICLES.get(particle)
+    last = next((c for c in reversed(word or "") if "가" <= c <= "힣" or c.isdigit()), "")
+    if not pair or not last:
+        return particle
+    if last.isdigit():          # 숫자는 읽는 소리로: 1 일·7 칠·8 팔(ㄹ받침), 0 영·3 삼·6 육(받침), 나머지 받침 없음
+        jong = 8 if last in "178" else 1 if last in "036" else 0
+    else:
+        jong = (ord(last) - 0xAC00) % 28
+    if particle in ("으로", "로"):
+        return "로" if jong in (0, 8) else "으로"         # 받침 없음·ㄹ받침 → 로
+    return pair[0] if jong else pair[1]
+
+
 def render(template: str, variables: dict[str, str]) -> tuple[str, list[str]]:
-    """양식의 {{변수}}를 채운다. 값이 없는 변수는 [변수] 표시로 남기고 목록으로 반환."""
+    """양식의 {{변수}}를 채운다. 값이 없는 변수는 [변수] 표시로 남기고 목록으로 반환.
+    변수 바로 뒤의 조사는 채운 값의 받침에 맞춘다 (「…안내」와 / 「…요청」과)."""
     missing: list[str] = []
 
     def rep(m):
@@ -144,7 +167,11 @@ def render(template: str, variables: dict[str, str]) -> tuple[str, list[str]]:
             missing.append(key)
         return f"[{key}]"
 
-    return _VAR.sub(rep, template), missing
+    def fix_particle(m):
+        val = variables.get(m.group(2), "")
+        return m.group(1) + (josa(val, m.group(3)) if val else m.group(3))
+
+    return _VAR.sub(rep, _VAR_PARTICLE.sub(fix_particle, template)), missing
 
 
 POLISH_PROMPT = """다음은 공공기관 직원이 보낼 업무 메일 초안입니다.

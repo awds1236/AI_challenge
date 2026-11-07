@@ -37,6 +37,30 @@ def safe_name(name: str, limit: int = 80) -> str:
     return (name[:limit].rstrip() or "제목없음")
 
 
+_TITLE_TAIL = re.compile(
+    r"\s*[-–—|:]\s*(?:개인\s*[-–]\s*|프로필\s*\d*\s*[-–]\s*|InPrivate\s*[-–]\s*)?"
+    r"(?:Microsoft\s*Edge|Google\s*Chrome|Chrome|Chromium|Naver\s*Whale|Whale|Internet\s*Explorer|Mozilla\s*Firefox|Firefox|"
+    r"온나라(?:\s*시스템)?|온나라\s*문서|문서\s*24|문서24|업무\s*관리\s*시스템|K-?에듀파인|에듀파인|전자\s*결재|그룹웨어|"
+    r"전자\s*문서(?:\s*뷰어)?|문서\s*뷰어|문서\s*보기|문서|한글|Hwp|HWP|PDF|Adobe\s*Acrobat(?:\s*Reader)?(?:\s*DC)?)\s*$", re.I)
+_TITLE_HEAD = re.compile(r"^(?:공지\s*사항|게시판|알림\s*마당|새\s*소식)?\s*(?:상세\s*보기|상세|내용\s*보기|보기)\s*[|:\-–]\s*")
+
+
+def clean_title(title: str) -> str:
+    """창·페이지 제목에서 브라우저·공문 시스템 이름, 폭 없는 공백, '상세보기 |' 같은 머리말을 뺀다."""
+    import unicodedata
+    t = unicodedata.normalize("NFC", title or "")
+    t = re.sub(r"[​-‏⁠﻿]", "", t).replace("\xa0", " ").replace("　", " ")
+    t = re.sub(r"\s+", " ", t).strip()
+    for _ in range(3):
+        t2 = _TITLE_TAIL.sub("", t).strip()
+        if t2 == t or len(t2) < 2:
+            break
+        t = t2
+    t = _TITLE_HEAD.sub("", t).strip()
+    t = re.sub(r"\s*\|\s*[^|]{1,20}(?:시청|군청|구청|도청|청|부|처|원|공단|공사|재단|교육청|학교|대학교)\s*$", "", t)
+    return t or (title or "").strip()
+
+
 def unique_path(path: Path) -> Path:
     if not path.exists():
         return path
@@ -121,7 +145,7 @@ def extract_title(text: str, html_title: str = "", headings: list[str] | None = 
         if 4 <= len(h) <= 120:
             return h
     if html_title.strip():
-        return html_title.strip()[:120]
+        return clean_title(html_title)[:120]
     for line in text.splitlines():
         line = line.strip()
         if 6 <= len(line) <= 100:
@@ -260,6 +284,64 @@ def collect_from_url(url: str, root: Path, title_override: str = "") -> Captured
     return Captured(title, info["text"], markup, final, folder, files)
 
 
+def _zip_name(info) -> str:
+    """zip 안 파일 이름: 한국 PC에서 만든 zip은 이름이 cp949인데 UTF-8 표시가 없어 깨진다 → 복원."""
+    name = info.filename
+    if not (info.flag_bits & 0x800):
+        try:
+            name = name.encode("cp437").decode("cp949")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    return name
+
+
+def expand_archives(files: list[dict], max_files: int = 200, max_bytes: int = 500 << 20) -> list[dict]:
+    """붙임 중 zip 파일을 같은 이름의 폴더에 풀고 그 안의 파일을 붙임 목록에 더한다 (zip 원본도 남긴다)."""
+    import zipfile
+    out = list(files)
+    for f in files:
+        p = Path(f.get("path") or "")
+        if not f.get("ok") or p.suffix.lower() != ".zip" or not p.exists():
+            continue
+        try:
+            with zipfile.ZipFile(p) as z:
+                infos = [i for i in z.infolist() if not i.is_dir()][:max_files]
+                if sum(i.file_size for i in infos) > max_bytes:
+                    continue
+                target = unique_path(p.with_suffix(""))
+                target.mkdir(parents=True)
+                for info in infos:
+                    parts = [safe_name(x, 120) for x in re.split(r"[\\/]+", _zip_name(info)) if x not in ("", ".", "..")]
+                    if not parts:
+                        continue
+                    dest = unique_path(target.joinpath(*parts))       # 상위 폴더로 빠져나가는 이름은 막는다
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with z.open(info) as src, open(dest, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    out.append({"name": f"{p.stem}/{dest.name}", "path": str(dest), "ok": True, "from": p.name})
+        except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError):
+            continue                 # 암호가 걸렸거나 손상된 zip은 원본만 둔다
+    return out
+
+
+def save_eml_attachments(eml: Path, dest: Path) -> list[dict]:
+    """메일(.eml)에 첨부된 파일을 붙임 폴더로 꺼낸다."""
+    from .parsers import read_eml
+    files = []
+    try:
+        m = read_eml(eml)
+    except Exception:
+        return files
+    for name, data in m["files"]:
+        if not data:
+            continue
+        dest.mkdir(parents=True, exist_ok=True)
+        p = unique_path(dest / safe_name(name, 120))
+        p.write_bytes(data)
+        files.append({"name": p.name, "path": str(p), "ok": True, "from": eml.name})
+    return files
+
+
 def collect_from_files(paths: list[str], root: Path, title: str = "", body_index: int = 0) -> Captured:
     """로컬 파일들로 공문 폴더 구성. body_index 번째 파일을 본문으로 본다."""
     from .parsers import ParseError, parse_file
@@ -284,7 +366,45 @@ def collect_from_files(paths: list[str], root: Path, title: str = "", body_index
         shutil.copy2(f, dest)
         if f != body_src:
             files.append({"name": dest.name, "path": str(dest), "ok": True})
+        if f.suffix.lower() == ".eml":                     # 메일 공문: 첨부 파일도 붙임으로
+            files.extend(save_eml_attachments(f, folder / "붙임"))
     return Captured(title, text, "", str(body_src), folder, files)
+
+
+def collect_from_text(text: str, root: Path, title: str = "", html: str = "", base_url: str = "") -> Captured:
+    """붙여넣은 공문 (어떤 공문 시스템이든 본문을 복사해 붙여 넣으면 된다).
+    웹 페이지에서 복사하면 HTML도 함께 오므로 표 구조를 살리고 붙임 링크 이름을 찾는다."""
+    from .parsers import main_text
+    text = normalize(text or "")
+    links: list[dict] = []
+    if html and html.strip():
+        info = analyze_html(html, base_url)
+        h_text = main_text(html)
+        if len(h_text) >= len(text) * 0.6:            # HTML 쪽이 표·줄 구조가 더 정확하다
+            text = h_text
+        links = info["attachments"][:10]
+    if len(re.sub(r"\s", "", text)) < 10:
+        raise ValueError("붙여 넣은 본문이 너무 짧습니다. 공문 본문 전체를 복사해 붙여 넣어 주세요.")
+    title = title or extract_title(text)
+    folder = make_notice_folder(root, title)
+    save_body(folder, title, text, html or "", base_url or "붙여넣기")
+    files = []
+    for a in links:
+        if a["url"].startswith(("http://", "https://")):
+            try:
+                p = download_url(a["url"], folder / "붙임", a["name"], timeout=20)
+                files.append({"name": p.name, "path": str(p), "ok": True})
+                continue
+            except Exception as e:  # 로그인이 필요한 링크·업무망 안 주소 등
+                code = getattr(e, "code", None)
+                why = (f"서버 응답 {code}" if code else
+                       "주소에 연결할 수 없음" if "getaddrinfo" in str(e) or "Errno" in str(e) else "연결 실패")
+                err = (f"자동으로 받지 못했습니다({why}). 로그인이 필요한 링크일 수 있으니 "
+                       "브라우저 연동으로 수집하거나, 파일을 직접 저장해 공문 폴더의 '붙임'에 넣어 주세요")
+        else:
+            err = "붙여넣기로는 내려받을 수 없는 링크입니다 — 직접 저장해 공문 폴더의 '붙임'에 넣어 주세요"
+        files.append({"name": a["name"], "path": "", "ok": False, "error": err})
+    return Captured(title, text, "", base_url or "붙여넣기", folder, files)
 
 
 # ---------------------------------------------------------------- 브라우저 연동 (Playwright)

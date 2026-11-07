@@ -133,7 +133,7 @@ def test_mail_render():
     assert out == "청렴 교육 2026. 11. 13.(금) 18:00까지 [내메일]"
     assert missing == ["내메일"]
     ics = tasks_to_ics([{"id": 1, "title": "제출; 확인", "due": "2026-11-13", "done": 0}])
-    assert "DTSTART;VALUE=DATE:20261113" in ics and "제출\; 확인" in ics
+    assert "DTSTART;VALUE=DATE:20261113" in ics and "제출\\; 확인" in ics
 
 
 def test_html_to_text_skips_script():
@@ -226,11 +226,14 @@ NOTICE_SURVEY = """행복한 구민, 신뢰받는 공기업!
 def test_rule_analysis_skips_boilerplate():
     from seomu.analyzer import rule_analysis
     a = rule_analysis("공공체육시설 문화체육프로그램 추첨제 현황 조사 협조 요청", NOTICE_SURVEY, [], REF)
-    assert a["summary"].startswith("공공체육시설 수강신청 제도의 공정성")
+    # 요약: 목적절·공문 어미를 걷어낸 '무엇을 — 무엇을 해 달라 (언제까지)' 한 줄 + 대상
+    assert a["summary"].startswith("문화체육프로그램 수강신청 운영현황 조사 — 협조 요청 (11월 13일(금)까지)")
     assert "행복한" not in a["summary"] and "무궁한 발전" not in a["summary"]
-    assert "회신기한: 2026. 11. 13.(금)" in a["summary"]
+    assert "하오니" not in a["summary"] and "활용하고자" not in a["summary"]
+    assert "대상 공공체육시설" in a["summary"]
     assert a["deadlines"] == [{"date": "2026-11-13", "time": "", "what": "조사표 회신", "source": "규칙"}]
-    assert len(a["submissions"]) == 1 and "조사표" in a["submissions"][0]["item"]
+    assert len(a["submissions"]) == 1
+    assert a["submissions"][0]["item"] == "공공체육시설 문화체육프로그램 추첨제 현황 조사표 (붙임 서식)"
     assert a["submissions"][0]["how"].startswith("공문 또는 담당자 이메일")
     assert a["actions"][0] == "조사표 회신 (11/13까지)"
 

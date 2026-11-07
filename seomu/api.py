@@ -22,17 +22,17 @@ from typing import Callable
 
 from . import APP_NAME, __version__
 from .analyzer import analyze, summary_markdown
-from .collector import (BrowserWorker, Captured, collect_from_files, collect_from_url,
-                        make_notice_folder, safe_name, save_body, unique_path)
+from .collector import (BrowserWorker, Captured, clean_title, collect_from_files, collect_from_text, collect_from_url,
+                        expand_archives, make_notice_folder, safe_name, save_body, unique_path)
 from .config import Config
 from .deadlines import dday
-from .notice_text import short_task
+from .notice_text import short_task, tidy_text
 from .engine import LocalClient, LocalEngine, add_model_file, ollama_model_blob
 from .llm import LLMError, OllamaClient
 from . import models as model_catalog
 from . import attach, downloader, winwindow
 from .mail import DEFAULT_TEMPLATES, POLISH_PROMPT, VARIABLES, build_variables, render, tasks_to_ics
-from .parsers import SUPPORTED
+from .parsers import READABLE_EXT
 from .rag import RAGEngine
 from . import report as report_mod
 from .storage import Store
@@ -364,6 +364,34 @@ class Api:
             return True
         return False
 
+    def preview_file(self, path: str, limit: int = 60000) -> dict:
+        """붙임·본문 파일의 글자를 앱 안에서 보여 준다 (한글·PDF 뷰어가 없는 PC에서도 내용 확인).
+        공문 다운로드 폴더·앱 데이터 폴더·규정 저장소 안의 파일만 읽는다."""
+        from .parsers import ParseError, parse_file
+        from .notice_text import tidy_text
+        p = Path(path or "")
+        s = self._cfg.settings
+        roots = [s.resolved_download_root(), self._cfg.home] + [Path(d) for d in s.regulation_dirs]
+        try:
+            rp = p.resolve()
+            allowed = p.is_file() and any(rp.is_relative_to(r.resolve()) for r in roots)
+        except (OSError, ValueError):
+            allowed = False
+        if not allowed:
+            raise ValueError("미리 볼 수 없는 파일입니다 (공문 폴더 안의 파일만 볼 수 있습니다)")
+        try:
+            text = tidy_text(parse_file(p))
+            err = ""
+        except ParseError as e:
+            text, err = "", str(e)
+        except (OSError, ValueError, KeyError) as e:
+            text, err = "", f"파일을 읽을 수 없습니다: {e}"
+        if not text and not err:
+            err = "글자가 없는 파일입니다"
+        return {"name": p.name, "path": str(p), "text": text[:limit], "truncated": len(text) > limit,
+                "chars": len(text), "error": err,
+                "hint": "" if not err else "이 형식은 내용을 미리 볼 수 없습니다. [파일 열기]로 PC의 프로그램에서 열어 보세요."}
+
     # ------------------------------------------------------------ 규정 저장소 (RAG)
     def list_documents(self) -> dict:
         return {"documents": self._store.list_documents(), "dirs": self._cfg.settings.regulation_dirs,
@@ -389,7 +417,7 @@ class Api:
         copied = []
         for p in paths or []:
             src = Path(p)
-            if src.is_file() and src.suffix.lower() in SUPPORTED:
+            if src.is_file() and src.suffix.lower() in READABLE_EXT:
                 dest = target / src.name
                 if src.resolve() != dest.resolve():
                     shutil.copy2(src, dest)
@@ -468,6 +496,13 @@ class Api:
     def _finish_capture(self, job: Job, cap: Captured, use_ai: bool) -> dict:
         """① 규칙 기반 분석으로 바로 저장·표시 → ② 로컬 AI 보완 분석은 백그라운드에서."""
         job.message = "기한·제출물을 찾는 중…"
+        # 어느 공문 시스템에서 왔든 같은 모양으로: 빈 줄·특수 공백·메뉴 글자·끊긴 줄 정리
+        tidy = tidy_text(cap.text)
+        if tidy and tidy != cap.text:
+            cap.text = tidy
+            save_body(cap.folder, cap.title, tidy, "", cap.url)
+        cap.title = clean_title(cap.title)
+        cap.files = expand_archives(cap.files)          # zip 붙임은 풀어서 함께 읽는다
         analysis = analyze(cap.title, cap.text, cap.files, None)
         analysis["ai_status"] = "running" if use_ai else "off"
         folder = cap.folder
@@ -490,9 +525,10 @@ class Api:
         if a.get("mode") == "llm":
             a["ai_status"] = "done"
         else:
+            err = a.get("llm_error") or ""          # 새 분석의 오류 원인 (이전 결과로 덮어쓰기 전에 받아 둔다)
             a = dict(n.get("analysis") or a)
             a["ai_status"] = "error"
-            a["llm_error"] = a.get("llm_error") or "AI 분석 실패"
+            a["llm_error"] = err or "로컬 AI가 응답하지 않았습니다"
         a["ai_seconds"] = round(time.time() - started)
         if not self._store.get_notice(nid):   # 그사이 삭제됨
             return
@@ -552,6 +588,18 @@ class Api:
             return self._finish_capture(job, cap, use_ai)
         return self._run_job("collect", work)
 
+    def collect_text(self, text: str, title: str = "", use_ai: bool = True, html: str = "") -> dict:
+        """복사해 붙여 넣은 공문 본문으로 수집 (어떤 공문 시스템·웹 페이지·메일에서든 동작)."""
+        if len(re.sub(r"\s", "", text or "")) < 10 and not (html or "").strip():
+            raise ValueError("붙여 넣은 본문이 없습니다. 공문 본문을 복사(Ctrl+A, Ctrl+C)한 뒤 붙여 넣어 주세요.")
+        root = self._cfg.settings.resolved_download_root()
+
+        def work(job: Job):
+            job.message = "붙여 넣은 본문을 정리하는 중…"
+            cap = collect_from_text(text or "", root, title.strip(), html or "")
+            return self._finish_capture(job, cap, use_ai)
+        return self._run_job("collect", work)
+
     # ---- 열린 프로그램 창에서 수집 (Windows) ----
     def list_windows(self) -> list[dict]:
         return winwindow.list_windows()
@@ -577,9 +625,7 @@ class Api:
             hwnd_ = win["hwnd"]
             started = time.time()
             text, how = winwindow.extract_text(hwnd_, say, trace)
-            win_title = win["title"]
-            for suffix in (" - 온나라", " - 문서", " - Microsoft Edge", " - Chrome", " - Whale"):
-                win_title = win_title.replace(suffix, "")
+            win_title = clean_title(win["title"])
             # 폴더 이름: 직접 입력 > 본문의 '제목' 줄 > 창 제목
             m = re.search(r"^[ \t]*(?:제\s*목|건\s*명)[ \t]*[:：]?[ \t]*(\S.{2,120})$", text or "", re.M)
             name = title.strip() or (m.group(1).strip() if m else "") or win_title
@@ -654,7 +700,12 @@ class Api:
             # ② 저장/다운로드 버튼
             state = ""
             if missing() or not expected:
-                state = winwindow.try_save_attachments(hwnd_, dest, say, trace)
+                try:
+                    state = winwindow.try_save_attachments(hwnd_, dest, say, trace)
+                except Exception as e:          # 뷰어마다 화면이 달라 실패할 수 있다 → 다음 단계로
+                    logging.getLogger("seomu").warning("붙임 저장 버튼 단계 실패: %s", e)
+                    trace.append(f"저장 버튼 단계 오류: {e}")
+                    state = ""
                 trace.append(f"저장 버튼: {state or '찾지 못함'}")
                 end = time.time() + (6 if state else 0)
                 while time.time() < end and missing():
@@ -662,7 +713,13 @@ class Api:
                     time.sleep(0.5)
             # ③ 화면에 보이는 붙임 이름을 찾아 열기
             if missing() and winwindow.available():
-                for r in winwindow.open_named_on_screen(hwnd_, missing(), say, trace):
+                try:
+                    opened = winwindow.open_named_on_screen(hwnd_, missing(), say, trace)
+                except Exception as e:
+                    logging.getLogger("seomu").warning("화면의 붙임 이름 찾기 실패: %s", e)
+                    trace.append(f"화면 붙임 찾기 오류: {e}")
+                    opened = []
+                for r in opened:
                     if r["path"]:
                         take(r["path"], r["expected"])
                     absorb()

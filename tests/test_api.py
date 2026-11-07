@@ -190,12 +190,17 @@ def test_capture_window_simulated(api, tmp_path, monkeypatch):
     monkeypatch.setattr(winwindow, "uia_available", lambda: False)
     monkeypatch.setattr(winwindow, "list_windows", lambda: [win])
     monkeypatch.setattr(winwindow, "extract_text", lambda h, log=None, trace=None: (body, "본문복사 버튼"))
-    monkeypatch.setattr(winwindow, "save_window_image", lambda h, p: False)
+    monkeypatch.setattr(winwindow, "save_window_image", lambda h, p, **k: False)
     monkeypatch.setattr(winwindow, "get_clipboard", lambda: "")
     monkeypatch.setattr(winwindow, "watch_dirs", lambda extra=None: [dl])
+    from seomu import attach
+    monkeypatch.setattr(attach, "candidate_files", lambda *a, **k: [])   # 실제 PC 파일은 훑지 않는다
+    monkeypatch.setattr(attach, "recent_documents", lambda *a, **k: [])
+    monkeypatch.setattr(winwindow, "open_named_on_screen", lambda *a, **k: [])
+    monkeypatch.setattr(winwindow, "try_save_attachments", lambda *a, **k: "")
 
     job = api.capture_window(101, "", False, 30)
-    for _ in range(40):                       # 감시 단계에 들어갈 때까지 대기
+    for _ in range(600):                      # 감시 단계에 들어갈 때까지 대기 (PC 파일 탐색은 최대 수 초)
         st = api.job_status(job["job_id"])
         if st["text"] and '"watch"' in st["text"]:
             break

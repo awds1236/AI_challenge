@@ -124,6 +124,7 @@
           <button data-v="browser"><i data-icon="globe"></i>브라우저 연동</button>
           <button data-v="url"><i data-icon="link"></i>주소로 수집</button>
           <button data-v="file"><i data-icon="doc"></i>파일 가져오기</button>
+          <button data-v="paste"><i data-icon="copy"></i>본문 붙여넣기</button>
         </div>
 
         <div class="mode-pane on" data-mode="window">
@@ -173,11 +174,21 @@
           <div class="dropzone" id="drop-notice">
             <i data-icon="doc"></i>
             <div><b>공문 본문과 붙임 파일을 여기로 끌어다 놓으세요</b></div>
-            <div class="muted small">첫 번째 파일을 본문으로 사용합니다 · HWP, HWPX, PDF, DOCX, HTML, TXT</div>
+            <div class="muted small">첫 번째 파일을 본문으로 사용합니다 · HWP·HWPX·PDF·DOCX·ODT·HTML·MHT(웹 저장)·EML(메일)·TXT·사진/스캔(글자 읽기) · ZIP 붙임은 자동으로 풉니다</div>
             <button class="btn sm" id="pick-notice-files">파일 선택</button>
           </div>
           <ul class="file-list" id="notice-files"></ul>
           <div class="row end"><button class="btn primary" id="file-collect" disabled><i data-icon="download"></i>정리 및 분석</button></div>
+        </div>
+
+        <div class="mode-pane" data-mode="paste">
+          <p class="muted">어떤 공문 시스템이든 됩니다. 공문 화면에서 본문을 <b>전체 선택(Ctrl+A) → 복사(Ctrl+C)</b>한 뒤 아래 칸에 <b>붙여넣기(Ctrl+V)</b> 하세요. 웹 페이지에서 복사하면 표와 붙임 링크도 함께 읽습니다.</p>
+          <textarea class="input paste-box" id="paste-text" rows="9" placeholder="여기에 공문 본문을 붙여 넣으세요"></textarea>
+          <div class="row end">
+            <span class="muted small grow" id="paste-info"></span>
+            <button class="btn ghost" id="paste-clear">지우기</button>
+            <button class="btn primary" id="paste-collect" disabled><i data-icon="download"></i>정리 및 분석</button>
+          </div>
         </div>
 
         <div class="row options">
@@ -466,6 +477,23 @@
       <button class="btn" id="nd-folder"><i data-icon="folder"></i>폴더 열기</button>
       <button class="btn" id="nd-report"><i data-icon="doc"></i>보고서 작성</button>
       <button class="btn primary" id="nd-mail"><i data-icon="mail"></i>메일 작성</button>
+    </div>
+  </div>
+</div>
+
+<!-- 파일 미리보기 (한글·PDF 뷰어가 없어도 내용 확인) -->
+<div class="sheet-backdrop hidden" id="pv-sheet">
+  <div class="sheet">
+    <div class="sheet-head">
+      <div><div class="eyebrow" id="pv-meta">미리보기</div><h2 id="pv-title"></h2></div>
+      <button class="btn ghost round" id="pv-close"><i data-icon="close"></i></button>
+    </div>
+    <div class="sheet-body"><pre class="preview-text" id="pv-body"></pre></div>
+    <div class="sheet-foot">
+      <span class="muted small" id="pv-hint"></span>
+      <div class="spacer"></div>
+      <button class="btn" id="pv-copy"><i data-icon="copy"></i>글자 복사</button>
+      <button class="btn primary" id="pv-open"><i data-icon="doc"></i>파일 열기</button>
     </div>
   </div>
 </div>

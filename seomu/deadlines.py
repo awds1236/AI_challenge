@@ -162,6 +162,9 @@ def find_submissions(text: str) -> list[str]:
 
 def _split_attach(s: str) -> list[str]:
     parts = re.split(r"\s+(?=\d+\s*[.)]\s)", s)
+    # 메일·게시판의 '첨부: 가.hwp, 나.pdf'처럼 쉼표로 이어진 파일 이름은 하나씩
+    if len(parts) == 1 and re.search(r"\.\w{2,5}\s*,", s):
+        parts = [p for p in re.split(r"\s*,\s*", s) if p.strip()]
     out = []
     for p in parts:
         p = re.sub(r"^\d+\s*[.)]\s*", "", p).strip()

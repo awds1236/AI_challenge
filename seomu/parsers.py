@@ -1,4 +1,4 @@
-"""문서 텍스트 추출기 (HWP/HWPX/PDF/DOCX/XLSX/HTML/TXT).
+"""문서 텍스트 추출기 (HWP/HWPX/PDF/DOCX/XLSX/ODT/PPTX/RTF/HTML/MHT/EML/TXT, 이미지·스캔 PDF는 Windows OCR).
 
 외부 서비스 없이 PC 안에서만 동작한다. 선택 의존성(pypdf, olefile, openpyxl)이
 없으면 해당 형식만 건너뛴다.
@@ -14,7 +14,11 @@ from html.parser import HTMLParser
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-SUPPORTED = {".txt", ".md", ".csv", ".hwp", ".hwpx", ".pdf", ".docx", ".xlsx", ".html", ".htm"}
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff"}
+SUPPORTED = {".txt", ".md", ".csv", ".hwp", ".hwpx", ".pdf", ".docx", ".xlsx", ".html", ".htm", ".xhtml",
+             ".mht", ".mhtml", ".eml", ".odt", ".pptx", ".rtf", ".xml"} | IMAGE_EXT
+# 규정 색인·붙임 미리 읽기용 (이미지 OCR은 느리므로 공문 본문으로 직접 가져올 때만 쓴다)
+READABLE_EXT = SUPPORTED - IMAGE_EXT - {".xml"}
 
 
 class ParseError(RuntimeError):
@@ -41,6 +45,7 @@ class _HTMLText(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self._skip = 0
+        self._after_link = False    # 링크 바로 뒤 (메뉴처럼 <a>가 붙어 있으면 글자가 붙어 버린다)
 
     def handle_starttag(self, tag, attrs):
         if tag in self.SKIP:
@@ -49,16 +54,22 @@ class _HTMLText(HTMLParser):
             self.parts.append("\n")
         elif tag in ("td", "th"):
             self.parts.append("\t")
+        elif tag in ("a", "button") and self._after_link:
+            self.parts.append(" ")
+        self._after_link = False
 
     def handle_endtag(self, tag):
         if tag in self.SKIP and self._skip:
             self._skip -= 1
         elif tag in self.BLOCK:
             self.parts.append("\n")
+        self._after_link = tag in ("a", "button")
 
     def handle_data(self, data):
         if not self._skip:
             self.parts.append(data)
+            if data.strip():
+                self._after_link = False
 
 
 def html_to_text(markup: str) -> str:
@@ -69,6 +80,276 @@ def html_to_text(markup: str) -> str:
     except Exception:  # 깨진 HTML도 최대한 처리
         pass
     return normalize("".join(p.parts))
+
+
+# 홈페이지·업무포털 화면에서 본문이 아닌 영역 / 본문일 가능성이 높은 영역의 id·class
+_NOISE_ATTR = re.compile(r"(^|[\s_-])(gnb|lnb|snb|nav|navi|menu|header|footer|foot|banner|quick|side|aside|util|"
+                         r"sitemap|copyright|breadcrumb|location|skip|share|sns|search|login|popup|tab_?menu|paging|"
+                         r"pagination|prev_?next|related|satisfaction|survey|top_?btn|family_?site)([\s_-]|$)", re.I)
+_MAIN_ATTR = re.compile(r"(content|contents|cont|view|board|bbs|article|detail|read|post|doc|docbody|txt|body_?area|"
+                        r"substance|main)", re.I)
+
+
+def main_text(markup: str) -> str:
+    """웹 페이지에서 메뉴·머리말·꼬리말을 빼고 본문 영역 글자만 (lxml이 없으면 전체 글자)."""
+    full = html_to_text(markup)
+    # 공문 서식 그대로인 문서(수신·제목 … 끝. … 시행·연락처)는 꼬리말 연락처까지 써야 하므로
+    # 메뉴가 있는 페이지라도 공문이 시작하는 줄부터 끝까지 쓴다
+    if re.search(r"끝\s*\.", full):
+        lines = full.splitlines()
+        start = next((i for i, l in enumerate(lines) if re.match(r"^\s*(수\s*신|제\s*목)(\s|[:：]|$)", l)), -1)
+        if start >= 0:
+            org = max(0, start - 3)                      # 슬로건·기관명 줄
+            return normalize("\n".join(lines[org:]))
+    try:
+        import lxml.html  # type: ignore
+        doc = lxml.html.fromstring(markup)
+    except Exception:
+        return full
+    try:
+        for el in doc.xpath("//script|//style|//noscript|//template|//nav|//aside"):
+            el.drop_tree()
+        for el in list(doc.iter()):
+            if not isinstance(el.tag, str) or el.getparent() is None:
+                continue
+            attr = f"{el.get('id', '')} {el.get('class', '')}"
+            tag = el.tag.lower()
+            in_article = any(a.tag in ("article", "main") for a in el.iterancestors() if isinstance(a.tag, str))
+            if (_NOISE_ATTR.search(attr) and not _MAIN_ATTR.search(attr)) or (tag in ("header", "footer") and not in_article):
+                el.drop_tree()
+        cands = [el for el in doc.iter() if isinstance(el.tag, str)
+                 and (el.tag.lower() in ("article", "main") or _MAIN_ATTR.search(f"{el.get('id', '')} {el.get('class', '')}"))]
+        best, best_len = None, 0
+        for el in cands:
+            n = len(re.sub(r"\s+", "", el.text_content() or ""))
+            if n > best_len:
+                best, best_len = el, n
+        root = best if best is not None and best_len >= 80 else doc
+        text = html_to_text(lxml.html.tostring(root, encoding="unicode"))
+    except Exception:
+        return full
+    if len(text) < 40:
+        return full
+    m = re.search(r"^[ \t]*(?:제[ \t]*목|건[ \t]*명)[ \t]*[:：]?[ \t]*\S.*$", full, re.M)
+    if m and not re.search(r"^[ \t]*(?:제[ \t]*목|건[ \t]*명)", text, re.M):
+        text = m.group(0).strip() + "\n" + text          # 머리 표의 '제목' 줄은 살린다
+    return text
+
+
+def _decode_part(part) -> str:
+    payload = part.get_payload(decode=True) or b""
+    cs = part.get_content_charset() or ""
+    for enc in [cs] + ["utf-8", "cp949", "euc-kr"]:
+        if not enc:
+            continue
+        try:
+            return payload.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return payload.decode("utf-8", "ignore")
+
+
+def parse_mht(path: Path) -> str:
+    """웹 페이지 '단일 파일'(.mht/.mhtml) — 업무포털·IE 기반 전자문서 시스템에서 자주 저장되는 형식."""
+    import email
+    from email import policy
+    msg = email.message_from_bytes(path.read_bytes(), policy=policy.compat32)
+    htmls, texts = [], []
+    for part in msg.walk():
+        ct = part.get_content_type()
+        if ct == "text/html":
+            htmls.append(_decode_part(part))
+        elif ct == "text/plain":
+            texts.append(_decode_part(part))
+    if htmls:
+        return main_text(max(htmls, key=len))
+    if texts:
+        return normalize("\n\n".join(texts))
+    raw = read_text_file(path)          # MIME 머리가 없는 경우
+    return main_text(raw) if "<" in raw else normalize(raw)
+
+
+def read_eml(path: Path) -> dict:
+    """메일(.eml): 제목·보낸이·날짜·본문과 첨부 파일 목록 [(이름, 바이트)]."""
+    import email
+    from email import policy
+    from email.header import decode_header, make_header
+    msg = email.message_from_bytes(path.read_bytes(), policy=policy.compat32)
+
+    def hdr(k: str) -> str:
+        v = msg.get(k, "")
+        try:
+            return str(make_header(decode_header(v))) if v else ""
+        except Exception:
+            return str(v)
+
+    plain, html_body, files = [], [], []
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        disp = (part.get("Content-Disposition") or "").lower()
+        name = part.get_filename()
+        if name:
+            try:
+                name = str(make_header(decode_header(name)))
+            except Exception:
+                pass
+        if name or "attachment" in disp:
+            files.append((name or "첨부파일", part.get_payload(decode=True) or b""))
+        elif part.get_content_type() == "text/plain":
+            plain.append(_decode_part(part))
+        elif part.get_content_type() == "text/html":
+            html_body.append(_decode_part(part))
+    body = normalize("\n\n".join(plain)) if plain else (main_text("\n".join(html_body)) if html_body else "")
+    return {"subject": hdr("Subject"), "from": hdr("From"), "date": hdr("Date"), "body": body, "files": files}
+
+
+def parse_eml(path: Path) -> str:
+    m = read_eml(path)
+    head = [f"제목: {m['subject']}"] if m["subject"] else []
+    head += [f"보낸 사람: {m['from']}"] if m["from"] else []
+    head += [f"보낸 날짜: {m['date']}"] if m["date"] else []
+    names = [n for n, _ in m["files"]]
+    tail = ["", "첨부: " + ", ".join(names)] if names else []
+    return normalize("\n".join(head + ["", m["body"]] + tail))
+
+
+def parse_odt(path: Path) -> str:
+    try:
+        with zipfile.ZipFile(path) as z:
+            root = ET.fromstring(z.read("content.xml"))
+    except (zipfile.BadZipFile, KeyError) as e:
+        raise ParseError(f"ODT 파일을 읽을 수 없습니다: {e}") from e
+    out: list[str] = []
+
+    def walk(el):
+        name = _local(el.tag)
+        if name == "tab":
+            out.append("\t")
+        elif name == "line-break":
+            out.append("\n")
+        elif name == "s":
+            out.append(" ")
+        if el.text and name not in ("tab", "line-break", "s"):
+            out.append(el.text)
+        for ch in el:
+            walk(ch)
+            if ch.tail:
+                out.append(ch.tail)
+        if name in ("p", "h"):
+            out.append("\n")
+        elif name == "table-cell":
+            out.append("\t")
+    walk(root)
+    return normalize("".join(out))
+
+
+def parse_pptx(path: Path) -> str:
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = sorted((n for n in z.namelist() if re.match(r"ppt/slides/slide\d+\.xml$", n)),
+                           key=lambda n: int(re.findall(r"\d+", n)[-1]))
+            out: list[str] = []
+            for i, n in enumerate(names, 1):
+                out.append(f"\n[슬라이드 {i}]\n")
+                _walk_xml(ET.fromstring(z.read(n)), out, "t", "p")
+    except zipfile.BadZipFile as e:
+        raise ParseError(f"PPTX 파일을 읽을 수 없습니다: {e}") from e
+    return normalize("".join(out))
+
+
+def parse_rtf(path: Path) -> str:
+    """RTF의 글자만 (서식·그림 제외). \\'XX(코드페이지)와 \\uN(유니코드) 문자를 복원한다."""
+    raw = path.read_bytes().decode("latin-1")
+    m = re.search(r"\\ansicpg(\d+)", raw)
+    cp = f"cp{m.group(1)}" if m else "cp949"
+    raw = re.sub(r"\{\\\*[^{}]*\}|\{\\(?:fonttbl|colortbl|stylesheet|info|pict)[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", "", raw)
+    out, buf = [], bytearray()
+
+    def flush():
+        if buf:
+            try:
+                out.append(bytes(buf).decode(cp))
+            except (UnicodeDecodeError, LookupError):
+                out.append(bytes(buf).decode("cp949", "ignore"))
+            buf.clear()
+    i, skip_next = 0, 0
+    while i < len(raw):
+        c = raw[i]
+        if c == "\\":
+            if raw.startswith("\\'", i):
+                buf.append(int(raw[i + 2:i + 4], 16))
+                i += 4
+                continue
+            flush()
+            mm = re.match(r"\\([a-z]+)(-?\d+)? ?|\\(.)", raw[i:])
+            if not mm:
+                i += 1
+                continue
+            word, num, sym = mm.group(1), mm.group(2), mm.group(3)
+            if word in ("par", "line", "row"):
+                out.append("\n")
+            elif word in ("tab", "cell"):
+                out.append("\t")
+            elif word == "u" and num:
+                out.append(chr(int(num) % 65536))
+                skip_next = 1
+            elif sym in ("\\", "{", "}"):
+                out.append(sym)
+            i += mm.end()
+            continue
+        if c in "{}\r\n":
+            flush()
+            i += 1
+            continue
+        if skip_next:                      # \uN 뒤의 대체 문자 한 개는 건너뛴다
+            skip_next = 0
+            i += 1
+            continue
+        if ord(c) < 256:
+            buf.append(ord(c))
+        else:
+            flush()
+            out.append(c)
+        i += 1
+    flush()
+    return normalize("".join(out))
+
+
+def parse_image(path: Path) -> str:
+    """사진·스캔 이미지 공문: Windows 내장 OCR로 글자를 읽는다 (인터넷 불필요)."""
+    from . import winwindow
+    if not winwindow.IS_WIN:
+        raise ParseError("이미지 글자 읽기(OCR)는 Windows에서만 사용할 수 있습니다")
+    text = winwindow.ocr_body(0, image=Path(path))
+    if not text.strip():
+        raise ParseError("이미지에서 글자를 읽지 못했습니다 (Windows 한국어 OCR 기능이 필요합니다)")
+    return normalize(text)
+
+
+def _ocr_pdf_images(reader, max_pages: int = 8) -> str:
+    """스캔 PDF: 페이지에 들어 있는 그림을 꺼내 OCR한다."""
+    import tempfile
+    from . import winwindow
+    if not winwindow.IS_WIN:
+        return ""
+    texts = []
+    with tempfile.TemporaryDirectory() as td:
+        for pi, page in enumerate(reader.pages[:max_pages]):
+            try:
+                imgs = list(page.images)
+            except Exception:
+                continue
+            for ii, img in enumerate(imgs[:2]):
+                p = Path(td) / f"p{pi}_{ii}{Path(img.name).suffix or '.png'}"
+                try:
+                    p.write_bytes(img.data)
+                except Exception:
+                    continue
+                t = winwindow.ocr_body(0, image=p)
+                if t.strip():
+                    texts.append(t)
+    return "\n\n".join(texts)
 
 
 def normalize(text: str) -> str:
@@ -221,7 +502,10 @@ def parse_pdf(path: Path) -> str:
     except Exception as e:  # pypdf 내부 예외 다양
         raise ParseError(f"PDF를 읽을 수 없습니다: {e}") from e
     text = "\n\n".join(pages)
-    if not text.strip():
+    if len(re.sub(r"\s", "", text)) < 20:
+        ocr = _ocr_pdf_images(reader)            # 스캔 PDF → 그림 글자 읽기
+        if ocr.strip():
+            return normalize(ocr)
         raise ParseError("PDF에 텍스트가 없습니다(스캔 이미지일 수 있음)")
     return normalize(text)
 
@@ -249,8 +533,23 @@ def parse_file(path: str | Path) -> str:
     ext = path.suffix.lower()
     if ext in (".txt", ".md", ".csv"):
         return normalize(read_text_file(path))
-    if ext in (".html", ".htm"):
-        return html_to_text(read_text_file(path))
+    if ext in (".html", ".htm", ".xhtml"):
+        return main_text(read_text_file(path))
+    if ext in (".mht", ".mhtml"):
+        return parse_mht(path)
+    if ext == ".eml":
+        return parse_eml(path)
+    if ext == ".odt":
+        return parse_odt(path)
+    if ext == ".pptx":
+        return parse_pptx(path)
+    if ext == ".rtf":
+        return parse_rtf(path)
+    if ext == ".xml":
+        raw = read_text_file(path)
+        return main_text(raw) if re.search(r"<(html|body|p|div)\b", raw, re.I) else normalize(re.sub(r"<[^>]+>", "\n", raw))
+    if ext in IMAGE_EXT:
+        return parse_image(path)
     if ext == ".hwpx":
         return parse_hwpx(path)
     if ext == ".hwp":

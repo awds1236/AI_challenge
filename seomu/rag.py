@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from .llm import LLMError, OllamaClient, pack_vec, unpack_vec
-from .parsers import SUPPORTED, ParseError, guess_category, parse_file
+from .parsers import READABLE_EXT, ParseError, guess_category, parse_file
 from .storage import Store
 
 # ---------------------------------------------------------------- 토큰화
@@ -236,10 +236,10 @@ class RAGEngine:
         files: list[Path] = []
         for d in self.settings().regulation_dirs:
             p = Path(d).expanduser()
-            if p.is_file() and p.suffix.lower() in SUPPORTED:
+            if p.is_file() and p.suffix.lower() in READABLE_EXT:
                 files.append(p)
             elif p.is_dir():
-                files.extend(f for f in p.rglob("*") if f.is_file() and f.suffix.lower() in SUPPORTED
+                files.extend(f for f in p.rglob("*") if f.is_file() and f.suffix.lower() in READABLE_EXT
                              and not f.name.startswith(("~$", ".")))
         return sorted(set(files))
 

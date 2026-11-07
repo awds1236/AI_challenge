@@ -47,6 +47,9 @@ html, body { height: 100%; margin: 0; }
 body {
   font-family: var(--font); font-size: 14px; line-height: 1.5; color: var(--text); background: var(--bg);
   -webkit-font-smoothing: antialiased; letter-spacing: -0.01em; overflow: hidden;
+  /* 한국어는 어절(띄어쓰기) 단위로 줄을 바꾼다: '제출하여 주시기' → '제출하/여'처럼 단어 중간에서 끊기지 않게.
+     긴 메일 주소·주소(URL)·파일 이름은 칸을 넘지 않도록 어디서든 끊을 수 있게 한다. */
+  word-break: keep-all; overflow-wrap: anywhere; line-break: strict;
 }
 button, input, select, textarea { font: inherit; color: inherit; letter-spacing: inherit; }
 svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
@@ -177,7 +180,16 @@ select.input { appearance: none; padding-right: 30px; background-image: url("dat
 .segmented button { border: 0; background: transparent; padding: 5px 14px; border-radius: 7px; cursor: pointer; font-size: 13px; font-weight: 500; display: inline-flex; gap: 6px; align-items: center; color: var(--text); transition: background .15s; }
 .segmented button.on { background: var(--surface); box-shadow: 0 1px 3px rgba(0,0,0,.12), 0 0 0 .5px rgba(0,0,0,.04); }
 .segmented.wide { display: flex; margin-bottom: 16px; }
-.segmented.wide button { flex: 1; justify-content: center; padding: 7px; }
+.segmented.wide button { flex: 1; justify-content: center; padding: 7px; min-width: 0; white-space: nowrap; }
+@media (max-width: 1180px) { .segmented.wide button i[data-icon] { display: none; } .segmented.wide button { font-size: 12.5px; padding: 7px 4px; } }
+.paste-box { width: 100%; min-height: 180px; font-size: 13.5px; margin: 4px 0 10px; }
+.preview-text { white-space: pre-wrap; font-family: var(--font); font-size: 13.5px; line-height: 1.75; margin: 0; word-break: keep-all; overflow-wrap: anywhere; }
+.preview-text.err { color: var(--text-2); }
+.summary-box { white-space: pre-line; }
+.summary-box .sub { display: block; margin-top: 4px; color: var(--text-2); font-size: 13px; }
+.attach .main-col { flex: 1; min-width: 0; }
+.attach .acts { display: flex; gap: 6px; flex: none; margin-left: auto; }
+.check-list li > div { min-width: 0; }
 
 .switch { appearance: none; width: 42px; height: 25px; border-radius: 13px; background: rgba(120,120,128,.3); position: relative; cursor: pointer; transition: background .2s; flex: none; margin: 0; }
 .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 21px; height: 21px; border-radius: 50%; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,.2); transition: transform .2s; }

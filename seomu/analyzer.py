@@ -7,8 +7,8 @@ from pathlib import Path
 
 from .deadlines import best_deadlines, find_contacts, find_methods, find_submissions
 from .llm import LLMError, OllamaClient, extract_json
-from .notice_text import clean_body, clean_what, extract_fields, rule_summary, _get
-from .parsers import SUPPORTED, ParseError, parse_file
+from .notice_text import clean_body, clean_what, extract_fields, item_names, rule_summary, _get
+from .parsers import READABLE_EXT, ParseError, parse_file
 
 SCHEMA = {
     "type": "object",
@@ -79,7 +79,7 @@ def read_attachments(files: list[dict], max_files: int = 2, max_chars: int = 700
         if not f.get("ok") or not f.get("path"):
             continue
         p = Path(f["path"])
-        if p.suffix.lower() not in SUPPORTED:
+        if p.suffix.lower() not in READABLE_EXT:
             continue
         try:
             t = parse_file(p)
@@ -116,6 +116,29 @@ def _norm_date(s: str) -> str | None:
         return None
 
 
+# 붙임 중 '작성해서 내야 하는 서류'로 볼 만한 이름 / 참고용 자료로 볼 이름
+_FORM_WORDS = re.compile(r"(서식|양식|신청서|조사표|계획서|명단|확인서|동의서|보고서|제출서|현황표|점검표|체크리스트|"
+                         r"작성표|명세서|목록|카드|이력서|추천서|제안서|응답지|설문지|대장|실적)")
+_REFERENCE_WORDS = re.compile(r"(안내문|안내서|안내|계획(?:\(안\))?$|공고문?|내규|지침|매뉴얼|가이드|리플릿|포스터|홍보물|"
+                              r"요령|규정|법령|사례집|참고|목록\s*$|일정표|프로그램)")
+
+
+def _core(s: str) -> str:
+    s = re.sub(r"^\[붙임\]\s*", "", s)
+    s = re.sub(r"(서식|양식|\(.*?\)|\d+\s*부|붙\s*임|첨\s*부|각|\s|\.\w{2,5}$)", "", s)
+    return s
+
+
+def _merge_deadlines(deadlines: list[dict]) -> list[dict]:
+    """같은 날짜의 기한은 하나로 (시각이 있고 할 일 문장이 짧은 쪽을 남긴다)."""
+    best: dict[str, dict] = {}
+    for d in deadlines:
+        cur = best.get(d["date"])
+        if cur is None or (bool(d["time"]), -len(d["what"])) > (bool(cur["time"]), -len(cur["what"])):
+            best[d["date"]] = d
+    return sorted(best.values(), key=lambda d: (d["date"], d["time"]))
+
+
 def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | None = None) -> dict:
     clean = clean_body(body, title)
     fields = extract_fields(clean)
@@ -123,32 +146,49 @@ def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | N
     for d in best_deadlines(clean, ref):
         deadlines.append({"date": d["date"], "time": d["time"] or "",
                           "what": clean_what(d["context"], d["raw"], fields, title), "source": "규칙"})
+    deadlines = _merge_deadlines(deadlines)
     _ml, method = _get(fields, "회신방법", "제출방법", "신청방법", "접수방법")
     _tl, to = _get(fields, "제출처", "회신처", "접수처", "신청처")
-    subs, seen = [], set()
+    subs: list[dict] = []
     _il, item = _get(fields, "회신자료", "제출서류", "제출자료", "신청서류", "제출물")
-    if item:
-        subs.append({"item": item, "how": method, "to": to})
-        seen.add(re.sub(r"\s", "", item))
+    # '참가 신청서(붙임 1 서식) 1부, 명단 1부' → 서류마다 한 줄. 붙임 서식 표시는 이름 옆에 남긴다
+    word = re.search(r"(붙\s*임|첨\s*부|별\s*첨)", item or "")
+    word = re.sub(r"\s", "", word.group(1)) if word else "붙임"
+    for i, name in enumerate(item_names(item)):
+        piece = next((p for p in re.split(r"\s*[,，]\s*", item) if name in p), "")
+        mark = f" ({word} 서식)" if re.search(r"(붙\s*임|첨\s*부|별\s*첨|서식|양식)", piece) else ""
+        subs.append({"item": name + mark, "how": method if i == 0 else "", "to": to if i == 0 else ""})
+    cores = {_core(s["item"]) for s in subs}
     for s in find_submissions(clean):
-        key = re.sub(r"\s", "", s)
-        if key in seen or any(key.endswith(k) or k.endswith(key) for k in seen) or re.search(r"[:：]", s):
+        core = _core(s)
+        if not core or re.search(r"[:：]", s):
             continue
-        # '회신자료 : 붙임 조사표 1부'와 '[붙임] ○○ 조사표'는 같은 서류 → 붙임 정식 이름으로 합친다
-        core = re.sub(r"(붙\s*임|첨\s*부|\s|\d+\s*부|각)", "", subs[0]["item"]) if subs else ""
-        if core and s.startswith("[붙임]") and core in key:
-            subs[0]["item"] = s.replace("[붙임] ", "") + " (붙임 서식)"
+        hit = next((x for x in subs if _core(x["item"]) and (_core(x["item"]) in core or core in _core(x["item"]))), None)
+        if hit or any(core in c or c in core for c in cores if c):
+            # '회신자료 : 붙임 조사표'와 '[붙임] ○○ 현황 조사표'는 같은 서류 → 붙임의 정식 이름으로
+            if hit and s.startswith("[붙임]") and len(core) > len(_core(hit["item"])) and "," not in s:
+                full = re.sub(r"\.(hwpx?|pdf|docx?|xlsx?|txt|zip|pptx?|odt|cell|show)$", "", s.replace("[붙임] ", ""), flags=re.I)
+                full = re.sub(r"\s*(서식|양식)$", "", full)
+                hit["item"] = full + (" (" + hit["item"].split("(", 1)[1] if "(" in hit["item"] else "")
             continue
-        seen.add(key)
+        if s.startswith("[붙임]"):
+            name = s.replace("[붙임] ", "")
+            # 참고용 붙임(안내문·계획·지침)은 제출물이 아니다. 서식·신청서·조사표만 남긴다
+            if not _FORM_WORDS.search(name) or (_REFERENCE_WORDS.search(name) and not re.search(r"(서식|양식)", name)):
+                continue
+            s = re.sub(r"\s*(서식|양식)$", "", name) + " (붙임 서식)"
+        elif len(s) > 40:                       # 긴 문장은 제출물 이름이 아니다
+            continue
+        cores.add(core)
         subs.append({"item": s, "how": method if not subs else "", "to": ""})
     actions = [f"{d['what']} ({int(d['date'][5:7])}/{int(d['date'][8:10])}까지)" for d in deadlines][:5]
     if method:
-        actions.append(f"제출 방법: {method}")
+        actions.append(method if re.search(r"(제출|회신|신청|접수|등록)\s*$", method) else f"제출 방법: {method}")
     contacts = [c for c in find_contacts(clean) if not re.search(r"(회신|제출|신청)\s*방\s*법", c)]
     _ql, ask = _get(fields, "문의처", "문의", "담당자", "연락처")
     return {
         "folder_name": title,
-        "summary": rule_summary(title, clean, fields),
+        "summary": rule_summary(title, clean, fields, deadlines),
         "event": {k: v for k, v in (("name", _get(fields, "행사명", "교육명", "회의명")[1]),
                                     ("date", _get(fields, "일시")[1]), ("place", _get(fields, "장소")[1])) if v},
         "deadlines": deadlines,

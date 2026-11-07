@@ -11,3 +11,4 @@ dist/
 engine/
 models/
 wheels/
+.claude/

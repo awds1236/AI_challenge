@@ -6,6 +6,104 @@
 from __future__ import annotations
 
 import re
+import unicodedata
+
+# ---------------------------------------------------------------- 본문 다듬기 (모든 수집 경로 공통)
+# 공문 시스템마다(온나라·문서24·K-에듀파인·업무포털·홈페이지 게시판·메일·PDF) 글자 모양이 달라
+# 화면에 그대로 보여 주면 빈 줄이 줄마다 끼거나, 단어 중간에서 줄이 바뀌거나, 메뉴 글자가 섞인다.
+_ZERO_WIDTH = re.compile(r"[​-‏‪-‮⁠-⁤﻿­]")
+_ODD_SPACE = re.compile(r"[  -   　]")
+_LABEL_SPACED = re.compile(r"^(?P<a>수|제|발|경|참|붙|시|접|첨|건|문|담)[ \t]+(?P<b>신|목|신|유|조|임|행|수|부|명|의|당)"
+                           r"(?P<c>[ \t]+자)?(?=[ \t]*[:：]|[ \t]{2,}|\t|[ \t]*$)")
+_LABEL_WORDS = {"수신", "제목", "발신", "경유", "참조", "붙임", "시행", "접수", "첨부", "건명", "문의", "담당"}
+_WEB_NOISE = re.compile(
+    r"^(?:본문\s*바로\s*가기|주\s*메뉴\s*바로\s*가기|메뉴\s*바로\s*가기|바로\s*가기|로그인|로그아웃|회원\s*가입|사이트\s*맵|"
+    r"전체\s*메뉴|메뉴\s*(?:열기|닫기)?|홈|HOME|목록|목록\s*보기|목록으로|이전\s*글|다음\s*글|인쇄|프린트|출력|공유|"
+    r"공유하기|스크랩|TOP|맨\s*위로|위로|검색|통합\s*검색|닫기|글자\s*크기|확대|축소|미리\s*보기|바로\s*보기|"
+    r"내려\s*받기|다운\s*로드|첨부\s*파일\s*없음|개인정보\s*처리\s*방침|이용\s*약관|저작권\s*정책|"
+    r"이메일\s*무단\s*수집\s*거부|뷰어\s*다운로드|(?:copyright|ⓒ|©).*|(?:조회\s*수?|추천\s*수?)\s*[:：]?\s*[\d,]*)$",
+    re.I)
+_BREADCRUMB = re.compile(r"^(?:홈|HOME|Home|처음)\s*[>›»∙·/]\s*\S")
+_ENUM_START = re.compile(r"^\s*(?:\d{1,2}\s*[.)]|[가-하]\s*[.)]|\(\s*[\w가-힣]{1,2}\s*\)|[①-⑳]|[-·○◦•※□■▶◆◇▷►*]|"
+                         r"붙\s*임|첨\s*부|끝\s*\.|제\s*\d+\s*조)")
+# 한글 줄바꿈이 '글자 단위'라 단어 중간에서 끊긴 줄을 이을 때, 다음 줄이 이 조각으로 시작하면 붙여 쓴다
+_JOIN_TIGHT = re.compile(r"^(?:은|는|이|가|을|를|의|에|에서|에게|께|로|으로|와|과|도|만|까지|부터|및|하여|하고|하며|하오니|"
+                         r"하니|합니다|니다|습니다|ㅂ니다|시기|바랍니다|랍니다|한다|된다|되어|되며|드립니다|"
+                         r"[가-힣]{1,2}(?=[.,)」』]))")
+
+
+def _fix_label_spacing(line: str) -> str:
+    """'제   목    ○○' → '제목  ○○' (양식 칸 맞춤용 글자 사이 공백 제거)."""
+    m = _LABEL_SPACED.match(line)
+    if m and (m.group("a") + m.group("b")) in _LABEL_WORDS:
+        return m.group("a") + m.group("b") + ("자" if m.group("c") else "") + line[m.end():]
+    return line
+
+
+def _is_hard_wrapped(lines: list[str]) -> int:
+    """PDF·스캔 글자처럼 줄 길이가 일정하게 끊긴 본문이면 그 폭(글자 수)을, 아니면 0."""
+    lens = sorted(len(l) for l in lines if len(l) >= 15)
+    if len(lens) < 6:
+        return 0
+    width = lens[int(len(lens) * 0.9) - 1]
+    full = sum(1 for n in lens if n >= width * 0.85)
+    return width if full >= max(4, len(lens) * 0.45) else 0
+
+
+def tidy_text(text: str) -> str:
+    """수집한 본문을 화면·분석에 알맞게 다듬는다.
+
+    - 유니코드 정규화(NFC): 맥·일부 웹에서 온 '자모 분리' 한글을 붙인다
+    - 폭 없는 공백·줄 바꿈 없는 공백·전각 공백을 일반 공백으로
+    - 모든 줄 사이에 빈 줄이 끼는 HTML 복사 본문의 빈 줄을 정리
+    - '제   목' 같은 양식용 글자 간격을 붙인다
+    - 홈페이지 메뉴·바로가기·저작권 줄 등 웹 화면 글자를 뺀다
+    - PDF처럼 일정한 폭에서 끊긴 줄을 문장으로 다시 잇는다
+    """
+    if not text:
+        return ""
+    t = unicodedata.normalize("NFC", text)
+    t = _ZERO_WIDTH.sub("", t)
+    t = _ODD_SPACE.sub(" ", t)
+    t = t.replace("\r\n", "\n").replace("\r", "\n")
+    raw = [re.sub(r"[ \t]+$", "", l) for l in t.split("\n")]
+    lines = []
+    for l in raw:
+        l = re.sub(r"^[ \t]+", "", l)
+        l = re.sub(r"\t{2,}", "\t", l)
+        l = _fix_label_spacing(l)
+        l = re.sub(r" {2,}", " ", l)
+        if _WEB_NOISE.match(l.strip()) or _BREADCRUMB.match(l.strip()):
+            continue
+        lines.append(l)
+    # 빈 줄이 거의 모든 줄 사이에 끼어 있으면(웹 복사) 한 줄 빈 줄은 없앤다
+    nonblank = [l for l in lines if l.strip()]
+    singles = sum(1 for i in range(1, len(lines) - 1)
+                  if not lines[i].strip() and lines[i - 1].strip() and lines[i + 1].strip())
+    if nonblank and singles >= len(nonblank) * 0.4:
+        lines = [l for l in lines if l.strip()]
+    # 일정한 폭에서 끊긴 줄 다시 잇기
+    width = _is_hard_wrapped([l for l in lines if l.strip()])
+    if width:
+        joined: list[str] = []
+        for l in lines:
+            prev = joined[-1] if joined else ""
+            if (prev and l.strip() and len(prev) >= width * 0.8 and not re.search(r"[.。!?:：」』)]\s*$", prev)
+                    and not _ENUM_START.match(l) and not re.match(r"^\s*[가-힣 ]{1,12}\s*[:：]", l)):
+                # 한글끼리 이어질 때: 줄 끝 어절이 한 글자 조각('실'·'제')이거나 다음 줄이 어미·조사로 시작하면 붙여 쓴다
+                tight = bool(re.search(r"[가-힣]$", prev) and re.match(r"^[가-힣]", l.strip())
+                             and (re.search(r"(?:^|\s)[가-힣]$", prev) or _JOIN_TIGHT.match(l.strip())))
+                joined[-1] = prev + ("" if tight else " ") + l.strip()
+            else:
+                joined.append(l)
+        lines = joined
+    out: list[str] = []
+    for l in lines:
+        if out and l.strip() and l == out[-1]:          # 같은 줄이 연달아 나오면 하나만
+            continue
+        out.append(l)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
 
 _HEADER = re.compile(r"^\s*(수\s*신(\s*자)?(\s*참\s*조)?|\(?\s*경\s*유\s*\)?|제\s*목|발\s*신|참\s*조)\s*[:：]?\s*$")
 _HEADER_INLINE = re.compile(r"^\s*(수\s*신|\(\s*경\s*유\s*\)|참\s*조)\s+\S")
@@ -84,6 +182,91 @@ def _simplify(sentence: str) -> str:
     return s[:160]
 
 
+# 요약 문장: '배경(무엇을 하니)' + '요청(무엇을 해 달라)'을 공문 어미 없이 개조식으로
+_CONNECTOR = re.compile(r"\s*(?:하고자\s*하오니|하고자\s*하니|하고자\s*하므로|하오니|하니|하므로|하오며|하였으니|"
+                        r"되었으니|되었으므로|예정이오니|예정이니|이오니|이므로|합니다만)\s*,?\s*")
+_LEAD = re.compile(r"^(?:위\s*(?:호|문서)와?\s*관련하여|위\s*호에\s*따라|관련\s*근거에\s*따라|"
+                   r"(?:우리|귀|각)\s*(?:시|군|구|도|청|기관|교|학교|부|처|원|회사|사|본부|팀)(?:에서는|에서|는|의)?)\s*,?\s*")
+_NOUN_VERB = (r"개최|실시|시행|추진|운영|안내|조사|공모|모집|접수|진행|점검|평가|취합|파악|선정|변경|"
+              r"회신|제출|신청|통보|보고|추천|참석|참여|협조|작성|등록|입력|검토|확인|수립|구축|교육|홍보|발굴")
+
+
+def _nounize(s: str) -> str:
+    """'행사를 개최' → '행사 개최', '인원을 회신하여 주시기 바랍니다' → '인원 회신 요청'."""
+    s = re.sub(r"\s*(다음과|아래와)\s*같이\s*", " ", s)
+    s = re.sub(r"\s*(붙임|별첨|첨부)\s*(서식|양식|파일)?\s*\d*\s*(에\s*따라|을\s*참고하여|과\s*같이)\s*", " ", s)
+    s = re.sub(r"\s*기한\s*내(에)?\s*", " ", s)
+    s = re.sub(r"(?:을|를)\s*(" + _NOUN_VERB + r")", r" \1", s)
+    s = re.sub(r"\s*(?:하여|해)\s*주시기\s*바랍니다\.?$|\s*(?:하여|해)\s*주시기\s*바람\.?$", " 요청", s)
+    s = re.sub(r"\s*(?:하여|해)\s*(?:주시면|주시길)\s*(?:감사하겠습니다|바랍니다)\.?$", " 요청", s)
+    s = re.sub(r"\s*(?:하시기|하시길)\s*바랍니다\.?$|\s*부탁\s*드립니다\.?$|\s*바랍니다\.?$", " 요청", s)
+    if s.endswith("요청"):     # '작성하시어 회신 요청' → '작성·회신 요청' (관련하여·위하여 등은 그대로)
+        s = re.sub(r"(\S+?)(?:하시어|하여|해서)\s+",
+                   lambda m: m.group(0) if re.search(r"(관련|위|의|대|인|통|말미암|따라)$", m.group(1))
+                   else m.group(1) + "·", s)
+    s = re.sub(r"\s*(?:하고자|하려고)\s*(?:합니다|함)\.?$", "", s)
+    s = re.sub(r"\s*(?:알려|안내해)\s*드립니다\.?$|\s*알려드립니다\.?$|\s*안내합니다\.?$", " 안내", s)
+    s = re.sub(r"\s*(?:합니다|입니다)\.?$", "", s)
+    s = re.sub(r"\s*많은\s+참여\s*요청$", " 참여 요청", s)
+    s = re.sub(r"\s{2,}", " ", s).strip(" .,·")
+    return s
+
+
+def summary_sentence(paragraph: str) -> str:
+    """공문 문단 하나를 '「○○ 행사」 개최 — 부서별 참여 인원 회신 요청' 같은 한 줄로 줄인다."""
+    p = _ENUM.sub("", paragraph).strip()
+    p = re.sub(r"\s+", " ", p)
+    parts = _CONNECTOR.split(p, maxsplit=1)
+    bg, req = (parts[0], parts[1]) if len(parts) == 2 else ("", parts[0])
+    bg = _LEAD.sub("", bg).strip()
+    req = _LEAD.sub("", req).strip()
+    req = re.sub(r"^(?:각\s*)?\S{1,10}(?:에서는|께서는)\s+", "", req)
+    # 목적절(~을 위하여)은 배경이 충분히 길 때만 뺀다
+    for pat in (r"^.{2,60}?(?:을|를)?\s*(?:위하여|위해서?|위한)\s+", r"^.{2,60}?(?:하고자|고자)\s+"):
+        trimmed = re.sub(pat, "", bg)
+        if len(trimmed) >= 8:
+            bg = trimmed
+    bg, req = _nounize(bg), _nounize(req)
+    if bg and req:
+        out = f"{bg} — {req}"
+    else:
+        out = bg or req
+    return out[:180]
+
+
+def purpose_paragraph(clean: str) -> str:
+    """번호 문단 중 요청·안내 내용을 담은 첫 문단 (번호가 없는 메일·게시판 글은 첫 요청 문장)."""
+    paras, cur = [], ""
+    for line in clean.splitlines():
+        if re.match(r"^\s*\d{1,2}\s*[.)]\s*\S", line):
+            if cur:
+                paras.append(cur)
+            cur = line.strip()
+        elif cur and not re.match(r"^\s*([가-하]\s*[.)]|[-·○※□])", line) and len(cur) < 400:
+            cur += " " + line.strip()
+        elif cur:
+            paras.append(cur)
+            cur = ""
+    if cur:
+        paras.append(cur)
+    req = re.compile(r"(요청|협조|바랍니다|부탁|알려|안내|제출|회신|개최|시행|신청|조사|통보|추천|참석|모집|공모)")
+    for p in paras:
+        if re.search(r"(관련\s*[:：]|^\s*\d+\s*[.)]\s*관련)", p) or _GREETING.search(p):
+            continue
+        if req.search(p):
+            return p
+    # 번호 문단이 없는 글: 인사말·머리글을 뺀 문장 중 요청이 담긴 첫 문장
+    for line in clean.splitlines():
+        s = line.strip()
+        if len(s) < 15 or _GREETING.search(s) or re.match(r"^(안녕하|수고|감사합니다)", s):
+            continue
+        if re.match(r"^[^:：]{1,12}[:：]", s) or _ENUM_START.match(s):
+            continue
+        if req.search(s):
+            return s
+    return paras[0] if paras else ""
+
+
 def purpose_sentence(clean: str) -> str:
     """번호 문단(1., 2. …) 중 요청·안내 내용을 담은 첫 문단."""
     paras, cur = [], ""
@@ -112,15 +295,50 @@ DETAIL_KEYS = [("조사명",), ("행사명", "교육명", "회의명", "사업�
                ("회신기한", "제출기한", "신청기한", "접수기한", "기한"), ("회신방법", "제출방법", "신청방법", "접수방법")]
 
 
-def rule_summary(title: str, clean: str, fields: dict) -> str:
-    purpose = purpose_sentence(clean) or title
-    details = []
-    for keys in DETAIL_KEYS:
+_WD = "월화수목금토일"
+
+
+def _due_phrase(d: dict) -> str:
+    """{'date': '2026-11-13', 'time': '18:00'} → '11월 13일(금) 18:00까지'"""
+    from datetime import date as _date
+    try:
+        dt = _date.fromisoformat(d["date"])
+    except (KeyError, ValueError):
+        return ""
+    return f"{dt.month}월 {dt.day}일({_WD[dt.weekday()]})" + (f" {d['time']}" if d.get("time") else "") + "까지"
+
+
+def rule_summary(title: str, clean: str, fields: dict, deadlines: list[dict] | None = None) -> str:
+    """한두 줄 요약. 첫 줄: 무엇을 하니 무엇을 해 달라(언제까지). 둘째 줄: 대상·기간 등 다른 칸에 없는 정보.
+    행사명·일시·장소·제출 서류는 화면의 '행사 정보'·'제출물' 칸에 따로 나오므로 되풀이하지 않는다."""
+    para = purpose_paragraph(clean)
+    first = summary_sentence(para) if para else ""
+    # 메일·협조문처럼 '배경 문장. 요청 문장.'으로 나뉜 글은 두 문장을 이어 한 줄로
+    if para and not re.search(r"(요청|바랍니다|부탁|주시기|하오니|하니)", para):
+        lines = [l.strip() for l in clean.splitlines()]
+        try:
+            nxt = next(l for l in lines[lines.index(para.strip()) + 1:][:4]
+                       if re.search(r"(바랍니다|부탁|주시기|요청)", l) and not re.match(r"^[^:：]{1,12}[:：]", l))
+        except (ValueError, StopIteration):
+            nxt = ""
+        if nxt:
+            bg = re.sub(r"^.{2,60}?(?:을|를)?\s*(?:위하여|위해서?|위한)\s+", "", first)
+            nxt = re.sub(r"\s*\d{1,2}\s*월\s*\d{1,2}\s*일\s*(?:\([월화수목금토일]\))?\s*(?:\d{1,2}\s*(?:시|:\d{2}))?\s*까지\s*", " ", nxt)
+            nxt = re.sub(r"(?:\S+(?:팀|과|부|실|처)\s+)?\S*(?:메일|우편)\([^)]*\)\s*(?:로|으로)\s+", "", nxt)
+            req = re.sub(r"^\S*(?:첨부한|붙임의?|별첨)\s+", "", summary_sentence(nxt))
+            req = re.sub(r"\s{2,}", " ", req).strip()
+            first = f"{bg} — {req}"
+    if len(first) < 6:
+        first = re.sub(r"^\[[^\]]{1,20}\]\s*", "", title).strip()
+    due = next((d for d in (deadlines or []) if d.get("date")), None)
+    if due and "까지" not in first and re.search(r"(요청|제출|회신|신청|등록|보고|접수)", first):
+        first += f" ({_due_phrase(due)})"
+    extra = []
+    for keys in (("대상", "참가대상", "조사대상", "점검대상", "교육대상"), ("기간", "공모기간", "점검기간", "조사기간", "신청기간")):
         label, v = _get(fields, *keys)
-        if v:
-            details.append(f"{label}: {v[:80]}")
-    s = purpose if purpose.endswith(("요청", "안내", "알림", "협조")) else purpose
-    return s + (" — " + " / ".join(details[:5]) if details else "")
+        if v and label not in ("일시",):
+            extra.append(f"{label} {v[:60]}")
+    return first + ("\n" + " · ".join(extra) if extra else "")
 
 
 def clean_what(context: str, raw_date: str, fields: dict, title: str) -> str:
@@ -130,15 +348,34 @@ def clean_what(context: str, raw_date: str, fields: dict, title: str) -> str:
     if m or re.match(r"^(회\s*신|제\s*출|신\s*청|접\s*수|보\s*고|등\s*록|추\s*천|통\s*보)\s*기\s*한", s):
         verb = re.sub(r"\s", "", s)[:2]
         _l, obj = _get(fields, f"{verb}자료", f"{verb}서류", "제출서류", "제출자료", "회신자료", "제출물")
-        obj = re.sub(r"(붙\s*임|첨\s*부)\s*\d*\s*", "", obj)
-        obj = re.sub(r"\s*(각\s*)?\d+\s*부\.?", "", obj).strip(" .,")
-        return f"{obj} {verb}".strip() if obj else f"{title} {verb}".strip()
+        obj = item_names(obj)
+        if obj and verb in ("신청", "접수"):        # '신청서 신청'처럼 어색해지지 않게 서류는 '제출'
+            verb = "제출"
+        return f"{'·'.join(obj)} {verb}".strip() if obj else f"{title} {verb}".strip()
     if raw_date:
         s = s.replace(raw_date, " ")
     s = re.sub(r"^\s*(까지|한)\b", "", re.sub(r"(?<=\s)(까지|한)(?=\s|$)", "", s))
     s = re.sub(r"\t+", " · ", s)
     s = re.sub(r"\s{2,}", " ", s).strip(" ·.,:")
+    if len(s) > 18 and re.search(r"(바랍니다|부탁드립니다|주시기|하시어|하여)", s):
+        s = _nounize(_LEAD.sub("", s))          # 긴 문장은 '수요조사표 작성 · 회신 요청'처럼 줄인다
+        s = re.sub(r"\s*요청$", "", s)
+        s = re.sub(r"^\S*(?:첨부한|붙임의?|별첨)\s+", "", s)
+        s = re.sub(r"\S+(?:메일|우편)\([^)]*\)\s*(?:로|으로)\s+", "", s)
     return s[:120] or title
+
+
+def item_names(value: str) -> list[str]:
+    """'참가 신청서(붙임 1 서식) 1부, 부서별 참석자 명단 1부' → ['참가 신청서', '부서별 참석자 명단']"""
+    v = re.sub(r"\(\s*(?:붙\s*임|첨\s*부|별\s*첨)?\s*\d*\s*(?:서식|양식)?\s*\)", "", value or "")
+    v = re.sub(r"(?:붙\s*임|첨\s*부|별\s*첨)\s*\d*\s*(?:서식|양식)?\s*", "", v)
+    v = re.sub(r"\s*(?:각\s*)?\d+\s*부\.?", "", v)
+    names = []
+    for part in re.split(r"\s*(?:,|，|및|/|ㆍ|;)\s*", v):
+        part = part.strip(" .,:()")
+        if len(part) >= 2 and part not in names:
+            names.append(part)
+    return names
 
 
 # ---------------------------------------------------------------- 할 일 제목
