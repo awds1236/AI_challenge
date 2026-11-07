@@ -625,6 +625,7 @@ class Api:
             hwnd_ = win["hwnd"]
             started = time.time()
             text, how = winwindow.extract_text(hwnd_, say, trace)
+            text = (text or "").replace("\r\n", "\n").replace("\r", "\n")   # 프로그램마다 줄 구분이 다르다
             win_title = clean_title(win["title"])
             # 폴더 이름: 직접 입력 > 본문의 '제목' 줄 > 창 제목
             m = re.search(r"^[ \t]*(?:제\s*목|건\s*명)[ \t]*[:：]?[ \t]*(\S.{2,120})$", text or "", re.M)

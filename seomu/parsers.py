@@ -90,22 +90,26 @@ _MAIN_ATTR = re.compile(r"(content|contents|cont|view|board|bbs|article|detail|r
                         r"substance|main)", re.I)
 
 
+def _official_slice(text: str) -> str | None:
+    """공문 서식 그대로인 글(수신·제목 … 끝. … 시행·연락처)이면 공문이 시작하는 줄부터 끝까지.
+    꼬리말 연락처까지 써야 하므로 본문 영역만 고르지 않는다."""
+    if not re.search(r"끝\s*\.", text):
+        return None
+    lines = text.splitlines()
+    start = next((i for i, l in enumerate(lines) if re.match(r"^\s*(수\s*신|제\s*목)(\s|[:：]|$)", l)), -1)
+    if start < 0:
+        return None
+    return normalize("\n".join(lines[max(0, start - 3):]))         # 앞의 슬로건·기관명 줄 포함
+
+
 def main_text(markup: str) -> str:
     """웹 페이지에서 메뉴·머리말·꼬리말을 빼고 본문 영역 글자만 (lxml이 없으면 전체 글자)."""
     full = html_to_text(markup)
-    # 공문 서식 그대로인 문서(수신·제목 … 끝. … 시행·연락처)는 꼬리말 연락처까지 써야 하므로
-    # 메뉴가 있는 페이지라도 공문이 시작하는 줄부터 끝까지 쓴다
-    if re.search(r"끝\s*\.", full):
-        lines = full.splitlines()
-        start = next((i for i, l in enumerate(lines) if re.match(r"^\s*(수\s*신|제\s*목)(\s|[:：]|$)", l)), -1)
-        if start >= 0:
-            org = max(0, start - 3)                      # 슬로건·기관명 줄
-            return normalize("\n".join(lines[org:]))
     try:
         import lxml.html  # type: ignore
         doc = lxml.html.fromstring(markup)
     except Exception:
-        return full
+        return _official_slice(full) or full
     try:
         for el in doc.xpath("//script|//style|//noscript|//template|//nav|//aside"):
             el.drop_tree()
@@ -117,6 +121,10 @@ def main_text(markup: str) -> str:
             in_article = any(a.tag in ("article", "main") for a in el.iterancestors() if isinstance(a.tag, str))
             if (_NOISE_ATTR.search(attr) and not _MAIN_ATTR.search(attr)) or (tag in ("header", "footer") and not in_article):
                 el.drop_tree()
+        # 메뉴·꼬리말을 뺀 뒤에도 공문 서식이면 공문 전체(꼬리말 연락처 포함)를 쓴다
+        official = _official_slice(html_to_text(lxml.html.tostring(doc, encoding="unicode")))
+        if official:
+            return official
         cands = [el for el in doc.iter() if isinstance(el.tag, str)
                  and (el.tag.lower() in ("article", "main") or _MAIN_ATTR.search(f"{el.get('id', '')} {el.get('class', '')}"))]
         best, best_len = None, 0
@@ -326,6 +334,8 @@ def fix_ocr_text(text: str) -> str:
     t = re.sub(r"(\d)\s*[丁卩部]", r"\1부", text)
     t = re.sub(r"\(\s*[ßβ帀]\s*", "(☎ ", t)
     t = re.sub(r"문의\s*[세제체치]\s*(?=[:：\s])", "문의처", t)
+    t = re.sub(r"(?m)^(\s*)(?:불|븥|붇)\s*임(?=\s|$)", r"\1붙임", t)
+    t = re.sub(r"바랍\s*[lI|1!니ㄴ][^\s가-힣]*(?=\s|$)", "바랍니다.", t)              # '바랍니다.' → '바랍l'
     lines = []
     for l in t.splitlines():
         s = l.strip()
@@ -351,6 +361,25 @@ def parse_image(path: Path) -> str:
     return normalize(fix_ocr_text(text))
 
 
+def _raw_jpegs(page) -> list[tuple[str, bytes]]:
+    """Pillow 없이 PDF 페이지의 JPEG 그림(스캔 공문에 흔한 형식)을 꺼낸다."""
+    out = []
+    try:
+        xobjs = page["/Resources"]["/XObject"].get_object()
+    except Exception:
+        return out
+    for key in xobjs:
+        try:
+            obj = xobjs[key].get_object()
+            filt = obj.get("/Filter")
+            filters = [str(f) for f in filt] if isinstance(filt, list) else [str(filt)]
+            if obj.get("/Subtype") == "/Image" and filters and filters[-1] == "/DCTDecode":
+                out.append((".jpg", obj._data))
+        except Exception:
+            continue
+    return out
+
+
 def _ocr_pdf_images(reader, max_pages: int = 8) -> str:
     """스캔 PDF: 페이지에 들어 있는 그림을 꺼내 OCR한다."""
     import tempfile
@@ -361,13 +390,15 @@ def _ocr_pdf_images(reader, max_pages: int = 8) -> str:
     with tempfile.TemporaryDirectory() as td:
         for pi, page in enumerate(reader.pages[:max_pages]):
             try:
-                imgs = list(page.images)
+                imgs = [(Path(i.name).suffix or ".png", i.data) for i in page.images]
+            except ImportError:          # Pillow가 없으면 JPEG(DCTDecode) 그림은 원본 바이트를 그대로 꺼낸다
+                imgs = _raw_jpegs(page)
             except Exception:
                 continue
-            for ii, img in enumerate(imgs[:2]):
-                p = Path(td) / f"p{pi}_{ii}{Path(img.name).suffix or '.png'}"
+            for ii, (suffix, data) in enumerate(imgs[:2]):
+                p = Path(td) / f"p{pi}_{ii}{suffix}"
                 try:
-                    p.write_bytes(img.data)
+                    p.write_bytes(data)
                 except Exception:
                     continue
                 t = winwindow.ocr_body(0, image=p)
@@ -377,7 +408,10 @@ def _ocr_pdf_images(reader, max_pages: int = 8) -> str:
 
 
 def normalize(text: str) -> str:
-    text = html.unescape(text).replace("\r\n", "\n").replace("\r", "\n").replace("\xa0", " ")
+    import unicodedata
+    text = unicodedata.normalize("NFC", html.unescape(text))      # 자모가 분리된 한글(NFD)을 붙인다
+    text = re.sub(r"[​-‏⁠﻿]", "", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\xa0", " ")
     text = re.sub(r"[ \t　]+\n", "\n", text)
     text = re.sub(r"[ \t　]{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)

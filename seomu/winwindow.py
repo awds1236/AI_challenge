@@ -440,7 +440,8 @@ def uia_text(hwnd: int, limit: int = 20000) -> str:
     auto = _uia()
     if not auto:
         return ""
-    parts: list[str] = []
+    docs: list[str] = []          # 문서·편집 영역 전체 글자 (TextPattern)
+    labels: list[str] = []        # 그 밖의 글자 조각 (탭 이름·상태 표시줄·메뉴가 섞일 수 있음)
     with auto.UIAutomationInitializerInThread():
         root = auto.ControlFromHandle(hwnd)
         for c, _depth in auto.WalkControl(root, maxDepth=25):
@@ -450,17 +451,18 @@ def uia_text(hwnd: int, limit: int = 20000) -> str:
                     if tp:
                         t = tp.DocumentRange.GetText(-1)
                         if t and len(t.strip()) > 30:
-                            parts.append(t)
+                            docs.append(t)
                             continue
                 if c.ControlTypeName in ("TextControl", "DataItemControl", "HyperlinkControl") and c.Name:
-                    parts.append(c.Name)
+                    labels.append(c.Name)
             except Exception:
                 continue
-            if sum(len(p) for p in parts) > limit:
+            if sum(len(p) for p in docs + labels) > limit:
                 break
-    # 가장 긴 문서 텍스트를 우선
-    parts.sort(key=len, reverse=True)
-    best = parts[0] if parts and len(parts[0]) > 200 else "\n".join(dict.fromkeys(parts))
+    # 문서 영역 글자가 있으면 그것만 쓴다 (짧아도). 없을 때만 글자 조각을 이어 붙인다
+    best = max(docs, key=len) if docs else "\n".join(dict.fromkeys(labels))
+    best = best.replace("\r\n", "\n").replace("\r", "\n")      # 편집기는 줄을 CR(\r)만으로 구분한다
+    best = re.sub(r"[-]", "", best)                 # 아이콘 글꼴용 글자
     return best.strip()
 
 

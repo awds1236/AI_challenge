@@ -22,7 +22,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable
 
-from .parsers import html_to_text, normalize
+from .parsers import html_to_text, main_text, normalize
 
 ATTACH_EXT = ("hwp", "hwpx", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "zip", "txt",
               "csv", "jpg", "jpeg", "png", "gif", "odt", "ods", "show", "cell", "egg", "7z")
@@ -41,7 +41,8 @@ _TITLE_TAIL = re.compile(
     r"\s*[-–—|:]\s*(?:개인\s*[-–]\s*|프로필\s*\d*\s*[-–]\s*|InPrivate\s*[-–]\s*)?"
     r"(?:Microsoft\s*Edge|Google\s*Chrome|Chrome|Chromium|Naver\s*Whale|Whale|Internet\s*Explorer|Mozilla\s*Firefox|Firefox|"
     r"온나라(?:\s*시스템)?|온나라\s*문서|문서\s*24|문서24|업무\s*관리\s*시스템|K-?에듀파인|에듀파인|전자\s*결재|그룹웨어|"
-    r"전자\s*문서(?:\s*뷰어)?|문서\s*뷰어|문서\s*보기|문서|한글|Hwp|HWP|PDF|Adobe\s*Acrobat(?:\s*Reader)?(?:\s*DC)?)\s*$", re.I)
+    r"전자\s*문서(?:\s*뷰어)?|문서\s*뷰어|문서\s*보기|문서|한글|Hwp|HWP|PDF|Adobe\s*Acrobat(?:\s*Reader)?(?:\s*DC)?|"
+    r"메모장|Notepad|워드패드|WordPad|Microsoft\s*Word|Word)\s*$", re.I)
 _TITLE_HEAD = re.compile(r"^(?:공지\s*사항|게시판|알림\s*마당|새\s*소식)?\s*(?:상세\s*보기|상세|내용\s*보기|보기)\s*[|:\-–]\s*")
 
 
@@ -159,7 +160,7 @@ def analyze_html(markup: str, base_url: str = "") -> dict:
         lc.feed(markup)
     except Exception:
         pass
-    text = html_to_text(markup)
+    text = main_text(markup)            # 메뉴·꼬리말을 뺀 본문 영역
     attachments, seen = [], set()
     for l in lc.links:
         if not is_attachment_link(l):
@@ -354,9 +355,12 @@ def collect_from_files(paths: list[str], root: Path, title: str = "", body_index
     body_src = expanded[min(body_index, len(expanded) - 1)]
     try:
         text = parse_file(body_src)
+        read_ok = True
     except (ParseError, OSError) as e:
         text = f"(본문을 읽지 못했습니다: {e})"
-    title = title or extract_title(text) or body_src.stem
+        read_ok = False
+    # 본문을 못 읽었으면 오류 문장 대신 파일 이름을 제목으로
+    title = title or (extract_title(text) if read_ok else "") or re.sub(r"[_]+", " ", body_src.stem).strip()
     folder = make_notice_folder(root, title)
     save_body(folder, title, text, "", str(body_src))
     files = []
@@ -374,7 +378,6 @@ def collect_from_files(paths: list[str], root: Path, title: str = "", body_index
 def collect_from_text(text: str, root: Path, title: str = "", html: str = "", base_url: str = "") -> Captured:
     """붙여넣은 공문 (어떤 공문 시스템이든 본문을 복사해 붙여 넣으면 된다).
     웹 페이지에서 복사하면 HTML도 함께 오므로 표 구조를 살리고 붙임 링크 이름을 찾는다."""
-    from .parsers import main_text
     text = normalize(text or "")
     links: list[dict] = []
     if html and html.strip():

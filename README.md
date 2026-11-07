@@ -241,5 +241,13 @@
 python -m pytest -q
 ```
 
+### 모든 공문 상황 종합 검증
+형식별 예시 공문(`sample_data/verify/`)을 만들어 **실제 수집 경로 22가지**(파일 15종·붙여넣기·주소·브라우저 연동·열린 창)로 수집하고,
+기한·제출물·요약 문장 품질을 자동 판정해 [docs/검증결과.md](docs/검증결과.md)에 결과표를 남깁니다.
+```bash
+python tools/verify_all.py
+```
+> 열린 창 검증은 메모장을 잠깐 띄웠다 닫습니다(클립보드는 되돌림). 생략하려면 `--no-window`, 브라우저 연동은 `--no-browser`.
+
 ## 기술 스택
 Python 3 · llama.cpp / Ollama (Gemma) · SQLite · lxml (HWPX) · Playwright · pywebview (Edge WebView2) · Vanilla JS/CSS

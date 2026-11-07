@@ -150,7 +150,7 @@ def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | N
     _ml, method = _get(fields, "회신방법", "제출방법", "신청방법", "접수방법")
     _tl, to = _get(fields, "제출처", "회신처", "접수처", "신청처")
     subs: list[dict] = []
-    _il, item = _get(fields, "회신자료", "제출서류", "제출자료", "신청서류", "제출물")
+    _il, item = _get(fields, "회신자료", "제출서류", "제출자료", "신청서류", "제출물", "보고자료", "보고서류", "회신서류")
     # '참가 신청서(붙임 1 서식) 1부, 명단 1부' → 서류마다 한 줄. 붙임 서식 표시는 이름 옆에 남긴다
     word = re.search(r"(붙\s*임|첨\s*부|별\s*첨)", item or "")
     word = re.sub(r"\s", "", word.group(1)) if word else "붙임"

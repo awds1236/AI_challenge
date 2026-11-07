@@ -82,7 +82,7 @@ def test_html_links_not_glued_and_main_area_only():
     ("에듀파인_웹공문.mht", "2026학년도 학교폭력 예방교육 실적 제출 안내", "2026-12-04", "학교폭력 예방교육 실적 보고서 제출"),
     ("홈페이지_게시판_공지.html", "2026년 시민 정책제안 공모전 참가 신청 안내", "2026-11-30", "참가신청서·제안서 제출"),
     ("회사_전자결재_협조문.txt", "[협조전] 2027년도 부서별 교육훈련 수요조사 협조 요청", "2026-11-19", "교육훈련 수요조사표 회신"),
-    ("메일_공문.eml", "[인사팀] 2027년도 교육훈련 수요조사 협조 요청 (11/19까지)", "2026-11-19", "수요조사표 작성·회신"),
+    ("메일_공문.eml", "[인사팀] 2027년도 교육훈련 수요조사 협조 요청 (11/19까지)", "2026-11-19", "교육훈련 수요조사표 회신"),
 ])
 def test_each_system_format(name, title, due, what):
     t, a = analyze_file(name)
@@ -105,6 +105,37 @@ def test_summaries_are_short_noun_phrases():
         assert line == first, name
         for bad in ("하오니", "바랍니다", "위 호와", "귀 기관", "다음과 같이", "하고자"):
             assert bad not in a["summary"], (name, bad)
+
+
+def test_wording_edge_cases():
+    """종합 검증(tools/verify_all.py)에서 찾은 어색한 문구가 다시 생기지 않게."""
+    from seomu.analyzer import rule_analysis
+    memo = ("제목: 부서별 비상연락망 정비 협조\n연말 재난 대비 훈련을 위해 부서별 비상연락망을 새로 정비하고자 합니다.\n"
+            "각 부서에서는 변경된 연락처를 반영하여 '26. 11. 25.까지 총무팀으로 회신하여 주시기 바랍니다.\n"
+            "- 회신 자료: 비상연락망 1부")
+    a = rule_analysis("부서별 비상연락망 정비 협조", memo, [], REF)
+    assert a["deadlines"][0]["what"] == "비상연락망 회신"                       # '서에서는 …'으로 잘리지 않는다
+    assert a["summary"].startswith("부서별 비상연락망 새로 정비 — ")
+    assert "'26." not in a["summary"] and "(11월 25일(수)까지)" in a["summary"]
+    two = ("제목 청렴 교육 이수 및 결과 보고 요청\n1. 청렴 교육 이수를 아래와 같이 요청하오니 협조하여 주시기 바랍니다.\n"
+           "가. 이수 기한: 2026. 11. 28.(토)까지\n나. 결과 보고 기한: 2026. 12. 2.(수)까지\n다. 보고 자료: 교육 이수 결과 보고서 1부")
+    a = rule_analysis("청렴 교육 이수 및 결과 보고 요청", two, [], REF)
+    assert [d["what"] for d in a["deadlines"]] == ["청렴 교육 이수", "교육 이수 결과 보고서 제출"]
+    assert a["summary"].startswith("청렴 교육 이수 요청 (11월 28일(토)까지)")
+    info = rule_analysis("주차장 공사 안내", "1. 청사 주차장 도색 공사를 실시하오니 업무에 참고하시기 바랍니다.", [], REF)
+    assert info["summary"] == "청사 주차장 도색 공사 실시 — 업무 참고"
+    fin = rule_analysis("집행잔액 제출", "1. 결산에 대비하여 부서별 집행잔액 현황을 취합하오니 제출하여 주시기 바랍니다.", [], REF)
+    assert fin["summary"] == "부서별 집행잔액 현황 취합 — 제출 요청"
+
+
+def test_ocr_request_ending_and_corrupt_title(tmp_path):
+    from seomu.collector import collect_from_files
+    from seomu.parsers import fix_ocr_text
+    assert fix_ocr_text("협조하여 주시기 바랍l\n불임 서식 1부") == "협조하여 주시기 바랍니다.\n붙임 서식 1부"
+    bad = tmp_path / "10_손상된_파일.hwpx"
+    bad.write_bytes(b"PK broken")
+    cap = collect_from_files([str(bad)], tmp_path / "out")
+    assert cap.title == "10 손상된 파일" and "본문을 읽지 못했습니다" in cap.text
 
 
 def test_reference_attachments_are_not_submissions():
@@ -147,6 +178,29 @@ def test_fix_ocr_text():
     raw = "나. 제출 서류 점검표(붙임 서식) 1丁\n다. 문의세 총무과(ß 02-000-1234)\n붙임 점검표 1丁\n曰 그"
     assert fix_ocr_text(raw).splitlines() == ["나. 제출 서류: 점검표(붙임 서식) 1부", "다. 문의처: 총무과(☎ 02-000-1234)",
                                               "붙임 점검표 1부  끝."]
+
+
+def test_scanned_pdf_jpeg_without_pillow(tmp_path):
+    """Pillow가 없어도 스캔 PDF 속 JPEG 그림 바이트를 그대로 꺼낸다."""
+    from pypdf import PdfReader
+    from seomu.parsers import _raw_jpegs
+    jpeg = b"\xff\xd8\xff\xe0" + b"JFIF-test-data" + b"\xff\xd9"
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /XObject << /Im0 4 0 R >> >> >>",
+            b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 "
+            b"/Filter /DCTDecode /Length " + str(len(jpeg)).encode() + b" >>\nstream\n" + jpeg + b"\nendstream"]
+    out, offs = bytearray(b"%PDF-1.4\n"), []
+    for i, o in enumerate(objs, 1):
+        offs.append(len(out))
+        out += f"{i} 0 obj\n".encode() + o + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode()
+    out += b"".join(f"{o:010d} 00000 n \n".encode() for o in offs)
+    out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    pdf = tmp_path / "scan.pdf"
+    pdf.write_bytes(bytes(out))
+    assert _raw_jpegs(PdfReader(str(pdf)).pages[0]) == [(".jpg", jpeg)]
 
 
 _DRAW_PS = r"""param([string]$Out)
