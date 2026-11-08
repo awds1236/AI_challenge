@@ -86,3 +86,13 @@ def test_extract_text_returns_best_partial_instead_of_nothing(monkeypatch):
     monkeypatch.setenv("SEOMU_NO_FOREGROUND", "1")
     text, how = ww.extract_text(123)
     assert text == "제출 기한 2026. 12. 1." and "일부" in how
+
+
+def test_editor_unsaved_marker_and_browser_file_url():
+    """메모장의 '*공문.txt - 메모장' 표시는 제목에서 빼고, 브라우저 주소창의 file:/// 주소는 PC 경로로 바꾼다."""
+    from seomu.collector import clean_title
+    assert clean_title("*청렴교육 이수 협조.txt - 메모장") == "청렴교육 이수 협조.txt"
+    assert clean_title("● 공문.hwpx - 한글") == "공문.hwpx"
+    assert ww._path_from_url("file:///C:/Users/a/%EA%B3%B5%EB%AC%B8.pdf") == r"C:\Users\a\공문.pdf"
+    assert ww._path_from_url("C:/Users/a/공문.pdf#page=2") == r"C:\Users\a\공문.pdf"
+    assert ww._path_from_url("https://example.go.kr/a.pdf") == ""

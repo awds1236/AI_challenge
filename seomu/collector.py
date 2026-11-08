@@ -59,6 +59,8 @@ def clean_title(title: str) -> str:
             break
         t = t2
     t = _TITLE_HEAD.sub("", t).strip()
+    # 편집기가 붙이는 '저장 안 됨' 표시: '*공문.txt - 메모장', '● 공문.hwpx', '공문.docx*'
+    t = re.sub(r"^[*●•]\s*|\s*[*●•]$", "", t).strip()
     t = re.sub(r"\s*\|\s*[^|]{1,20}(?:시청|군청|구청|도청|청|부|처|원|공단|공사|재단|교육청|학교|대학교)\s*$", "", t)
     return t or (title or "").strip()
 

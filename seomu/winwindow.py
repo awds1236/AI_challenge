@@ -547,12 +547,15 @@ def click_named(hwnd: int, names: tuple[str, ...]) -> bool:
     auto = _uia()
     if not auto:
         return False
-    with auto.UIAutomationInitializerInThread():
-        root = auto.ControlFromHandle(hwnd)
-        c = _find_control(auto, root, names)
-        if not c:
-            return False
-        return _press(c)
+    try:
+        with auto.UIAutomationInitializerInThread():
+            root = auto.ControlFromHandle(hwnd)
+            c = _find_control(auto, root, names)
+            if not c:
+                return False
+            return _press(c)
+    except Exception:          # 찾는 도중 창이 닫혀 UI Automation 연결이 끊김 → 버튼 없음으로 본다
+        return False
 
 
 def uia_text(hwnd: int, limit: int = 20000) -> str:
@@ -567,23 +570,27 @@ def uia_text_ex(hwnd: int, limit: int = 20000) -> tuple[str, str]:
         return "", ""
     docs: list[str] = []          # 문서·편집 영역 전체 글자 (TextPattern)
     labels: list[str] = []        # 그 밖의 글자 조각 (탭 이름·상태 표시줄·메뉴가 섞일 수 있음)
-    with auto.UIAutomationInitializerInThread():
-        root = auto.ControlFromHandle(hwnd)
-        for c, _depth in auto.WalkControl(root, maxDepth=25):
-            try:
-                if c.ControlTypeName in ("DocumentControl", "EditControl", "PaneControl", "CustomControl"):
-                    tp = c.GetPattern(auto.PatternId.TextPattern)
-                    if tp:
-                        t = tp.DocumentRange.GetText(-1)
-                        if t and len(t.strip()) > 30:
-                            docs.append(t)
-                            continue
-                if c.ControlTypeName in ("TextControl", "DataItemControl", "HyperlinkControl") and c.Name:
-                    labels.append(c.Name)
-            except Exception:
-                continue
-            if sum(len(p) for p in docs + labels) > limit:
-                break
+    try:
+        with auto.UIAutomationInitializerInThread():
+            root = auto.ControlFromHandle(hwnd)
+            for c, _depth in auto.WalkControl(root, maxDepth=25):
+                try:
+                    if c.ControlTypeName in ("DocumentControl", "EditControl", "PaneControl", "CustomControl"):
+                        tp = c.GetPattern(auto.PatternId.TextPattern)
+                        if tp:
+                            t = tp.DocumentRange.GetText(-1)
+                            if t and len(t.strip()) > 30:
+                                docs.append(t)
+                                continue
+                    if c.ControlTypeName in ("TextControl", "DataItemControl", "HyperlinkControl") and c.Name:
+                        labels.append(c.Name)
+                except Exception:
+                    continue
+                if sum(len(p) for p in docs + labels) > limit:
+                    break
+    except Exception:
+        # 읽는 도중 창이 닫히면 UI Automation 연결이 끊겨 COM 오류가 난다 → 그때까지 읽은 글자로 계속
+        pass
     # 문서 영역 글자가 있으면 그것만 쓴다 (짧아도). 없을 때만 글자 조각을 이어 붙인다
     best = max(docs, key=len) if docs else "\n".join(dict.fromkeys(labels))
     kind = "doc" if docs else ("labels" if labels else "")
@@ -598,14 +605,17 @@ def attachment_names(hwnd: int) -> list[str]:
     if not auto:
         return []
     names = []
-    with auto.UIAutomationInitializerInThread():
-        root = auto.ControlFromHandle(hwnd)
-        for c, _ in auto.WalkControl(root, maxDepth=20):
-            try:
-                if c.ControlTypeName in ("ListItemControl", "TreeItemControl") and c.Name:
-                    names.append(c.Name.strip())
-            except Exception:
-                continue
+    try:
+        with auto.UIAutomationInitializerInThread():
+            root = auto.ControlFromHandle(hwnd)
+            for c, _ in auto.WalkControl(root, maxDepth=20):
+                try:
+                    if c.ControlTypeName in ("ListItemControl", "TreeItemControl") and c.Name:
+                        names.append(c.Name.strip())
+                except Exception:
+                    continue
+    except Exception:          # 창이 닫혀 UI Automation 연결이 끊김
+        pass
     return list(dict.fromkeys(n for n in names if n))[:30]
 
 
@@ -1011,6 +1021,47 @@ def _title_mentions(title: str, path: str) -> bool:
     return len(stem) >= 2 and stem in _stem_key(title)
 
 
+BROWSER_PROCS = ("msedge.exe", "chrome.exe", "whale.exe", "brave.exe", "firefox.exe", "opera.exe")
+
+
+def browser_url(hwnd: int, limit: int = 400) -> str:
+    """브라우저 창 주소창의 주소 (UI Automation). 화면에 띄운 PDF·문서 파일의 실제 위치를 알아낼 때 쓴다."""
+    auto = _uia()
+    if not auto:
+        return ""
+    try:
+        with auto.UIAutomationInitializerInThread():
+            root = auto.ControlFromHandle(hwnd)
+            n = 0
+            for c, _depth in auto.WalkControl(root, maxDepth=14):
+                n += 1
+                if n > limit:
+                    break
+                if c.ControlTypeName != "EditControl":
+                    continue
+                try:
+                    v = (c.GetValuePattern().Value or "").strip()
+                except Exception:
+                    continue
+                if re.match(r"^(?:file|https?)://|^[A-Za-z]:[\\/]", v):
+                    return v
+    except Exception:
+        return ""
+    return ""
+
+
+def _path_from_url(url: str) -> str:
+    """'file:///C:/Users/a/공문.pdf' 또는 'C:/Users/a/공문.pdf' → 'C:\\Users\\a\\공문.pdf'."""
+    import urllib.parse
+    u = url.strip()
+    if u.lower().startswith("file:"):
+        u = urllib.parse.unquote(urllib.parse.urlparse(u).path)
+        u = u.lstrip("/") if re.match(r"^/[A-Za-z]:", u) else u
+    elif not re.match(r"^[A-Za-z]:[\\/]", u):
+        return ""
+    return os.path.normpath(u.split("#")[0].split("?")[0])
+
+
 def window_document(hwnd: int, title: str | None = None, trace: list | None = None,
                     deep: bool = True) -> str:
     """창에 열려 있는 문서 파일의 경로를 찾는다 ('' = 못 찾음).
@@ -1031,6 +1082,15 @@ def window_document(hwnd: int, title: str | None = None, trace: list | None = No
     if ok(p):
         trace.append(f"열린 문서: 창 제목의 경로 {p}")
         return p
+    if _process_name(_pid(hwnd)).lower() in BROWSER_PROCS:
+        # 브라우저로 띄운 PDF·문서: 창 제목에는 이름만 있고 경로는 주소창에 있다 (file:///C:/…/공문.pdf)
+        url = browser_url(hwnd)
+        p = _path_from_url(url) if url else ""
+        if ok(p):
+            trace.append(f"열린 문서: 브라우저 주소창의 파일 {p}")
+            return p
+        if url:
+            trace.append(f"브라우저 주소: {url[:120]} (PC 안의 파일이 아님)")
     args = [a for a in process_command_line(_pid(hwnd))[1:] if ok(a.strip('"'))]
     named = attach.name_from_title(title)
     for a in args:
