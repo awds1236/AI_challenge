@@ -179,7 +179,7 @@ function go(page) {
   $$(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
   $$(".page").forEach((p) => p.classList.toggle("active", p.id === "page-" + page));
   const loaders = { home: loadHome, ask: loadChat, collect: loadNotices, tasks: loadTasks, mail: loadMail, report: loadReport, library: loadLibrary, settings: loadSettings };
-  loaders[page] && loaders[page]();
+  return loaders[page] ? loaders[page]() : Promise.resolve();
 }
 
 // ------------------------------------------------------------------ AI 상태
@@ -785,7 +785,12 @@ function bind() {
   });
 
   // 오늘
-  $("#home-ask-form").addEventListener("submit", (e) => { e.preventDefault(); const q = $("#home-ask").value; $("#home-ask").value = ""; go("ask"); ask(q); });
+  // Q&A 화면이 대화 기록을 다 불러온 뒤에 질문한다 (먼저 질문하면 기록을 다시 그리며 방금 보낸 질문·답변이 지워졌다)
+  $("#home-ask-form").addEventListener("submit", async (e) => {
+    e.preventDefault(); const q = $("#home-ask").value; $("#home-ask").value = "";
+    try { await go("ask"); } catch { /* 기록을 못 불러와도 질문은 보낸다 */ }
+    ask(q);
+  });
   $("#ai-chip").addEventListener("click", () => go("settings"));
 
   // Q&A

@@ -261,6 +261,31 @@ def tidy_ai_item(item: str) -> str:
     return " · ".join(names) + mark
 
 
+# 공문 제목에 흔한 말 (이것만 겹치면 같은 공문 이름이라고 볼 수 없다)
+_GENERIC_WORDS = {"요청", "안내", "협조", "제출", "조사", "회신", "참석", "참여", "관련", "알림", "통보", "개최", "실시",
+                  "계획", "결과", "보고", "부서별", "부서", "시행", "추진", "신청", "접수", "공문", "자료", "현황", "대한",
+                  "위한", "건", "및", "년", "년도", "연도", "회계연도", "학년도", "상반기", "하반기"}
+
+
+def _keeps_subject(name: str, title: str) -> bool:
+    """AI가 지은 이름이 공문 제목의 핵심어(흔한 말·연도를 뺀 낱말)를 지키는지.
+    '2026년 송년 행사 참석 조사' → '부서별 참석 인원 회신 요청'처럼 무엇에 관한 공문인지가 빠진 이름은 쓰지 않는다."""
+    def words(s: str) -> list[str]:
+        out = []
+        for w in re.split(r"[\s,·/()「」\[\]_\-]+", s or ""):
+            w = re.sub(r"^\d+(?:회계)?(?:년도|년|학년도)?", "", w)       # '2026년' '2026회계연도' 앞의 숫자
+            w = re.sub(r"(?:을|를|의|에|과|와|및)$", "", w)
+            if len(w) >= 2 and w not in _GENERIC_WORDS:
+                out.append(w)
+        return out
+    key = words(title)
+    if not key:
+        return True
+    have = words(name)
+    hit = sum(1 for k in key if any(k in h or h in k for h in have))
+    return hit >= max(1, (len(key) + 1) // 2)
+
+
 def _shares_word(name: str, title: str) -> bool:
     """두 글자 이상 낱말(또는 그 일부)을 하나라도 함께 쓰는지."""
     words = [w for w in re.split(r"[\s,·/()「」\[\]_]+", name or "") if len(w) >= 2]
@@ -305,8 +330,8 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
             result[k] = data[k].strip()
     result["summary"] = tidy_ai_summary(result["summary"])
     fn = data.get("folder_name")
-    if isinstance(fn, str) and 2 <= len(fn.strip()) <= 40 and _shares_word(fn, title):
-        # 공문 제목과 겹치는 낱말이 없는 이름('테스트' 등 AI가 지어낸 이름)은 쓰지 않는다
+    if isinstance(fn, str) and 2 <= len(fn.strip()) <= 40 and _shares_word(fn, title) and _keeps_subject(fn, title):
+        # 공문 제목과 겹치는 낱말이 없거나('테스트' 등 AI가 지어낸 이름), 무엇에 관한 공문인지(핵심어)가 빠진 이름은 쓰지 않는다
         result["folder_name"] = fn.strip()
     if isinstance(data.get("event"), dict):
         result["event"] = {k: str(v) for k, v in data["event"].items() if v}

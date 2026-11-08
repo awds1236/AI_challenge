@@ -299,3 +299,13 @@ def test_rule_analysis_last_sentence_with_end_mark():
     a = rule_analysis("점검 협조", "1. 점검 결과 확인서를 2026. 11. 20.(금)까지 회신하여 주시기 바랍니다.\n"
                       "붙임 1. 점검 일정표 1부.\n     2. 결과 확인서 서식 1부. 끝.", [], REF)
     assert [s["item"] for s in a["submissions"]] == ["결과 확인서 (붙임 서식)"]
+
+
+def test_ai_folder_name_must_keep_title_subject():
+    """AI가 지은 공문 이름이 제목의 핵심어를 빼면(무엇에 관한 공문인지 모르게) 원래 제목을 쓴다."""
+    from seomu.analyzer import _keeps_subject
+    assert not _keeps_subject("부서별 참석 인원 회신 요청", "2026년 송년 행사 참석 조사")
+    assert not _keeps_subject("교육 참석 안내", "2026년 하반기 직원 역량강화 교육 참석 안내")
+    assert _keeps_subject("송년 행사 참석 조사", "2026년 송년 행사 참석 조사")
+    assert _keeps_subject("집행잔액 현황표 제출", "2026회계연도 집행잔액 현황 제출 요청")
+    assert _keeps_subject("청렴 교육 이수 결과 보고", "청렴 교육 이수 및 결과 보고 요청")
