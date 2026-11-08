@@ -38,6 +38,23 @@ from . import report as report_mod
 from .storage import Store
 
 
+def _has_open_program(ext: str) -> bool:
+    """이 확장자를 여는 프로그램이 Windows에 연결돼 있는지 (알 수 없으면 있다고 본다)."""
+    if not sys.platform.startswith("win") or not ext:
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+        shlwapi = ctypes.WinDLL("shlwapi")
+        size = wintypes.DWORD(1024)
+        buf = ctypes.create_unicode_buffer(1024)
+        # ASSOCF_INIT_IGNOREUNKNOWN(0x400): 연결이 없으면 '알 수 없는 형식' 대신 실패를 돌려준다 / ASSOCSTR_EXECUTABLE(2)
+        hr = shlwapi.AssocQueryStringW(0x400, 2, ext, "open", buf, ctypes.byref(size))
+        return hr == 0 and bool(buf.value)
+    except Exception:
+        return True
+
+
 class Job:
     def __init__(self, kind: str):
         self.id = uuid.uuid4().hex[:12]
@@ -133,7 +150,11 @@ class Api:
     @staticmethod
     def _open_os(path: str) -> None:
         if sys.platform.startswith("win"):
-            os.startfile(path)  # type: ignore[attr-defined]
+            if os.environ.get("SEOMU_OPEN_MINIMIZED"):
+                # 시험용: 연 프로그램을 최소화·비활성으로 띄워 사용자가 보던 화면을 가리지 않는다
+                os.startfile(path, "open", show_cmd=7)  # type: ignore[attr-defined]  # SW_SHOWMINNOACTIVE
+            else:
+                os.startfile(path)  # type: ignore[attr-defined]
         elif sys.platform == "darwin":
             subprocess.Popen(["open", path])
         else:
@@ -367,10 +388,16 @@ class Api:
         return paths
 
     def open_path(self, path: str) -> bool:
-        if path and Path(path).exists():
-            self._open_os(path)
-            return True
-        return False
+        if not path or not Path(path).exists():
+            return False
+        p = Path(path)
+        if p.is_file() and sys.platform.startswith("win") and not _has_open_program(p.suffix):
+            # 연결 프로그램이 없으면 Windows가 '어떤 앱으로 열까요' 창만 띄운다 → 무엇이 없는지와 대안을 알려 준다
+            what = "한글(HWP) 문서를 여는 프로그램(한글·한컴오피스 뷰어)" if p.suffix.lower() in (".hwp", ".hwpx", ".hwx")                 else f"'{p.suffix or '확장자 없는'}' 파일을 여는 프로그램"
+            raise ValueError(f"이 PC에는 {what}이 없어 열 수 없습니다. 앱 안의 미리보기로 내용을 보거나, "
+                             "공문 폴더에서 파일을 다른 PC로 옮겨 여세요.")
+        self._open_os(path)
+        return True
 
     def preview_file(self, path: str, limit: int = 60000) -> dict:
         """붙임·본문 파일의 글자를 앱 안에서 보여 준다 (한글·PDF 뷰어가 없는 PC에서도 내용 확인).
@@ -1029,7 +1056,7 @@ class Api:
             url = f"mailto:?subject={q(subject or '')}"
         try:
             if sys.platform.startswith("win"):
-                os.startfile(url)  # type: ignore[attr-defined]
+                self._open_os(url)
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", url])
             else:

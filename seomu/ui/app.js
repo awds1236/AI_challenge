@@ -753,6 +753,11 @@ function setupDrop(zone, onPaths) {
     try { onPaths(await api("upload_files", await readFiles(files))); } catch (er) { toast(er.message, "err"); } finally { hud(false); }
   });
 }
+// 파일·폴더를 PC 프로그램으로 연다. 여는 프로그램이 없는 등 열 수 없으면 이유를 알려 준다
+async function openPath(path, missing = "파일을 찾을 수 없습니다 (옮겨졌거나 지워졌을 수 있습니다)") {
+  try { const ok = await api("open_path", path); if (!ok) toast(missing, "info", 5000); return ok; }
+  catch (e) { toast(e.message, "err", 8000); return false; }
+}
 async function pickFiles(multiple = true) {
   if (state.info.native) return api("pick_files", multiple);
   return new Promise((resolve) => {
@@ -773,7 +778,7 @@ function bind() {
     const nav = t.closest(".nav-item"); if (nav) return go(nav.dataset.page);
     const g = t.closest("[data-goto]"); if (g && !t.closest("[data-notice]")) return go(g.dataset.goto);
     const n = t.closest("[data-notice]"); if (n) return openNotice(Number(n.dataset.notice));
-    const o = t.closest("[data-open]"); if (o) { const ok = await api("open_path", o.dataset.open); if (!ok) toast("파일을 열 수 없습니다", "err"); return; }
+    const o = t.closest("[data-open]"); if (o) { await openPath(o.dataset.open); return; }
     const pv = t.closest("[data-preview]"); if (pv) return previewFile(pv.dataset.preview);
     const cite = t.closest(".cite");
     if (cite) {
@@ -857,7 +862,7 @@ function bind() {
     await doCollect("collect_text", [text, title(), useAI(), html]);
     $("#paste-text").value = ""; pasteHtml = ""; pasteInfo();
   });
-  $("#open-root").addEventListener("click", async () => { const s = await api("get_settings"); if (!(await api("open_path", s._download_root))) toast("아직 폴더가 없습니다. 공문을 먼저 수집하세요.", "info"); });
+  $("#open-root").addEventListener("click", async () => { const s = await api("get_settings"); await openPath(s._download_root, "아직 폴더가 없습니다. 공문을 먼저 수집하세요."); });
 
   // 시트
   $("#nd-close").addEventListener("click", closeSheet);
@@ -869,9 +874,9 @@ function bind() {
   });
   $("#pv-close").addEventListener("click", closePreview);
   $("#pv-sheet").addEventListener("click", (e) => { if (e.target.id === "pv-sheet") closePreview(); });
-  $("#pv-open").addEventListener("click", async () => { if (previewPath && !(await api("open_path", previewPath))) toast("파일을 열 수 없습니다", "err"); });
+  $("#pv-open").addEventListener("click", async () => { if (previewPath) await openPath(previewPath); });
   $("#pv-copy").addEventListener("click", async () => { await copyText($("#pv-body").textContent); toast("글자를 복사했습니다", "ok"); });
-  $("#nd-folder").addEventListener("click", () => currentNotice && api("open_notice_folder", currentNotice.id));
+  $("#nd-folder").addEventListener("click", () => currentNotice && openPath(currentNotice.folder, "공문 폴더가 없습니다 (옮겨졌거나 지워졌을 수 있습니다)"));
   $("#nd-mail").addEventListener("click", async () => {
     if (!currentNotice) return;
     const id = currentNotice.id, ev = (currentNotice.analysis || {}).event || {};
@@ -923,15 +928,15 @@ function bind() {
   $("#cal").addEventListener("click", (e) => { const d = e.target.closest(".day"); if (d) { state.calSel = d.dataset.date; renderCalendar(); } });
   $("#cal-prev").addEventListener("click", () => { state.calMonth = new Date(state.calMonth.getFullYear(), state.calMonth.getMonth() - 1, 1); renderCalendar(); });
   $("#cal-next").addEventListener("click", () => { state.calMonth = new Date(state.calMonth.getFullYear(), state.calMonth.getMonth() + 1, 1); renderCalendar(); });
-  $("#export-ics").addEventListener("click", async () => { const p = await api("export_ics"); toast(`일정 파일을 저장했습니다: ${baseName(p)} (Outlook 등에서 열기)`, "ok", 6000); api("open_path", p.replace(/[\\/][^\\/]+$/, "")); });
+  $("#export-ics").addEventListener("click", async () => { const p = await api("export_ics"); toast(`일정 파일을 저장했습니다: ${baseName(p)} (Outlook 등에서 열기)`, "ok", 6000); openPath(p.replace(/[\\/][^\\/]+$/, "")); });
 
   // 메일
   $("#rp-template").addEventListener("change", renderTplInfo);
   $("#rp-make").addEventListener("click", () => makeReport());
   $("#rp-pick").addEventListener("click", async () => addReportTemplates(await pickFiles(true)));
   $("#rp-del").addEventListener("click", async () => { const n = $("#rp-template").value; if (n && confirm(`'${n}' 양식을 삭제할까요?`)) { await api("delete_report_template", n); loadReport(); } });
-  $("#rp-open").addEventListener("click", () => state.report && api("open_path", state.report.path));
-  $("#rp-folder").addEventListener("click", () => state.report && api("open_path", state.report.folder));
+  $("#rp-open").addEventListener("click", () => state.report && openPath(state.report.path));
+  $("#rp-folder").addEventListener("click", () => state.report && openPath(state.report.folder));
   setupDrop($("#drop-report"), addReportTemplates);
   $("#nd-report").addEventListener("click", async () => { if (!currentNotice) return; const id = currentNotice.id; closeSheet(); go("report"); await loadReport(); $("#rp-notice").value = String(id); });
   segmented($("#mail-mode"), (v) => $$(".mail-pane").forEach((p) => p.classList.toggle("on", p.dataset.mode === v)));

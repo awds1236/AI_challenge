@@ -283,3 +283,22 @@ def test_open_mail_uses_shell_and_drops_long_body(api, monkeypatch):
     monkeypatch.setattr(os, "startfile", boom, raising=False)
     with pytest.raises(RuntimeError, match="전체 복사"):
         api.open_mail("제목", "본문")
+
+
+def test_open_path_explains_missing_program(api, tmp_path, monkeypatch):
+    """여는 프로그램이 없는 파일(한글이 없는 PC의 .hwpx)은 Windows의 '어떤 앱으로' 창 대신 이유를 알려 준다."""
+    import os
+    import seomu.api as api_mod
+    opened = []
+    monkeypatch.setattr(os, "startfile", lambda *a, **k: opened.append(a), raising=False)
+    monkeypatch.setattr(api_mod.sys, "platform", "win32")
+    monkeypatch.setattr(api_mod, "_has_open_program", lambda ext: ext != ".hwpx")
+    f = tmp_path / "보고서.hwpx"
+    f.write_bytes(b"PK")
+    with pytest.raises(ValueError, match="한글"):
+        api.open_path(str(f))
+    assert not opened
+    t = tmp_path / "메모.txt"
+    t.write_text("x", encoding="utf-8")
+    assert api.open_path(str(t)) and opened
+    assert api.open_path(str(tmp_path / "없는 파일.txt")) is False
