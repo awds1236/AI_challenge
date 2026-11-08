@@ -199,8 +199,27 @@ def _cloaked(hwnd) -> bool:
     return bool(val.value)
 
 
+UNTITLED = "(제목 없는 창)"
+
+
+def _size(hwnd) -> tuple[int, int]:
+    l, t, r, b = _rect(hwnd)
+    return max(0, r - l), max(0, b - t)
+
+
+def _big(hwnd, w: int = 320, h: int = 200) -> bool:
+    sw, sh = _size(hwnd)
+    return sw >= w and sh >= h
+
+
 def list_windows() -> list[dict]:
-    """작업 표시줄에 보이는 최상위 창 목록."""
+    """수집할 수 있는 최상위 창 목록.
+
+    작업 표시줄의 창뿐 아니라, 뷰어가 아닌 프로그램이 흔히 쓰는 모양도 넣는다:
+    - 다른 창에 딸린(owned) 큰 창: 옛 델파이 프로그램의 주 창, 그룹웨어가 띄운 문서 창
+    - 제목 없는 큰 창: 제목을 비워 둔 업무 프로그램
+    크기가 0인 껍데기 창(작업 표시줄 단추만 가진 창)은 실제 내용 창으로 바꿔서 보여 준다.
+    """
     if not IS_WIN:
         return []
     out: list[dict] = []
@@ -208,24 +227,68 @@ def list_windows() -> list[dict]:
 
     def cb(hwnd, _):
         try:
-            if not user32.IsWindowVisible(hwnd) or user32.GetWindow(hwnd, GW_OWNER):
+            if not user32.IsWindowVisible(hwnd) or _cloaked(hwnd):
                 return True
-            if user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW or _cloaked(hwnd):
+            ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            owned = bool(user32.GetWindow(hwnd, GW_OWNER))
+            cls = _class(hwnd)
+            iconic = bool(user32.IsIconic(hwnd))
+            if ex & WS_EX_TOOLWINDOW and not (_big(hwnd, 500, 300) and _text(hwnd).strip()):
+                return True
+            if owned and (cls == "#32770" or not _big(hwnd)):        # 딸린 창은 대화상자가 아닌 큰 창만
+                return True
+            if not iconic and not _big(hwnd, 60, 40):              # 껍데기 창은 아래에서 내용 창으로 바꾼다
                 return True
             title = _text(hwnd).strip()
-            if not title or title in ("Program Manager", "설정", "Settings"):
+            if title in ("Program Manager", "설정", "Settings"):
                 return True
+            if not title:
+                if not _big(hwnd, 320, 240) or cls in ("Shell_TrayWnd", "Progman", "WorkerW"):
+                    return True
+                title = UNTITLED
             pid = _pid(hwnd)
             if pid == me or any(title.startswith(t) for t in SELF_TITLES):
                 return True
             out.append({"hwnd": int(hwnd), "title": title, "process": _process_name(pid),
-                        "cls": _class(hwnd), "pid": pid})
+                        "cls": cls, "pid": pid, "owned": owned})
         except Exception:
             pass
         return True
 
     user32.EnumWindows(WNDENUMPROC(cb), 0)
     return out
+
+
+def window_info(hwnd: int) -> dict | None:
+    """창 하나의 정보 (목록에 없던 창도)."""
+    if not IS_WIN or not user32.IsWindow(hwnd):
+        return None
+    pid = _pid(hwnd)
+    return {"hwnd": int(hwnd), "title": _text(hwnd).strip() or UNTITLED, "process": _process_name(pid),
+            "cls": _class(hwnd), "pid": pid, "owned": bool(user32.GetWindow(hwnd, GW_OWNER))}
+
+
+def resolve_window(hwnd: int) -> int:
+    """고른 창이 크기가 없는 껍데기(작업 표시줄 단추용 창 등)면, 같은 프로그램의 가장 큰 내용 창을 돌려준다."""
+    if not IS_WIN or not user32.IsWindow(hwnd):
+        return hwnd
+    if user32.IsIconic(hwnd) or _big(hwnd, 120, 80):
+        return hwnd
+    pid, best, area = _pid(hwnd), 0, 0
+
+    def cb(h, _):
+        nonlocal best, area
+        try:
+            if h != hwnd and user32.IsWindowVisible(h) and _pid(h) == pid and _class(h) != "#32770":
+                w, ht = _size(h)
+                if w * ht > area:
+                    best, area = int(h), w * ht
+        except Exception:
+            pass
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(cb), 0)
+    return best if best and area >= 120 * 80 else hwnd
 
 
 def activate(hwnd: int) -> bool:
@@ -365,6 +428,20 @@ def save_window_image(hwnd: int, path: Path, crop: tuple[float, float] | None = 
         return False
 
 
+def capture_png(hwnd: int) -> bytes | None:
+    """창 전체 그림(PNG 바이트). 공문 폴더를 만들기 전에 찍어 둘 때 쓴다."""
+    import tempfile
+    tmp = Path(tempfile.gettempdir()) / f"seomu_shot_{os.getpid()}.png"
+    try:
+        if save_window_image(hwnd, tmp):
+            return tmp.read_bytes()
+    except OSError:
+        pass
+    finally:
+        tmp.unlink(missing_ok=True)
+    return None
+
+
 def _grab(hwnd: int, client: bool = False):
     """(너비, 높이, BGRA 바이트) — 창이 가려져 있거나 화면 밖에 있어도 PrintWindow로 그린다 (앞으로 가져오지 않음)."""
     if not IS_WIN:
@@ -480,9 +557,14 @@ def click_named(hwnd: int, names: tuple[str, ...]) -> bool:
 
 def uia_text(hwnd: int, limit: int = 20000) -> str:
     """화면에 보이는 글자를 UI Automation으로 읽는다 (문서 영역 TextPattern 우선)."""
+    return uia_text_ex(hwnd, limit)[0]
+
+
+def uia_text_ex(hwnd: int, limit: int = 20000) -> tuple[str, str]:
+    """(글자, 종류). 종류: 'doc'(문서·편집 영역 전체 글자) / 'labels'(글자 조각을 이어 붙임) / ''."""
     auto = _uia()
     if not auto:
-        return ""
+        return "", ""
     docs: list[str] = []          # 문서·편집 영역 전체 글자 (TextPattern)
     labels: list[str] = []        # 그 밖의 글자 조각 (탭 이름·상태 표시줄·메뉴가 섞일 수 있음)
     with auto.UIAutomationInitializerInThread():
@@ -504,9 +586,10 @@ def uia_text(hwnd: int, limit: int = 20000) -> str:
                 break
     # 문서 영역 글자가 있으면 그것만 쓴다 (짧아도). 없을 때만 글자 조각을 이어 붙인다
     best = max(docs, key=len) if docs else "\n".join(dict.fromkeys(labels))
+    kind = "doc" if docs else ("labels" if labels else "")
     best = best.replace("\r\n", "\n").replace("\r", "\n")      # 편집기는 줄을 CR(\r)만으로 구분한다
     best = re.sub(r"[-]", "", best)                 # 아이콘 글꼴용 글자
-    return best.strip()
+    return best.strip(), kind
 
 
 def attachment_names(hwnd: int) -> list[str]:
@@ -633,7 +716,7 @@ def _wait(check: Callable[[], bool] | None, seconds: float) -> bool:
 
 # ---------------------------------------------------------------- Windows 내장 OCR (PowerShell + WinRT)
 _OCR_PS = r"""
-param([string]$Path)
+param([string]$Path, [double]$Scale = 1)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -648,7 +731,21 @@ function Await($op, $type) { $t = $asTask.MakeGenericMethod($type).Invoke($null,
 $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Path)) ([Windows.Storage.StorageFile])
 $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
 $dec = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
-$bmp = Await ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$max = [Windows.Media.Ocr.OcrEngine]::MaxImageDimension
+$Scale = [Math]::Max(1, [Math]::Min($Scale, [Math]::Min($max / $dec.PixelWidth, $max / $dec.PixelHeight)))
+if ($Scale -gt 1.01) {
+  # 작은 글자는 키워서 읽어야 정확하다 (좌표는 아래에서 원래 크기로 되돌린다)
+  $tf = New-Object Windows.Graphics.Imaging.BitmapTransform
+  $tf.ScaledWidth = [uint32]($dec.PixelWidth * $Scale); $tf.ScaledHeight = [uint32]($dec.PixelHeight * $Scale)
+  $tf.InterpolationMode = [Windows.Graphics.Imaging.BitmapInterpolationMode]::Fant
+  $bmp = Await ($dec.GetSoftwareBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
+    [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied, $tf,
+    [Windows.Graphics.Imaging.ExifOrientationMode]::IgnoreExifOrientation,
+    [Windows.Graphics.Imaging.ColorManagementMode]::DoNotColorManage)) ([Windows.Graphics.Imaging.SoftwareBitmap])
+} else {
+  $Scale = 1
+  $bmp = Await ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+}
 $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage((New-Object Windows.Globalization.Language 'ko'))
 if ($engine -eq $null) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
 if ($engine -eq $null) { Write-Output '[]'; exit }
@@ -660,9 +757,9 @@ foreach ($l in $res.Lines) {
   $y = ($r | Measure-Object -Property Y -Minimum).Minimum
   $x2 = ($r | ForEach-Object { $_.X + $_.Width } | Measure-Object -Maximum).Maximum
   $y2 = ($r | ForEach-Object { $_.Y + $_.Height } | Measure-Object -Maximum).Maximum
-  $words = @($l.Words | ForEach-Object { @{ t = $_.Text; x = $_.BoundingRect.X; y = $_.BoundingRect.Y;
-             w = $_.BoundingRect.Width; h = $_.BoundingRect.Height } })
-  $lines += @{ text = $l.Text; x = $x; y = $y; w = $x2 - $x; h = $y2 - $y; words = $words }
+  $words = @($l.Words | ForEach-Object { @{ t = $_.Text; x = $_.BoundingRect.X / $Scale; y = $_.BoundingRect.Y / $Scale;
+             w = $_.BoundingRect.Width / $Scale; h = $_.BoundingRect.Height / $Scale } })
+  $lines += @{ text = $l.Text; x = $x / $Scale; y = $y / $Scale; w = ($x2 - $x) / $Scale; h = ($y2 - $y) / $Scale; words = $words }
 }
 ConvertTo-Json -InputObject @($lines) -Depth 5 -Compress
 """
@@ -718,8 +815,9 @@ def render_pdf_pages(path: Path, out_dir: Path, max_pages: int = 8, timeout: flo
     return sorted(out_dir.glob("p*.png"), key=lambda p: int(re.findall(r"\d+", p.stem)[0]))
 
 
-def ocr_image(path: Path, timeout: float = 60) -> list[dict]:
-    """Windows 내장 OCR로 이미지의 글자 줄을 읽는다. [{text,x,y,w,h,words}] (인터넷 불필요)"""
+def ocr_image(path: Path, timeout: float = 60, scale: float = 1) -> list[dict]:
+    """Windows 내장 OCR로 이미지의 글자 줄을 읽는다. [{text,x,y,w,h,words}] (인터넷 불필요)
+    scale>1이면 키워서 읽는다 (좌표는 원래 그림 기준)."""
     if not IS_WIN:
         return []
     import json
@@ -729,7 +827,7 @@ def ocr_image(path: Path, timeout: float = 60) -> list[dict]:
     try:
         script.write_text(_OCR_PS, encoding="utf-8-sig")
         out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                              "-File", str(script), str(path)], capture_output=True, timeout=timeout,
+                              "-File", str(script), str(path), str(scale)], capture_output=True, timeout=timeout,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         txt = out.stdout.decode("utf-8", "ignore").strip()
         data = json.loads(txt) if txt.startswith("[") else []
@@ -768,9 +866,9 @@ def ocr_body(hwnd: int, image: Path | None = None) -> str:
     """최후 수단: 창 화면을 OCR해 본문 글자를 읽는다 (화면에 보이는 부분만)."""
     import tempfile
     img = image or Path(tempfile.gettempdir()) / "seomu_body.png"
-    if image is None and not save_window_image(hwnd, img, client=True):       # 제목줄 글자는 빼고
+    if image is None and not _shot(hwnd, img):       # 제목줄 글자는 빼고, 다 그려진 그림으로
         return ""
-    lines = ocr_image(img)
+    lines = ocr_image(img, scale=2)          # 업무 프로그램은 글자가 작은 경우가 많아 키워서 읽는다
     if not lines:
         return ""
     long_lines = [l for l in lines if len(l.get("text", "")) >= 12]
@@ -781,6 +879,359 @@ def ocr_body(hwnd: int, image: Path | None = None) -> str:
         lines = [l for l in lines if l["x"] >= x0 and l["x"] + l["w"] <= x1 and l["y"] >= y0]
     lines.sort(key=lambda l: (round(l["y"] / 8), l["x"]))
     return "\n".join(l["text"] for l in lines).strip()
+
+
+# ---------------------------------------------------------------- 뷰어가 아닌 일반 프로그램 창 대응
+# 본문복사·PC저장 같은 뷰어 기능이 없는 창(한글·워드·메모장·메신저·그룹웨어 화면·자체 프로그램)도
+# ① 창에 열린 문서 파일을 찾아 직접 읽고 ② 화면을 넘겨 가며 글자를 인식해서 어떻게든 본문을 얻는다.
+if IS_WIN:
+    class WINDOWPLACEMENT(ctypes.Structure):
+        _fields_ = [("length", wintypes.UINT), ("flags", wintypes.UINT), ("showCmd", wintypes.UINT),
+                    ("ptMinPosition", wintypes.POINT), ("ptMaxPosition", wintypes.POINT),
+                    ("rcNormalPosition", wintypes.RECT)]
+
+    user32.GetWindowPlacement.argtypes = [wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT)]
+    user32.SetWindowPlacement.argtypes = [wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT)]
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+    user32.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_ubyte, wintypes.DWORD]
+    user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                    ctypes.c_int, ctypes.c_uint]
+
+
+class capturable:
+    """최소화된 창은 그릴 화면이 없어 글자 인식·캡처가 안 된다.
+    → 완전히 투명하게 만든 채 활성화 없이 펼쳐 화면 밖으로 옮겨 읽고, 끝나면 원래 모양·위치로 최소화한다.
+    (펼치는 위치를 Windows가 모니터 안으로 당기는 경우가 있어 위치만으로는 숨길 수 없다 → 투명하게)"""
+
+    WS_EX_LAYERED, LWA_ALPHA = 0x00080000, 0x2
+
+    def __init__(self, hwnd: int, trace: list | None = None):
+        self.hwnd, self.trace, self.orig, self.ex = hwnd, trace, None, None
+
+    def __enter__(self):
+        if not IS_WIN or not user32.IsIconic(self.hwnd):
+            return self
+        try:
+            wp = WINDOWPLACEMENT()
+            wp.length = ctypes.sizeof(WINDOWPLACEMENT)
+            if not user32.GetWindowPlacement(self.hwnd, ctypes.byref(wp)):
+                return self
+            ex = user32.GetWindowLongW(self.hwnd, GWL_EXSTYLE)
+            if ex & self.WS_EX_LAYERED:                     # 이미 투명도를 쓰는 창은 숨길 수 없어 펼치지 않는다
+                if self.trace is not None:
+                    self.trace.append("최소화된 창: 투명 처리할 수 없는 창이라 펼치지 않음")
+                return self
+            self.orig = WINDOWPLACEMENT.from_buffer_copy(wp)
+            self.ex = ex
+            user32.SetWindowLongW(self.hwnd, GWL_EXSTYLE, ex | self.WS_EX_LAYERED)
+            user32.SetLayeredWindowAttributes(self.hwnd, 0, 0, self.LWA_ALPHA)      # 완전히 투명
+            user32.ShowWindow(self.hwnd, 4)                    # SW_SHOWNOACTIVATE: 포커스를 가져가지 않는다
+            user32.SetWindowPos(self.hwnd, None, -28000, -28000, 0, 0, 0x0001 | 0x0004 | 0x0010)  # 화면 밖으로
+            time.sleep(0.6)                                   # 프로그램이 다시 그릴 시간
+            if self.trace is not None:
+                self.trace.append("최소화된 창: 투명하게 화면 밖에서 잠깐 펼쳐 읽음")
+        except Exception:
+            self.__exit__()
+        return self
+
+    def __exit__(self, *exc):
+        if self.orig is not None:
+            try:
+                self.orig.showCmd = 7                          # SW_SHOWMINNOACTIVE: 원래 위치 기록 그대로 최소화
+                user32.SetWindowPlacement(self.hwnd, ctypes.byref(self.orig))
+            except Exception:
+                pass
+            self.orig = None
+        if self.ex is not None:
+            try:
+                user32.SetWindowLongW(self.hwnd, GWL_EXSTYLE, self.ex)                 # 투명 처리를 되돌린다
+            except Exception:
+                pass
+            self.ex = None
+        return False
+
+
+def process_command_line(pid: int) -> list[str]:
+    """프로그램을 실행할 때 넘긴 인자 (한글·워드·메모장 등은 연 문서 경로가 여기에 있다)."""
+    if not IS_WIN or not pid:
+        return []
+    try:
+        ntdll = ctypes.WinDLL("ntdll")
+        h = kernel32.OpenProcess(0x1000, False, pid)       # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return []
+        try:
+            size = ctypes.c_ulong(0)
+            ntdll.NtQueryInformationProcess(wintypes.HANDLE(h), 60, None, 0, ctypes.byref(size))   # ProcessCommandLineInformation
+            if not size.value or size.value > 1 << 20:
+                return []
+            buf = ctypes.create_string_buffer(size.value)
+            if ntdll.NtQueryInformationProcess(wintypes.HANDLE(h), 60, buf, size, ctypes.byref(size)) != 0:
+                return []
+
+            class US(ctypes.Structure):
+                _fields_ = [("Length", ctypes.c_ushort), ("MaximumLength", ctypes.c_ushort), ("Buffer", ctypes.c_void_p)]
+            us = US.from_buffer(buf)
+            line = ctypes.wstring_at(us.Buffer, us.Length // 2) if us.Buffer and us.Length else ""
+        finally:
+            kernel32.CloseHandle(h)
+    except Exception:
+        return []
+    return split_command_line(line)
+
+
+def split_command_line(line: str) -> list[str]:
+    if not line:
+        return []
+    if IS_WIN:
+        try:
+            shell32 = ctypes.WinDLL("shell32")
+            shell32.CommandLineToArgvW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+            shell32.CommandLineToArgvW.restype = ctypes.POINTER(wintypes.LPWSTR)
+            n = ctypes.c_int(0)
+            argv = shell32.CommandLineToArgvW(line, ctypes.byref(n))
+            if argv:
+                try:
+                    return [argv[i] for i in range(n.value)]
+                finally:
+                    kernel32.LocalFree(argv)
+        except Exception:
+            pass
+    return [a or b for a, b in re.findall(r'"([^"]*)"|(\S+)', line)]
+
+
+def _stem_key(s: str) -> str:
+    return re.sub(r"[\s_\-.()\[\]·]", "", (s or "")).lower()
+
+
+def _title_mentions(title: str, path: str) -> bool:
+    """창 제목에 파일 이름(확장자 없이도)이 들어 있는지. 예: '공문 - Word', '공문.hwpx - 한글'."""
+    stem = _stem_key(Path(path).stem)
+    return len(stem) >= 2 and stem in _stem_key(title)
+
+
+def window_document(hwnd: int, title: str | None = None, trace: list | None = None,
+                    deep: bool = True) -> str:
+    """창에 열려 있는 문서 파일의 경로를 찾는다 ('' = 못 찾음).
+    ① 창 제목의 경로  ② 프로그램 실행 인자  ③ 최근 문서·다운로드 폴더에서 제목과 이름이 같은 파일."""
+    from . import attach
+    from .parsers import SUPPORTED
+    trace = trace if trace is not None else []
+    title = title if title is not None else _text(hwnd)
+    exts = SUPPORTED | DOC_EXT | {".hwx", ".gul"}
+
+    def ok(p: str) -> bool:
+        try:
+            return bool(p) and os.path.isfile(p) and Path(p).suffix.lower() in exts and os.path.getsize(p) > 0
+        except OSError:
+            return False
+
+    p = attach.path_from_title(title)
+    if ok(p):
+        trace.append(f"열린 문서: 창 제목의 경로 {p}")
+        return p
+    args = [a for a in process_command_line(_pid(hwnd))[1:] if ok(a.strip('"'))]
+    named = attach.name_from_title(title)
+    for a in args:
+        if (named and os.path.basename(a).lower() == named.lower()) or _title_mentions(title, a):
+            trace.append(f"열린 문서: 프로그램 실행 인자 {a}")
+            return a
+    # 제목이 비어 있으면(이름을 보여 주지 않는 프로그램) 연 문서가 하나뿐일 때 그것으로 본다.
+    # 제목이 있으면 다른 문서일 수 있어(한 프로그램에 여러 문서) 이름이 맞을 때만 쓴다.
+    if len(args) == 1 and (not title.strip() or title == UNTITLED):
+        trace.append(f"열린 문서: 프로그램 실행 인자(하나뿐) {args[0]}")
+        return args[0]
+    if not deep:
+        return ""
+    recent = [r for r in attach.recent_documents(hours=72) if ok(r)]
+    for r in recent:
+        if (named and os.path.basename(r).lower() == named.lower()) or _title_mentions(title, r):
+            trace.append(f"열린 문서: 최근 문서 {r}")
+            return r
+    if named:                                              # 다운로드·바탕화면·문서·임시 폴더에서 이름이 같은 파일
+        for f in attach.candidate_files(0, budget=5):
+            if f["name"].lower() == named.lower() and ok(f["path"]):
+                trace.append(f"열린 문서: 같은 이름의 파일 {f['path']}")
+                return f["path"]
+    trace.append(f"열린 문서 파일을 찾지 못함 (제목의 파일 이름: {named or '없음'}, 실행 인자 문서 {len(args)}개)")
+    return ""
+
+
+def read_document(path: str) -> str:
+    from .parsers import parse_file
+    try:
+        return (parse_file(path) or "").strip()
+    except Exception:
+        return ""
+
+
+# 스크롤: 창을 앞으로 가져오지 않고 메시지로 넘긴다 (스크롤 막대 → 마우스 휠 → PageDown 키 순서)
+WM_VSCROLL, WM_MOUSEWHEEL, WM_KEYDOWN, WM_KEYUP = 0x0115, 0x020A, 0x0100, 0x0101
+SB_PAGEDOWN, SB_TOP = 3, 6
+WS_VSCROLL = 0x00200000
+
+
+def _scroll_targets(hwnd: int) -> list[int]:
+    """스크롤을 받을 만한 창: 세로 스크롤 막대가 있는 하위 창(큰 것부터) → 가장 큰 하위 창 → 창 자신."""
+    scrollable, plain = [], []
+    for c in children(hwnd):
+        if not user32.IsWindowVisible(c):
+            continue
+        w, h = _size(c)
+        if w < 150 or h < 100:
+            continue
+        style = user32.GetWindowLongW(c, -16)
+        (scrollable if style & WS_VSCROLL else plain).append((w * h, c))
+    out = [c for _, c in sorted(scrollable, reverse=True)]
+    big = max(plain, default=(0, 0))[1]
+    out += [c for c in (big, hwnd) if c and c not in out]
+    return out
+
+
+def _scroll_once(target: int, how: str) -> None:
+    if how == "bar":
+        user32.PostMessageW(target, WM_VSCROLL, SB_PAGEDOWN, 0)
+    elif how == "wheel":
+        l, t, r, b = _rect(target)
+        delta = (-120 * 5) & 0xFFFF
+        user32.PostMessageW(target, WM_MOUSEWHEEL, delta << 16, _lparam((l + r) // 2, (t + b) // 2))
+    else:
+        user32.PostMessageW(target, WM_KEYDOWN, 0x22, 0x01510001)       # VK_NEXT(PageDown)
+        user32.PostMessageW(target, WM_KEYUP, 0x22, 0xC1510001)
+
+
+def _scroll_home(target: int, how: str, times: int) -> None:
+    if how == "bar":
+        user32.PostMessageW(target, WM_VSCROLL, SB_TOP, 0)
+    elif how == "wheel":
+        l, t, r, b = _rect(target)
+        for _ in range(times):
+            user32.PostMessageW(target, WM_MOUSEWHEEL, (120 * 5) << 16, _lparam((l + r) // 2, (t + b) // 2))
+    else:
+        for _ in range(times):
+            user32.PostMessageW(target, WM_KEYDOWN, 0x21, 0x01490001)   # VK_PRIOR(PageUp)
+            user32.PostMessageW(target, WM_KEYUP, 0x21, 0xC1490001)
+
+
+def _sample(w: int, h: int, data: bytes) -> bytes:
+    step = max(1, (w * h) // 40000) * 4                # 화소 약 4만 개만 추려 비교한다
+    return bytes(data[i] for i in range(0, len(data), step))
+
+
+def _ink(sample: bytes) -> int:
+    """배경(가장 흔한 값)과 다른 화소 수 = 그려진 글자·그림의 양."""
+    if not sample:
+        return 0
+    from collections import Counter
+    bg = Counter(sample).most_common(1)[0][0]
+    return sum(1 for v in sample if abs(v - bg) > 40)
+
+
+def _shot(hwnd: int, path: Path, tries: int = 4) -> bytes:
+    """창 안쪽을 그려 저장하고, 비교용으로 화소 일부를 추린 값을 돌려준다 (b"" = 실패).
+
+    화면 밖·뒤에 있는 창은 다시 그리는 도중의 그림(아래쪽 줄이 빠진 그림)이 찍히기도 해서,
+    여러 장을 찍어 그려진 양이 가장 많은 그림을 쓴다 (덜 그려진 그림은 언제나 글자가 더 적다)."""
+    best = None
+    for i in range(max(1, tries)):
+        grab = _grab(hwnd, True)
+        if grab:
+            sm = _sample(*grab)
+            ink = _ink(sm)
+            if best is None or ink > best[0]:
+                best = (ink, grab, sm)
+        if i + 1 < tries:
+            time.sleep(0.12)
+    if not best:
+        return b""
+    _ink_, (w, h, data), sm = best
+    try:
+        _png(path, w, h, data)
+    except OSError:
+        return b""
+    return sm
+
+
+def _same_picture(a: bytes, b: bytes, tolerance: float = 0.004) -> bool:
+    """거의 같은 그림인지. 글자 가장자리 번짐·커서 깜빡임 정도의 차이는 같은 화면으로 본다."""
+    if not a or not b or len(a) != len(b):
+        return False
+    diff = sum(1 for x, y in zip(a, b) if abs(x - y) > 24)
+    return diff <= len(a) * tolerance
+
+
+def merge_pages(acc: list[str], new: list[str]) -> list[str]:
+    """앞 화면의 끝과 겹치는 줄을 빼고 이어 붙인다 (글자 인식이 조금 달라도 같은 줄로 본다)."""
+    from difflib import SequenceMatcher
+    a = [_stem_key(x) for x in acc]
+    b = [_stem_key(x) for x in new]
+
+    def same(x: str, y: str) -> bool:
+        return x == y or (len(x) > 3 and SequenceMatcher(None, x, y).ratio() >= 0.8)
+
+    for k in range(min(len(a), len(b)), 0, -1):
+        if all(same(a[len(a) - k + i], b[i]) for i in range(k)):
+            return acc + new[k:]
+    tail = a[-12:]                                   # 겹치는 부분 중간에 인식 오류가 있는 경우
+    for j in range(len(b) - 1, -1, -1):
+        if any(same(b[j], t) for t in tail):
+            return acc + new[j + 1:]
+    return acc + new
+
+
+def scroll_ocr_body(hwnd: int, log: Callable[[str], None] = lambda m: None, trace: list | None = None,
+                    max_pages: int = 12, budget: float = 120) -> str:
+    """화면에 다 안 보이는 긴 본문: 글자 인식 → 한 화면 넘기기를 반복해 끝까지 읽고, 맨 위로 되돌린다."""
+    import tempfile
+    trace = trace if trace is not None else []
+    tmp = Path(tempfile.gettempdir())
+    img = tmp / "seomu_scroll.png"
+
+    def settled(limit: float = 2.5) -> str:
+        """프로그램이 다 그릴 때까지(연속 두 번 같은 그림) 기다렸다가 찍는다."""
+        last, stop = _shot(hwnd, img), time.time() + limit
+        while last and time.time() < stop:
+            time.sleep(0.3)
+            now = _shot(hwnd, img)
+            if _same_picture(now, last):
+                return now
+            last = now
+        return last
+
+    first = settled()
+    if not first:
+        trace.append("화면 넘김 글자 인식: 창을 그리지 못함")
+        return ""
+    lines = [l for l in ocr_body(hwnd, img).split("\n") if l.strip()]
+    seen, pages, end = [first], 1, time.time() + budget
+    way, target, moved_total = "", 0, 0
+    while pages < max_pages and time.time() < end:
+        moved = b""
+        for tg in ([target] if target else _scroll_targets(hwnd)):
+            for how in ([way] if way else ("bar", "wheel", "key")):
+                _scroll_once(tg, how)
+                time.sleep(0.45)
+                digest = settled()
+                if digest and not any(_same_picture(digest, x) for x in seen):
+                    moved, target, way = digest, tg, how
+                    break
+            if moved:
+                break
+        if not moved:
+            break
+        seen.append(moved)
+        moved_total += 1
+        merged = merge_pages(lines, [l for l in ocr_body(hwnd, img).split("\n") if l.strip()])
+        if len(merged) == len(lines):            # 그림만 바뀌고 새 줄이 없다 (깜빡임·애니메이션) → 끝
+            break
+        lines = merged
+        pages += 1
+        log(f"화면을 넘겨 가며 글자를 읽는 중… ({pages}쪽)")
+    if moved_total:
+        _scroll_home(target, way, moved_total + 1)
+    trace.append(f"화면 넘김 글자 인식: {pages}화면 ({'넘김 방법 ' + way if way else '넘길 내용 없음'}), {len(lines)}줄")
+    return "\n".join(lines).strip()
 
 
 # ---------------------------------------------------------------- 버튼 누르기 (여러 방법 순서대로)
@@ -853,49 +1304,91 @@ def _largest_child(hwnd: int) -> int:
     return best
 
 
+def _prose_lines(text: str) -> int:
+    """문장처럼 긴 줄 수 (메뉴·탭 이름 같은 짧은 조각과 본문을 가른다)."""
+    return sum(1 for l in (text or "").split("\n") if len(l.strip()) >= 15)
+
+
 def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
-                 trace: list | None = None) -> tuple[str, str]:
-    """(본문, 사용한 방법). trace에 단계별 기록을 남긴다."""
+                 trace: list | None = None, found: dict | None = None) -> tuple[str, str]:
+    """(본문, 사용한 방법). trace에 단계별 기록을 남긴다.
+
+    뷰어(본문복사 버튼이 있는 창)가 아니어도 끝까지 시도한다:
+    본문복사 → 화면 글자 정보 → 편집 칸 → 창에 열린 문서 파일 → 화면 넘김 글자 인식 → (허용 시) 전체 선택·복사.
+    어느 방법도 충분하지 않으면 그중 가장 긴 결과라도 돌려준다 (빈손으로 끝내지 않는다).
+    found["document"]에는 창에 열려 있던 문서 파일 경로를 넣어 준다 (찾았을 때)."""
     trace = trace if trace is not None else []
+    found = found if found is not None else {}
     if not IS_WIN:
         return "", ""
     previous = get_clipboard()
     marker = f"__seomu_{time.time()}__"
+    partial: list[tuple[str, str]] = []           # 기준에 못 미친 결과 (마지막에 가장 나은 것을 쓴다)
 
     def fresh() -> str:
         t = get_clipboard()
         return t if t and t != marker and len(t.strip()) > 20 else ""
 
+    def keep(t: str, how: str) -> None:
+        if t and t.strip():
+            partial.append((t.strip(), how))
+
+    def from_document(deep: bool) -> tuple[str, str]:
+        path = found.get("document") or window_document(hwnd, trace=trace, deep=deep)
+        if not path:
+            return "", ""
+        found["document"] = path
+        t = read_document(path)
+        trace.append(f"열린 문서 파일 글자: {len(t)}자 ({Path(path).name})")
+        return t, f"창에 열린 문서 파일 읽기 ({Path(path).name})"
+
     try:
         # 창을 앞으로 가져오지 않는 방법부터 (사용자가 보던 화면을 가로채지 않는다)
         # ① 본문복사 버튼 (도구모음·버튼 메시지, UI Automation 호출 — 모두 창이 뒤에 있어도 동작)
-        log("뷰어의 '본문복사' 버튼을 누르는 중…")
+        log("'본문복사' 버튼을 찾는 중…")
         set_clipboard(marker)
         how = click_any(hwnd, BODY_COPY_NAMES, check=lambda: bool(fresh()), log=log, trace=trace)
         if how:
             return fresh(), f"본문복사 ({how})"
-        # ② UI Automation 글자 읽기
+        trace.append("본문복사 버튼 없음 → 뷰어가 아닌 일반 프로그램 창으로 보고 다른 방법을 이어서 시도")
+        # ② 창 제목·실행 인자에 문서 경로가 있으면 그 파일이 가장 정확하다 (한글·워드·메모장·PDF 프로그램 등)
+        t, how = from_document(deep=False)
+        if len(t) > 80:
+            return t, how
+        keep(t, how)
+        # ③ UI Automation 글자 읽기
         if uia_available():
             log("화면의 글자 정보를 읽는 중…")
-            t = uia_text(hwnd)
-            trace.append(f"UI Automation 글자: {len(t)}자")
-            if len(t) > 80:
+            t, kind = uia_text_ex(hwnd)
+            trace.append(f"UI Automation 글자: {len(t)}자 ({'문서 영역' if kind == 'doc' else '글자 조각'})")
+            # 글자 조각만 있을 때는 메뉴·탭 이름일 수 있어 문장 같은 줄이 여럿일 때만 본문으로 본다
+            if len(t) > 80 and (kind == "doc" or _prose_lines(t) >= 3):
                 return t, "화면 글자 정보"
-        # ③ 표준 편집 칸(Edit·RichEdit)의 글자를 메시지로 읽기
+            keep(t, "화면 글자 정보 (일부)")
+        # ④ 표준 편집 칸(Edit·RichEdit)의 글자를 메시지로 읽기
         t = edit_text(hwnd)
         trace.append(f"편집 칸 글자: {len(t)}자")
         if len(t) > 80:
             return t, "편집 칸 글자"
-        # ④ 창 화면을 그려 받아(PrintWindow, 가려져 있어도 됨) 글자 인식
+        keep(t, "편집 칸 글자 (일부)")
+        # ⑤ 최근 문서·다운로드 폴더에서 창 제목과 같은 이름의 문서 파일 찾기
+        if not found.get("document"):
+            log("창에 열린 문서 파일을 PC에서 찾는 중…")
+            t, how = from_document(deep=True)
+            if len(t) > 80:
+                return t, how
+            keep(t, how)
+        # ⑥ 창 화면을 그려 받아(PrintWindow, 가려져 있어도 됨) 글자 인식 — 화면을 넘겨 가며 끝까지
         log("화면 글자 인식(OCR)으로 본문을 읽는 중…")
-        t = ocr_body(hwnd)
+        t = scroll_ocr_body(hwnd, log, trace)
         trace.append(f"OCR 본문: {len(t)}자")
         if len(t) > 80:
-            return t, "화면 글자 인식(OCR) — 보이는 부분만"
-        # ⑤ 최후 수단: 창을 앞으로 가져와 전체 선택·복사 (설정에서 허용했을 때만)
+            return t, "화면 글자 인식(OCR)"
+        keep(t, "화면 글자 인식(OCR) (일부)")
+        # ⑦ 최후 수단: 창을 앞으로 가져와 전체 선택·복사 (설정에서 허용했을 때만)
         if not foreground_allowed():
             trace.append("전체 선택·복사 생략: 창을 앞으로 가져오지 않는 설정")
-            return "", ""
+            return _best(partial, trace)
         log("문서를 전체 선택·복사하는 중…")
         set_clipboard(marker)
         trace.append(f"창 맨 앞으로: {activate(hwnd)}")
@@ -910,10 +1403,20 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
         if _wait(lambda: bool(fresh()), 2.5):
             return fresh(), "전체 선택·복사"
         trace.append(f"전체 선택·복사 실패 (문서 영역 클래스: {_class(doc)})")
-        return "", ""
+        return _best(partial, trace)
     finally:
         if previous:
             set_clipboard(previous)
+
+
+def _best(partial: list[tuple[str, str]], trace: list) -> tuple[str, str]:
+    """충분한 결과가 없을 때: 문장 같은 줄이 많은 것 → 긴 것 순으로 가장 나은 부분 결과."""
+    if not partial:
+        trace.append("본문을 읽을 수 있는 방법이 없음")
+        return "", ""
+    t, how = max(partial, key=lambda p: (_prose_lines(p[0]), len(p[0])))
+    trace.append(f"충분한 본문을 얻지 못해 가장 나은 부분 결과를 씀: {how} ({len(t)}자)")
+    return t, how
 
 
 def edit_text(hwnd: int) -> str:

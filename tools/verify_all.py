@@ -229,9 +229,18 @@ class ScreenWatch:
             self.u.GetWindowRect(w["hwnd"], self.ctypes.byref(r))
             vis_w = min(r.right, self.x0 + self.w) - max(r.left, self.x0)
             vis_h = min(r.bottom, self.y0 + self.h) - max(r.top, self.y0)
-            if vis_w > 80 and vis_h > 80 and not self.u.IsIconic(w["hwnd"]):
+            if vis_w > 80 and vis_h > 80 and not self.u.IsIconic(w["hwnd"]) and not self.transparent(w["hwnd"]):
                 out[w["hwnd"]] = w["title"]
         return out
+
+    def transparent(self, hwnd: int) -> bool:
+        """완전히 투명한 창(투명도 0)은 화면에 있어도 사용자에게 보이지 않는다."""
+        ct = self.ctypes
+        if not self.u.GetWindowLongW(hwnd, -20) & 0x00080000:            # WS_EX_LAYERED
+            return False
+        alpha, flags = ct.c_ubyte(255), ct.c_uint(0)
+        ok = self.u.GetLayeredWindowAttributes(ct.c_void_p(hwnd), None, ct.byref(alpha), ct.byref(flags))
+        return bool(ok and flags.value & 0x2 and alpha.value == 0)
 
     def run(self, fn):
         fg0 = int(self.u.GetForegroundWindow() or 0)
@@ -508,6 +517,34 @@ def main() -> int:
              "expect": {**N1}},
         ]
 
+        # 뷰어가 아닌 일반 프로그램 창: 본문복사·PC저장 버튼도, 붙임목록도 없다
+        docs = dv / "docs"
+        docs.mkdir(parents=True)
+        make_hwpx(docs / "청렴교육 이수 협조.hwpx", N4)
+
+        def program(mode, n, title):
+            def run():
+                proc, hwnd = desktop.launch(mode, title, text_of(n), [], dv, dv / "save")
+                try:
+                    return job("capture_window", hwnd, "", False, 20)
+                finally:
+                    desktop.close(proc)
+            return run
+        cases += [
+            {"path": W, "fmt": "뷰어 아님 · 그림으로만 그린 긴 업무 화면 (화면 넘김 글자 인식)",
+             "run": program("generic", N1, N1["title"] + " - 업무관리"),
+             "expect": {"dates": N1["dates"], "phrases": ["결산 일정 안내문"]}, "ocr": True},
+            {"path": W, "fmt": "뷰어 아님 · 제목에 문서 경로만 있는 편집기 (열린 문서 파일 읽기)",
+             "run": program("docfile", N4, f"청렴교육 이수 협조.hwpx [{docs}\\] - 문서 편집기"),
+             "expect": {**N4}},
+            {"path": W, "fmt": "뷰어 아님 · 크기 없는 껍데기 창 + 딸린 주 창 (옛 델파이 구조)",
+             "run": program("owned", N2, N2["title"] + " - 업무 프로그램"),
+             "expect": {**N2}},
+            {"path": W, "fmt": "뷰어 아님 · 최소화된 그림 화면 프로그램 (화면 밖에서 펼쳐 읽기)",
+             "run": program("minimized", N3, N3["title"] + " - 메신저"),
+             "expect": {"dates": N3["dates"]}, "ocr": True},
+        ]
+
     watch = ScreenWatch()
     results = []
     for c in cases:
@@ -558,7 +595,7 @@ def write_report(results, path: Path) -> None:
     lines = ["# 서무비서 AI 종합 검증 결과", "",
              f"- 검증일: {TODAY.isoformat()} · 실행: `python tools/verify_all.py`",
              f"- 결과: **{passed} / {len(results)} 통과** · 화면을 가로챈 경우: **{grabbed}건**",
-             "- 예시·모의 환경: `sample_data/verify/`, `sample_data/formats/`, `tools/mock_env/` (웹 공문 시스템 9종, 데스크톱 뷰어 3종)", "",
+             "- 예시·모의 환경: `sample_data/verify/`, `sample_data/formats/`, `tools/mock_env/` (웹 공문 시스템 9종, 데스크톱 뷰어 3종, 뷰어가 아닌 데스크톱 프로그램 4종)", "",
              "| # | 수집 경로 | 환경·형식 | 결과 | 제목 | 기한 · 할 일 | 요약(첫 줄) | 붙임 |", "|---|---|---|---|---|---|---|---|"]
     cell = lambda x: str(x).replace("|", "\\|").replace("\n", " ")  # noqa: E731
     for i, (c, n, err, probs, sec, screen) in enumerate(results, 1):

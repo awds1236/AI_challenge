@@ -622,26 +622,46 @@ class Api:
         if not winwindow.available():
             raise RuntimeError("열린 창 수집은 Windows에서만 사용할 수 있습니다.")
         root = self._cfg.settings.resolved_download_root()
-        win = next((w for w in winwindow.list_windows() if w["hwnd"] == int(hwnd)), None)
+        picked = int(hwnd)
+        real = winwindow.resolve_window(picked)     # 크기 없는 껍데기 창(작업 표시줄 단추용)을 고르면 내용 창으로
+        win = (next((w for w in winwindow.list_windows() if w["hwnd"] == real), None)
+               or winwindow.window_info(real))     # 목록 기준에 안 맞는 창이라도 살아 있으면 수집한다
         if not win:
             raise ValueError("선택한 창을 찾을 수 없습니다. 창 목록을 새로고침하세요.")
+        if real != picked:
+            win = dict(win, title=win["title"] if win["title"] != winwindow.UNTITLED else
+                       ((winwindow.window_info(picked) or {}).get("title") or win["title"]))
 
         winwindow.set_foreground_allowed(self._cfg.settings.capture_foreground)
 
         def work(job: Job):
             say = lambda m: setattr(job, "message", m)  # noqa: E731
-            trace: list[str] = [f"창을 앞으로 가져오는 방법 허용: {winwindow.foreground_allowed()}"]
+            trace: list[str] = [f"창을 앞으로 가져오는 방법 허용: {winwindow.foreground_allowed()}",
+                                f"창: {win['title']} / 프로그램 {win['process']} / 클래스 {win['cls']}"
+                                + (f" (고른 창 {picked} → 내용 창 {real})" if real != picked else "")]
             hwnd_ = win["hwnd"]
             started = time.time()
-            text, how = winwindow.extract_text(hwnd_, say, trace)
+            found: dict = {}
+            with winwindow.capturable(hwnd_, trace):            # 최소화된 창도 화면 밖에서 펼쳐 읽는다
+                text, how = winwindow.extract_text(hwnd_, say, trace, found)
+                shot = winwindow.capture_png(hwnd_)
             text = (text or "").replace("\r\n", "\n").replace("\r", "\n")   # 프로그램마다 줄 구분이 다르다
             win_title = clean_title(win["title"])
             # 폴더 이름: 직접 입력 > 본문의 '제목' 줄 > 창 제목
             m = re.search(r"^[ \t]*(?:제\s*목|건\s*명)[ \t]*[:：]?[ \t]*(\S.{2,120})$", text or "", re.M)
             name = title.strip() or (m.group(1).strip() if m else "") or win_title
+            if name == winwindow.UNTITLED and found.get("document"):
+                name = Path(found["document"]).stem
             folder = make_notice_folder(root, name)
             dest = folder / "붙임"
-            winwindow.save_window_image(hwnd_, folder / "본문_화면.png")
+            if shot:
+                (folder / "본문_화면.png").write_bytes(shot)
+            if found.get("document"):                       # 창에 열려 있던 문서 원본도 공문 폴더에 남긴다
+                try:
+                    shutil.copy2(found["document"], unique_path(folder / ("원문_" + safe_name(Path(found["document"]).name, 150))))
+                    trace.append(f"창에 열린 문서 원본 보관: {found['document']}")
+                except OSError as e:
+                    trace.append(f"문서 원본 보관 실패: {e}")
 
             # ---- 붙임: 본문의 '붙임/첨부' 목록으로 모아야 할 파일을 먼저 알아낸다
             expected = attach.expected_attachments(text)
@@ -759,11 +779,11 @@ class Api:
                 if not expected and text and time.time() - quiet_since > 15:
                     break                                  # 붙임 표기가 없는 공문
                 left = missing()
-                hint = (f"붙임 {len(got)}/{len(expected)}개를 모았습니다. 남은 붙임은 뷰어에서 저장하면 자동으로 모읍니다."
+                hint = (f"붙임 {len(got)}/{len(expected)}개를 모았습니다. 남은 붙임은 그 창에서 저장하면 자동으로 모읍니다."
                         if expected else "새로 저장되는 붙임파일을 기다리는 중…")
                 hint += f" (최대 {max(0, int(deadline - time.time()))}초 더 기다림 · [붙임 수집 완료]를 누르면 바로 정리)"
                 if not text:
-                    hint += " 본문을 읽지 못했습니다. 뷰어의 [본문복사]를 눌러 주세요."
+                    hint += " 본문을 읽지 못했습니다. 그 창에서 본문을 복사(Ctrl+A, Ctrl+C 또는 [본문복사])하면 바로 받습니다."
                 job.message = hint
                 job.text = json.dumps({
                     "phase": "watch", "has_text": bool(text), "how": how, "folder": str(folder),
@@ -779,7 +799,7 @@ class Api:
             files = list(got.values()) + extras
             for e in missing():
                 files.append({"name": e, "path": "", "ok": False,
-                              "error": "자동으로 찾지 못함 — 뷰어에서 저장해 공문 폴더의 '붙임'에 넣으면 다음에 열 때 자동으로 반영됩니다"})
+                              "error": "자동으로 찾지 못함 — 그 창에서 저장해 공문 폴더의 '붙임'에 넣으면 다음에 열 때 자동으로 반영됩니다"})
             cap = Captured(name, body, "", f"창: {win['title']}", folder, files, str(folder / "본문_화면.png"))
             result = self._finish_capture(job, cap, use_ai)
             result["capture_method"] = how
