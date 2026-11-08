@@ -684,8 +684,11 @@ async function loadModels() {
   const builtin = eng.kind === "builtin";
   // 내장 엔진을 쓰거나 Ollama가 꺼져 있으면: [받기]로 엔진+모델 파일을 자동으로 받는다
   const dlMode = builtin || !c.engine_ok;
+  const hasBuiltin = !!eng.server && (eng.models || []).length > 0;
   const notice = !c.engine_ok && !builtin
-    ? `<div class="engine-notice">Ollama가 실행 중이 아닙니다. 쓰실 모델의 <b>[받기]</b>를 누르면 Ollama 없이 동작하는 내장 엔진과 모델을 자동으로 받습니다.</div>` : "";
+    ? (hasBuiltin
+      ? `<div class="engine-notice">Ollama가 실행 중이 아닙니다. 이 PC에는 내장 엔진과 모델이 이미 있으니 위에서 <b>[자동]</b> 또는 <b>[내장 엔진]</b>을 고르면 바로 쓸 수 있습니다.</div>`
+      : `<div class="engine-notice">Ollama가 실행 중이 아닙니다. 쓰실 모델의 <b>[받기]</b>를 누르면 Ollama 없이 동작하는 내장 엔진과 모델을 자동으로 받습니다.</div>`) : "";
   state.catalog = c.models;
   $("#model-grid").innerHTML = notice + c.models.map((m) => {
     const installed = dlMode ? (builtin && m.installed) : m.installed;
@@ -933,9 +936,13 @@ function bind() {
   $("#mc-polish").addEventListener("click", async () => {
     const body = $("#mc-body").value;
     if (!body.trim()) return toast("먼저 메일 초안을 만들어 주세요", "info");
-    const btn = $("#mc-polish"); btn.disabled = true;
+    // 다듬는 동안에는 쓰는 중인 글이 보이므로, 덜 된 글을 저장·복사·전송하지 못하게 잠근다
+    const lock = ["#mc-polish", "#mc-save", "#mc-copy", "#mc-mailto", "#mc-make"].map((s) => $(s)).filter(Boolean);
+    lock.forEach((b) => { b.disabled = true; });
+    $("#mc-body").readOnly = true;
     try { const r = await runJob("polish_mail", [body], (st) => { if (st.text) $("#mc-body").value = st.text; }); $("#mc-body").value = r.body; toast("AI가 문장을 다듬었습니다. 내용을 확인해 주세요.", "ok"); }
-    catch (e) { $("#mc-body").value = body; toast(e.message, "err"); } finally { btn.disabled = false; }
+    catch (e) { $("#mc-body").value = body; toast(e.message, "err"); }
+    finally { lock.forEach((b) => { b.disabled = false; }); $("#mc-body").readOnly = false; }
   });
   $("#tpl-list").addEventListener("click", (e) => { const li = e.target.closest("[data-tpl]"); if (li) { state.tplSel = Number(li.dataset.tpl); renderTplList(); } });
   $("#tpl-new").addEventListener("click", () => { state.tplSel = null; renderTplList(); $("#tpl-name").focus(); });
@@ -963,7 +970,11 @@ function bind() {
   $("#lib-pick-files").addEventListener("click", async () => importLibFiles(await pickFiles(true)));
 
   // 설정
-  segmented($("#set-theme"), applyTheme);
+  // 테마는 누르면 바로 바뀌어 보이므로 바로 저장한다 (저장 버튼을 안 누르고 나가면 다음 실행 때 되돌아가던 문제)
+  segmented($("#set-theme"), async (t) => {
+    applyTheme(t);
+    try { state.settings = await api("save_settings", { theme: t }); } catch (e) { toast(e.message, "err"); }
+  });
   $("#set-save").addEventListener("click", saveSettings);
   $("#set-ai-check").addEventListener("click", () => { refreshAI(); loadModels(); });
   $("#model-grid").addEventListener("click", async (e) => {

@@ -534,3 +534,19 @@ def test_api_collect_eml_unpacks_attachments(api):
     names = [f["name"] for f in n["attachments"]]
     assert "참고자료/붙임1_수요조사표 작성 요령.txt" in names
     assert n["analysis"]["submissions"][0]["item"] == "2027 교육훈련 수요조사표"
+
+
+def test_checked_download_fixes_wrong_extension_and_rejects_web_pages(tmp_path):
+    """링크 글자는 '신청서.hwp'인데 내용은 글자 파일 → .txt로 바로잡고, 파일 대신 웹 페이지(로그인 화면)는 받지 못함으로."""
+    from seomu.collector import checked_download
+    a = tmp_path / "참가신청서.hwp"
+    a.write_text("참가 신청서\n부서명:\n성명:", encoding="utf-8")
+    r = checked_download(a, "참가신청서.hwp")
+    assert r["ok"] and r["name"] == "참가신청서.txt" and not a.exists()
+    b = tmp_path / "안내문.hwp"
+    b.write_bytes(b"<!DOCTYPE html><html><body>\xeb\xa1\x9c\xea\xb7\xb8\xec\x9d\xb8</body></html>")
+    r = checked_download(b, "안내문.hwp")
+    assert not r["ok"] and "웹 페이지" in r["error"] and not b.exists()
+    c = tmp_path / "진짜.pdf"
+    c.write_bytes(b"%PDF-1.4\n%")
+    assert checked_download(c)["name"] == "진짜.pdf"

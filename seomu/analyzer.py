@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .deadlines import best_deadlines, find_contacts, find_methods, find_submissions
 from .llm import LLMError, OllamaClient, extract_json
-from .notice_text import clean_body, clean_what, extract_fields, item_names, rule_summary, _get
+from .notice_text import clean_body, clean_what, extract_fields, item_names, object_phrase, rule_summary, _get
 from .parsers import READABLE_EXT, ParseError, parse_file
 
 SCHEMA = {
@@ -173,6 +173,7 @@ def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | N
         mark = f" ({word} 서식)" if re.search(r"(붙\s*임|첨\s*부|별\s*첨|서식|양식)", piece) else ""
         subs.append({"item": name + mark, "how": method if i == 0 else "", "to": to if i == 0 else ""})
     cores = {_core(s["item"]) for s in subs}
+    late: list[str] = []
     for s in find_submissions(clean):
         core = _core(s)
         if not core or re.search(r"[:：]", s):
@@ -191,10 +192,20 @@ def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | N
             if not _FORM_WORDS.search(name) or (_REFERENCE_WORDS.search(name) and not re.search(r"(서식|양식)", name)):
                 continue
             s = re.sub(r"\s*(서식|양식)$", "", name) + " (붙임 서식)"
-        elif len(s) > 40:                       # 긴 문장은 제출물 이름이 아니다
+        elif len(s) > 40 or re.search(r"(바랍니다|주시기|요청|부탁|드립니다|합니다|십시오|하여|바람)", s):
+            # 요청 문장은 그대로 제출물 이름이 아니다 → '무엇을 제출'의 '무엇'만 ('부서별 폐기 물품 목록').
+            # 붙임 목록·서류 항목을 다 본 뒤에 겹치지 않을 때만 더한다 (붙임의 정식 이름·서식 표시를 살린다)
+            obj = object_phrase(s)
+            if obj and re.search(r"(서|목록|명단|계획|결과|현황|자료|양식|서식|사본|증빙|파일|표)$", obj):
+                late.append(obj)
             continue
         cores.add(core)
         subs.append({"item": s, "how": method if not subs else "", "to": ""})
+    for obj in late:
+        core = _core(obj)
+        if core and not any(core in c or c in core for c in cores if c):
+            cores.add(core)
+            subs.append({"item": obj, "how": method if not subs else "", "to": ""})
     actions = [f"{d['what']} ({int(d['date'][5:7])}/{int(d['date'][8:10])}까지)" for d in deadlines][:5]
     if method:
         actions.append(method if re.search(r"(제출|회신|신청|접수|등록)\s*$", method) else f"제출 방법: {method}")

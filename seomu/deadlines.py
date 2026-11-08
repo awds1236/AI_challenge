@@ -168,7 +168,9 @@ def find_submissions(text: str) -> list[str]:
                 continue
             in_attach = False
         if any(w in l for w in ("제출", "회신", "송부")) and re.search(
-                r"(서|목록|명단|계획|결과|현황|자료|양식|서식|사본|증빙|파일|표)\b", l):
+                # 한글은 조사가 바로 붙어('목록을') 단어 경계(\b)가 생기지 않는다 → 뒤에 조사·끝이 오는지로 본다
+                r"(서|목록|명단|계획|결과|현황|자료|양식|서식|사본|증빙|파일|표)"
+                r"(?=$|[\s,.)(]|을|를|과|와|및|은|는|이|가|도)", l):
             items.append(re.sub(r"^[\s□○◦•\-·※\d.)]+", "", l)[:160])
     uniq, seen = [], set()
     for it in items:

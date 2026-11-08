@@ -172,6 +172,10 @@ class Api:
             st["embed_model"] = c.pick_embed_model(s.embed_model)
         st["local_only"] = not s.allow_remote_llm or self._engine_kind() == "builtin"
         st["engine"] = self._engine_kind()
+        if not st["ok"] and st["engine"] == "ollama" and self._engine.available():
+            # Ollama를 골랐는데 꺼져 있다: 이 PC에는 내장 엔진·모델이 있으니 받을 필요 없이 바꾸기만 하면 된다
+            st["error"] = ("Ollama가 실행 중이 아닙니다. 이 PC에는 내장 AI 엔진과 모델이 이미 있으니, 설정 → AI 엔진을 "
+                           "[자동] 또는 [내장 엔진]으로 바꾸면 바로 쓸 수 있습니다 (Ollama를 쓰시려면 Ollama를 실행해 주세요).")
         return st
 
     # ------------------------------------------------------------ 모델 관리
@@ -510,6 +514,12 @@ class Api:
             save_body(cap.folder, cap.title, tidy, "", cap.url)
         cap.title = clean_title(cap.title)
         cap.files = expand_archives(cap.files)          # zip 붙임은 풀어서 함께 읽는다
+        if not cap.files:
+            # 붙여넣기·주소 수집 등으로 파일이 따라오지 않았어도, 본문에 적힌 붙임은 '받지 못함'으로 알려 준다
+            # (나중에 공문 폴더의 '붙임'에 넣으면 이름을 맞춰 자동으로 연결된다)
+            cap.files = [{"name": e, "path": "", "ok": False,
+                          "error": "본문에 적힌 붙임입니다 — 파일을 공문 폴더의 '붙임'에 넣으면 자동으로 연결됩니다"}
+                         for e in attach.expected_attachments(cap.text)]
         analysis = analyze(cap.title, cap.text, cap.files, None)
         analysis["ai_status"] = "running" if use_ai else "off"
         folder = cap.folder
@@ -926,8 +936,10 @@ class Api:
         attachments = []
         if notice:
             folder = Path(notice["folder"])
+            # 앱이 만든 내부 파일(요약·수집 기록·메일 초안·화면 캡처)은 받는 사람에게 보낼 파일이 아니다
             attachments = [str(p) for p in sorted(folder.rglob("*")) if p.is_file()
-                           and p.name not in ("본문.html", "본문_화면.png")]
+                           and p.name not in ("본문.html", "본문_화면.png", "요약.md", "수집기록.txt")
+                           and not p.name.startswith(("메일초안", "~$", "."))]
         return {"subject": subject, "body": body, "missing": list(dict.fromkeys(m1 + m2)),
                 "attachments": attachments}
 

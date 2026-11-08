@@ -157,6 +157,9 @@ def render(template: str, variables: dict[str, str]) -> tuple[str, list[str]]:
     """양식의 {{변수}}를 채운다. 값이 없는 변수는 [변수] 표시로 남기고 목록으로 반환.
     변수 바로 뒤의 조사는 채운 값의 받침에 맞춘다 (「…안내」와 / 「…요청」과)."""
     missing: list[str] = []
+    # 중괄호를 한 겹만 쓴 변수({내이름})도 변수로 본다 — 직접 양식을 쓰다 흔히 틀리는 부분.
+    # 모르는 이름({담당자})은 다른 빈칸처럼 [담당자]로 표시하고 '채우지 못한 변수'로 알려 준다
+    template = re.sub(r"(?<!\{)\{\s*([가-힣][가-힣_0-9]{0,19})\s*\}(?!\})", r"{{\1}}", template or "")
 
     def rep(m):
         key = m.group(1)
@@ -185,18 +188,27 @@ POLISH_PROMPT = """다음은 공공기관 직원이 보낼 업무 메일 초안�
 def clean_polished(out: str, draft: str) -> str:
     """AI가 다듬은 메일에서 본문이 아닌 것을 걷어낸다.
     작은 모델은 '본문만'이라고 해도 '제목: …', '수신: [관련 부서]' 같은 머리줄이나 초안에 없던 [빈칸]을 지어 붙인다."""
-    lines = (out or "").replace("```", "").strip().splitlines()
+    text = (out or "").replace("```", "")
+    # 메일은 서식 없는 글이다: 모델이 붙이는 마크다운 굵게·제목 기호를 지운다 (**■ 주요 내용** → ■ 주요 내용)
+    text = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: m.group(1) or m.group(2), text)
+    text = re.sub(r"(?m)^[ \t]*#{1,6}[ \t]+", "", text).replace("**", "")
+    plain = text.strip()
+    lines = plain.splitlines()
     while lines and (not lines[0].strip() or re.match(r"^\s*(제목|수신|발신|참조|받는\s*사람|보내는\s*사람|Subject|To)\s*[:：]",
                                                       lines[0], re.I)):
         lines.pop(0)
+    # 초안의 빈칸: [x], 그리고 채우지 못한 변수 {x}·{{x}} (다듬으면 [x]로 바뀌곤 한다)
+    known = set(re.findall(r"\[([^\]]{1,30})\]", draft)) | set(re.findall(r"\{\{?\s*([^{}\s]{1,30})\s*\}?\}", draft))
     keep = []
     for l in lines:
-        new_slots = [x for x in re.findall(r"\[[^\]]{1,30}\]", l) if x not in draft]
+        new_slots = [x for x in re.findall(r"\[([^\]]{1,30})\]", l) if x not in known]
         if new_slots and len(re.sub(r"\[[^\]]*\]|\s", "", l)) < 8:      # 지어낸 빈칸만 있는 줄
             continue
+        for x in new_slots:                                               # 문장 속에 지어 넣은 빈칸(+조사)은 지운다
+            l = re.sub(r"[ \t]*\[" + re.escape(x) + r"\](?:을|를|이|가|은|는|과|와|및|의|,)?[ \t]*", " ", l).strip()
         keep.append(l)
     text = "\n".join(keep).strip()
-    return text if len(text) >= len(draft) * 0.4 else (out or "").strip()
+    return text if len(text) >= len(draft) * 0.4 else plain
 
 
 def ics_escape(s: str) -> str:

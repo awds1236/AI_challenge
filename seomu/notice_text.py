@@ -216,6 +216,7 @@ def _strip_due(s: str) -> str:
 
 def _nounize(s: str) -> str:
     """'행사를 개최' → '행사 개최', '인원을 회신하여 주시기 바랍니다' → '인원 회신 요청'."""
+    s = re.sub(r"\s*끝\s*\.?\s*$", "", s)
     s = re.sub(r"\s*(다음과|아래와)\s*같이\s*", " ", s)
     s = re.sub(r"\s*(붙임|별첨|첨부)\s*(서식|양식|파일)?\s*\d*\s*(에\s*따라|을\s*참고하여|과\s*같이)\s*", " ", s)
     s = re.sub(r"\s*기한\s*내(에)?\s*", " ", s)
@@ -403,6 +404,29 @@ def _last_obj_verb(s: str) -> str:
     return f"{objs[-1]} {v.group(1)}" if objs else ""
 
 
+_STOP_WORD = re.compile(r"(?:에서는|에서|께서는|께서|는|은|하여|하고|위해|위하여|따라|관련하여|대하여|및|"
+                        r"\d|[.)(:~∼])$|^\d")
+
+
+def object_phrase(sentence: str) -> str:
+    """'부서별 폐기 물품 목록을 2026. 12. 11.(금)까지 총무과로 제출하여' → '부서별 폐기 물품 목록'.
+    제출·회신·송부 동사 앞의 '무엇을'에서, 주어('각 부서에서는')·날짜 앞에서 멈춘 명사구."""
+    s = _ENUM.sub("", sentence or "")
+    m = None
+    for m in re.finditer(r"(\S+)(?:을|를)\s+(?:\S+\s+){0,5}?(?:제출|회신|송부|보고|통보)", s):
+        pass
+    if not m:
+        return ""
+    words = s[:m.start(1)].split() + [m.group(1)]
+    picked: list[str] = []
+    for w in reversed(words):
+        if picked and (_STOP_WORD.search(w) or len(picked) >= 6):
+            break
+        picked.insert(0, w)
+    phrase = " ".join(picked).strip(" ,·")
+    return phrase if 2 <= len(phrase) <= 40 else ""
+
+
 def _heading_task(heading: str, verb: str) -> str:
     """'1. [경기도교육청] 2026학년도 초등학교 교사 등록 원서 제출' → '초등학교 교사 등록 원서 제출'"""
     h = _ENUM.sub("", heading or "").strip()
@@ -419,6 +443,7 @@ def clean_what(context: str, raw_date: str, fields: dict, title: str, heading: s
     """기한 줄을 '조사표 회신' 같은 할 일 문장으로.
     heading: 그 줄 위의 번호 제목('1. … 등록 원서 제출'), table_verb: 표 머리글의 동사('신청 기간' → '신청')."""
     s = _ENUM.sub("", context or "").strip()
+    s = re.sub(r"\s*끝\s*\.?\s*$", "", s)                 # 마지막 문장 끝의 '끝.' (공문 끝 표시)
     m = re.match(r"^(회신|제출|신청|접수|보고|등록|추천|통보)\s*기\s*[한간]\s*[:：]?", s.replace(" ", "")[:12])
     if m or re.match(r"^(회\s*신|제\s*출|신\s*청|접\s*수|보\s*고|등\s*록|추\s*천|통\s*보)\s*기\s*[한간]", s):
         verb = re.sub(r"\s", "", s)[:2]
@@ -471,6 +496,8 @@ def clean_what(context: str, raw_date: str, fields: dict, title: str, heading: s
         s = re.sub(r"\s*요청$", "", s)
         s = re.sub(r"^\S*(?:첨부한|붙임의?|별첨)\s+", "", s)
         s = re.sub(r"\S+(?:메일|우편)\([^)]*\)\s*(?:로|으로)\s+", "", s)
+        # '목록을 총무과로 제출' → '목록 제출' (받는 곳은 제출처로 따로 보인다)
+        s = re.sub(r"(?:을|를)\s+\S+(?:으로|로)\s+(?=(?:제출|회신|송부|보고|통보))", " ", s)
     return s[:120] or title
 
 
@@ -499,6 +526,7 @@ def short_task(text: str, limit: int = 34) -> str:
     """공문 문장을 '서비스 개선과제 발굴·작성·제출'처럼 짧은 할 일 제목으로 줄인다.
     목적절(~을 위해), 주어(각 처·실에서는), 연도, 공문 어미(~하여 주시기 바랍니다), 붙임 표시를 뺀다."""
     s = re.sub(r"^\[[^\]]{1,60}\]\s*", "", (text or "").strip())          # 앞의 [공문 이름]
+    s = re.sub(r"\s*끝\s*\.?\s*$", "", s)                                 # 공문 끝 표시 '끝.'
     s = re.sub(r"\s+", " ", s)
     s = re.sub(r"\(\s*(?:붙\s*임|첨\s*부|별\s*첨|서\s*식)\s*\d*\s*(?:서식)?\s*\)", "", s)
     s = re.sub(r"(?:붙\s*임|별\s*첨)\s*\d*\s*(?=\S*서식)", "", s)

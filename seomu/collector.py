@@ -15,6 +15,7 @@ import shutil
 import threading
 import urllib.parse
 import urllib.request
+import zipfile
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -330,6 +331,92 @@ def iri_to_uri(url: str) -> str:
                                     q(parts.query, "=&%:@!$'()*+,;/?"), q(parts.fragment, "%")))
 
 
+def sniff_kind(path: Path) -> str:
+    """파일 머리로 실제 형식을 본다: pdf / ole / hwpx / docx / xlsx / pptx / odt / zip / png / jpg / gif / html / text / ''."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+    except OSError:
+        return ""
+    if head[:4] == b"%PDF":
+        return "pdf"
+    if head[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        return "ole"
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if head[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if head[:4] in (b"GIF8",):
+        return "gif"
+    if head[:2] == b"PK":
+        try:
+            with zipfile.ZipFile(path) as z:
+                names = z.namelist()
+        except (zipfile.BadZipFile, OSError):
+            return ""
+        if any(re.match(r"Contents/section\d+\.xml$", n) for n in names):
+            return "hwpx"
+        if "word/document.xml" in names:
+            return "docx"
+        if any(n.startswith("xl/") for n in names):
+            return "xlsx"
+        if any(n.startswith("ppt/") for n in names):
+            return "pptx"
+        if "content.xml" in names:
+            return "odt"
+        return "zip"
+    if not head or b"\0" in head:
+        return ""
+    text = ""
+    for enc in ("utf-8", "cp949"):
+        try:
+            text = head.decode(enc)
+            break
+        except UnicodeDecodeError as e:
+            if e.start > len(head) - 4:            # 4KB 경계에서 잘린 글자
+                text = head[:e.start].decode(enc, "ignore")
+                break
+    if not text:
+        return ""
+    if re.search(r"<!doctype\s+html|<html[\s>]|<head[\s>]|<body[\s>]", text[:2048], re.I):
+        return "html"
+    printable = sum(1 for c in text if c.isprintable() or c in "\r\n\t")
+    return "text" if printable / max(1, len(text)) > 0.97 else ""
+
+
+# 확장자별로 실제 내용이 어떤 형식이어야 하는지 (모르는 확장자는 검사하지 않는다)
+_EXPECT = {".hwp": {"ole"}, ".doc": {"ole"}, ".xls": {"ole"}, ".ppt": {"ole"}, ".pdf": {"pdf"},
+           ".hwpx": {"hwpx", "zip"}, ".docx": {"docx"}, ".xlsx": {"xlsx"}, ".pptx": {"pptx"}, ".odt": {"odt"},
+           ".zip": {"zip", "hwpx", "docx", "xlsx", "pptx", "odt"},
+           ".png": {"png"}, ".jpg": {"jpg"}, ".jpeg": {"jpg"}, ".gif": {"gif"}}
+_KIND_EXT = {"pdf": ".pdf", "hwpx": ".hwpx", "docx": ".docx", "xlsx": ".xlsx", "pptx": ".pptx", "odt": ".odt",
+             "zip": ".zip", "png": ".png", "jpg": ".jpg", "gif": ".gif", "text": ".txt"}
+
+
+def checked_download(path: Path, label: str = "") -> dict:
+    """내려받은 붙임을 검사해 붙임 항목으로 만든다.
+    - 파일 대신 웹 페이지(로그인 화면·오류 안내)가 왔으면 '받지 못함'으로 알린다.
+    - 이름의 확장자와 실제 내용이 다르면(링크 글자는 '신청서.hwp'인데 내용은 글자 파일 등) 실제 형식으로 바꾼다.
+      그대로 두면 미리보기도, PC 프로그램으로 열기도 되지 않는다."""
+    path = Path(path)
+    ext = path.suffix.lower()
+    kind = sniff_kind(path)
+    if kind == "html" and ext not in (".html", ".htm", ".xhtml", ".mht", ".mhtml", ".xml"):
+        path.unlink(missing_ok=True)
+        return {"name": label or path.name, "path": "", "ok": False,
+                "error": "파일 대신 웹 페이지가 내려왔습니다 (로그인이 끊겼거나 내려받기 권한이 없을 수 있습니다) "
+                         "— 브라우저 연동으로 수집하거나 직접 저장해 공문 폴더의 '붙임'에 넣어 주세요"}
+    want = _EXPECT.get(ext)
+    if want and kind and kind not in want and kind in _KIND_EXT:
+        fixed = unique_path(path.with_suffix(_KIND_EXT[kind]))
+        try:
+            path.replace(fixed)
+            path = fixed
+        except OSError:
+            pass
+    return {"name": path.name, "path": str(path), "ok": True}
+
+
 def download_url(url: str, dest_dir: Path, name_hint: str = "", timeout: float = 60) -> Path:
     req = urllib.request.Request(iri_to_uri(url), headers={"User-Agent": "Mozilla/5.0 SeomuAI"})
     with _opener().open(req, timeout=timeout) as r:
@@ -390,7 +477,7 @@ def collect_from_url(url: str, root: Path, title_override: str = "") -> Captured
             continue
         try:
             p = download_url(a["url"], folder / "붙임", a["name"])
-            files.append({"name": p.name, "path": str(p), "ok": True})
+            files.append(checked_download(p, a["name"]))
         except Exception as e:  # 네트워크 오류 다양
             files.append({"name": a["name"], "path": "", "ok": False, "error": str(e)[:200]})
     return Captured(title, info["text"], markup, final, folder, files)
@@ -507,7 +594,7 @@ def collect_from_text(text: str, root: Path, title: str = "", html: str = "", ba
         if a["url"].startswith(("http://", "https://")):
             try:
                 p = download_url(a["url"], folder / "붙임", a["name"], timeout=20)
-                files.append({"name": p.name, "path": str(p), "ok": True})
+                files.append(checked_download(p, a["name"]))
                 continue
             except Exception as e:  # 로그인이 필요한 링크·업무망 안 주소 등
                 code = getattr(e, "code", None)
@@ -940,8 +1027,12 @@ class BrowserWorker:
                         name = safe_name(name_hint, 120)
                     path = unique_path(dest / name)
                     path.write_bytes(resp.body())
-                    return {"name": path.name, "path": str(path), "ok": True}
-                err = f"HTTP {resp.status} ({ctype or '알 수 없는 형식'})"
+                    got = checked_download(path, name_hint)
+                    if got["ok"]:
+                        return got
+                    err = got["error"]                 # 웹 페이지가 왔다 → 실제로 눌러 보는 방법으로
+                else:
+                    err = f"HTTP {resp.status} ({ctype or '알 수 없는 형식'})"
             except Exception as e:
                 err = str(e)
         # 2) 스크립트형 다운로드: 실제로 클릭해 다운로드 이벤트를 받는다
@@ -953,7 +1044,7 @@ class BrowserWorker:
             dl = dl_info.value
             path = unique_path(dest / safe_name(fix_mojibake(dl.suggested_filename) or name_hint, 120))
             dl.save_as(str(path))
-            return {"name": path.name, "path": str(path), "ok": True}
+            return checked_download(path, name_hint)
         except Exception as e:
             err = err or str(e)
         finally:

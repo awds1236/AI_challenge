@@ -71,6 +71,10 @@ class Settings:
         return default_downloads() / "서무비서"
 
 
+NUMBER_LABELS = {"top_k": "검색 결과 수", "temperature": "답변 창의성(temperature)", "num_ctx": "문맥 길이",
+                 "threads": "CPU 스레드 수"}
+
+
 class Config:
     """settings.json 읽기/쓰기 (스레드 안전)."""
 
@@ -108,20 +112,26 @@ class Config:
 
     def update(self, values: dict) -> Settings:
         names = {f.name: f for f in fields(Settings)}
+        new: dict = {}
         for k, v in values.items():
             if k not in names:
                 continue
             cur = getattr(self.settings, k)
             if isinstance(cur, bool):
                 v = bool(v)
-            elif isinstance(cur, int) and not isinstance(cur, bool):
-                v = int(v)
-            elif isinstance(cur, float):
-                v = float(v)
+            elif isinstance(cur, (int, float)):
+                if v is None or str(v).strip() == "":
+                    continue                      # 숫자 칸을 비워 두면 원래 값을 그대로 둔다
+                try:
+                    v = int(float(v)) if isinstance(cur, int) else float(v)
+                except (TypeError, ValueError):
+                    raise ValueError(f"'{NUMBER_LABELS.get(k, k)}' 칸에는 숫자를 입력하세요 (입력한 값: {v})") from None
             elif isinstance(cur, list):
                 v = [str(x) for x in (v or []) if str(x).strip()]
             else:
                 v = "" if v is None else str(v)
+            new[k] = v
+        for k, v in new.items():               # 모든 값을 확인한 뒤에 한꺼번에 바꾼다 (중간 오류로 일부만 바뀌지 않게)
             setattr(self.settings, k, v)
         self.save()
         return self.settings

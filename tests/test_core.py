@@ -8,7 +8,7 @@ from seomu.analyzer import analyze, rule_analysis
 from seomu.collector import analyze_html, collect_from_files, filename_from_headers, safe_name
 from seomu.deadlines import best_deadlines, find_dates, find_submissions
 from seomu.llm import LLMError, OllamaClient, extract_json, is_loopback_url
-from seomu.mail import build_variables, render, tasks_to_ics
+from seomu.mail import build_variables, clean_polished, render, tasks_to_ics
 from seomu.parsers import html_to_text, parse_file
 from seomu.rag import Index, chunk_document, tokenize
 
@@ -132,6 +132,17 @@ def test_mail_render():
     out, missing = render("{{공문제목}} {{제출기한_전체}} {{내메일}}", v)
     assert out == "청렴 교육 2026. 11. 13.(금) 18:00까지 [내메일]"
     assert missing == ["내메일"]
+    # 중괄호를 한 겹만 쓴 변수도 채우고, 모르는 이름은 [빈칸]으로 표시해 알려 준다
+    out, missing = render("{내이름} 드림, {공문제목}과 {내메일} {담당자} {x}", v)
+    assert out == "홍길동 드림, 청렴 교육과 [내메일] [담당자] {x}" and missing == ["내메일", "담당자"]
+    # AI 다듬기가 문장 속에 지어 넣은 빈칸(+조사)은 지우고, 초안에 있던 빈칸은 남긴다
+    draft = "[담당자]님 안녕하세요.\n[기한]까지 제출 바랍니다.\n홍길동 드림"
+    polished = "[담당자]님께,\n\n[서류명]을 [기한]까지 제출하여 주시기 바랍니다.\n\n홍길동 드림"
+    assert clean_polished(polished, draft) == "[담당자]님께,\n\n[기한]까지 제출하여 주시기 바랍니다.\n\n홍길동 드림"
+    # 메일은 서식 없는 글: 마크다운 굵게·제목 기호는 지운다
+    md = "## 안내\n**■ 제출 기한:** 2026. 11. 20.까지\n__■ 제출 자료__: 결과 확인서\n홍길동 드림"
+    assert clean_polished(md, "■ 제출 기한: 2026. 11. 20.까지\n■ 제출 자료: 결과 확인서\n홍길동 드림") == \
+        "안내\n■ 제출 기한: 2026. 11. 20.까지\n■ 제출 자료: 결과 확인서\n홍길동 드림"
     ics = tasks_to_ics([{"id": 1, "title": "제출; 확인", "due": "2026-11-13", "done": 0}])
     assert "DTSTART;VALUE=DATE:20261113" in ics and "제출\\; 확인" in ics
 
@@ -261,3 +272,30 @@ def test_candidate_files(tmp_path):
     (tmp_path / "cache" / "app.exe").write_bytes(b"x")
     got = candidate_files(_t.time() - 60, roots=[(tmp_path, 3)])
     assert [g["name"] for g in got] == ["조사표.hwp"]
+
+
+def test_settings_number_fields(tmp_path):
+    """숫자 칸을 비우면 원래 값을 두고, 숫자가 아니면 한국어로 알려 주며 다른 칸도 바꾸지 않는다."""
+    from seomu.config import Config
+    c = Config(tmp_path)
+    assert c.update({"top_k": "", "temperature": "0.5"}).top_k == 6
+    assert c.settings.temperature == 0.5
+    with pytest.raises(ValueError, match="검색 결과 수"):
+        c.update({"user_name": "바뀌면 안 됨", "top_k": "abc"})
+    assert c.settings.user_name == "" and Config(tmp_path).settings.user_name == ""
+
+
+def test_rule_analysis_last_sentence_with_end_mark():
+    """마지막 문장에 공문 끝 표시('끝.')가 붙어도 할 일은 짧게, 조사가 붙은 서류 이름('목록을')도 제출물로."""
+    from seomu.analyzer import rule_analysis
+    body = ("1. 연말을 맞아 사무실 대청소를 실시하오니 협조 바랍니다.\n  가. 일시: 2026. 12. 18.(금) 15:00\n"
+            "2. 부서별 폐기 물품 목록을 2026. 12. 11.(금)까지 총무과로 제출하여 주시기 바랍니다. 끝.")
+    a = rule_analysis("연말 사무실 대청소 실시 안내", body, [], REF)
+    assert [d["what"] for d in a["deadlines"]] == ["부서별 폐기 물품 목록 제출"]
+    assert [s["item"] for s in a["submissions"]] == ["부서별 폐기 물품 목록"]
+    a = rule_analysis("교육 결과 제출", "1. 개인정보 보호 교육 이수 결과를 2026. 11. 25.(수)까지 제출하여 주시기 바랍니다.  끝.", [], REF)
+    assert a["actions"][0] == "개인정보 보호 교육 이수 결과 제출 (11/25까지)"
+    # 붙임 서식이 있으면 문장에서 뽑은 이름보다 붙임의 이름·서식 표시를 쓴다
+    a = rule_analysis("점검 협조", "1. 점검 결과 확인서를 2026. 11. 20.(금)까지 회신하여 주시기 바랍니다.\n"
+                      "붙임 1. 점검 일정표 1부.\n     2. 결과 확인서 서식 1부. 끝.", [], REF)
+    assert [s["item"] for s in a["submissions"]] == ["결과 확인서 (붙임 서식)"]
