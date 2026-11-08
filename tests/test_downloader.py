@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from seomu import downloader
+from fake_engine import EXE_NAME, server_bytes
 from seomu.llm import LLMError
 
 HERE = Path(__file__).parent
@@ -21,7 +22,7 @@ MODEL = b"GGUF" + bytes(range(256)) * 4000          # 약 1MB 가짜 모델
 def _engine_zip() -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("build/bin/llama-server", f"#!/bin/sh\nexec {sys.executable} {HERE / 'fake_llama_server.py'} \"$@\"\n")
+        z.writestr(f"build/bin/{EXE_NAME}", server_bytes())      # Windows: 가짜 llama-server.exe
         z.writestr("build/bin/libllama.so", b"lib")
     return buf.getvalue()
 
@@ -159,10 +160,9 @@ def test_corrupt_download_is_rejected(server, tmp_path):
     assert not list(tmp_path.glob("*"))
 
 
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="가짜 엔진은 POSIX 셸 스크립트")
 def test_install_engine(server, tmp_path):
     exe = downloader.install_engine(tmp_path / "engine")
-    assert exe == tmp_path / "engine" / "llama-server" and exe.exists()
+    assert exe == tmp_path / "engine" / EXE_NAME and exe.exists()
     assert exe.stat().st_mode & 0o100 and (tmp_path / "engine" / "libllama.so").exists()
 
 
@@ -178,7 +178,6 @@ def test_extract_blocks_path_traversal(tmp_path):
     assert not (tmp_path / "evil.txt").exists()
 
 
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="가짜 엔진은 POSIX 셸 스크립트")
 def test_api_download_without_ollama(server, tmp_path, monkeypatch):
     """Ollama가 꺼진 PC에서 [받기] → 엔진+모델을 받고 내장 엔진으로 바로 동작."""
     from seomu import engine as engine_mod
@@ -198,7 +197,7 @@ def test_api_download_without_ollama(server, tmp_path, monkeypatch):
             break
         time.sleep(0.05)
     assert st["status"] == "done", st
-    assert (tmp_path / "app" / "engine" / "llama-server").exists()
+    assert (tmp_path / "app" / "engine" / EXE_NAME).exists()
     assert (tmp_path / "app" / "models" / "gemma-4-E2B-it-QAT-Q4_0.gguf").exists()
     s = api.get_settings()
     assert s["engine"] == "auto" and s["chat_model"] == "gemma-4-E2B-it-QAT-Q4_0"
@@ -212,7 +211,6 @@ def test_api_download_without_ollama(server, tmp_path, monkeypatch):
     api.shutdown()
 
 
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="가짜 엔진은 POSIX 셸 스크립트")
 @pytest.mark.parametrize("page_list", [True, False])
 def test_install_engine_when_api_rate_limited(server, tmp_path, page_list):
     """GitHub API 한도 초과(기관망 공용 주소에서 흔함) → 배포 페이지 목록, 그것도 없으면 흔한 이름으로 받는다."""
@@ -248,7 +246,6 @@ def test_engine_asset_choice_by_platform():
     assert downloader.pick_engine_asset({"message": "rate limit"}, "win", "x64") is None
 
 
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="가짜 엔진은 POSIX 셸 스크립트")
 def test_install_engine_skips_release_still_uploading(server, tmp_path):
     """최신 버전에 이 PC용 파일이 아직 안 올라왔으면 바로 전 버전을 받는다."""
     exe = downloader.install_engine(tmp_path / "engine")

@@ -317,10 +317,14 @@ class Api:
             t["dday"] = dday(t["due"]) if t.get("due") else None
         upcoming = [t for t in tasks if t["dday"] is not None]
         week_end = (today + timedelta(days=7)).isoformat()
+        # '다가오는 기한': 일주일 안에 지난 일 → 다가오는 일 → 기한 없는 일 → 오래 지난 일 순서
+        rank = lambda t: (0 if t["dday"] is not None and -7 <= t["dday"] < 0 else  # noqa: E731
+                          1 if t["dday"] is not None and t["dday"] >= 0 else 2 if t["dday"] is None else 3,
+                          t.get("due") or "9999")
         return {
             "today": today.isoformat(),
             "weekday": "월화수목금토일"[today.weekday()],
-            "tasks": tasks[:20],
+            "tasks": sorted(tasks, key=rank)[:20],
             "overdue": sum(1 for t in upcoming if t["dday"] < 0),
             "due_today": sum(1 for t in upcoming if t["dday"] == 0),
             "due_week": sum(1 for t in upcoming if 0 <= t["dday"] and t["due"] <= week_end),
@@ -485,8 +489,11 @@ class Api:
         for t in tasks:
             if not t.get("done"):
                 self._store.delete_task(t["id"])
+        stale = (date.today() - timedelta(days=14)).isoformat()
         for d in analysis.get("deadlines") or []:
             if d["date"] in done:
+                continue
+            if d["date"] < stale:     # 지난 공문을 뒤늦게 모은 경우: 2주 넘게 지난 기한은 할 일로 만들지 않는다
                 continue
             # 제목은 '무엇을 할지'만 짧게 (공문 이름은 화면에서 따로 보여 준다), 원문은 상세에 둔다
             self._store.add_task(short_task(d["what"]),
@@ -754,6 +761,7 @@ class Api:
                 left = missing()
                 hint = (f"붙임 {len(got)}/{len(expected)}개를 모았습니다. 남은 붙임은 뷰어에서 저장하면 자동으로 모읍니다."
                         if expected else "새로 저장되는 붙임파일을 기다리는 중…")
+                hint += f" (최대 {max(0, int(deadline - time.time()))}초 더 기다림 · [붙임 수집 완료]를 누르면 바로 정리)"
                 if not text:
                     hint += " 본문을 읽지 못했습니다. 뷰어의 [본문복사]를 눌러 주세요."
                 job.message = hint
@@ -771,7 +779,7 @@ class Api:
             files = list(got.values()) + extras
             for e in missing():
                 files.append({"name": e, "path": "", "ok": False,
-                              "error": "자동으로 찾지 못함 — 뷰어에서 저장한 뒤 공문 폴더의 '붙임'에 넣어 주세요"})
+                              "error": "자동으로 찾지 못함 — 뷰어에서 저장해 공문 폴더의 '붙임'에 넣으면 다음에 열 때 자동으로 반영됩니다"})
             cap = Captured(name, body, "", f"창: {win['title']}", folder, files, str(folder / "본문_화면.png"))
             result = self._finish_capture(job, cap, use_ai)
             result["capture_method"] = how
@@ -785,7 +793,32 @@ class Api:
     def get_notice(self, notice_id: int) -> dict | None:
         n = self._store.get_notice(int(notice_id))
         if n:
+            n = self._rescan_attachments(n)
             n["tasks"] = [t for t in self._store.list_tasks() if t.get("notice_id") == n["id"]]
+        return n
+
+    def _rescan_attachments(self, n: dict) -> dict:
+        """공문 폴더의 '붙임'에 사용자가 나중에 넣은 파일을 붙임 목록에 더한다.
+        이름이 맞으면 '받지 못함'으로 남아 있던 항목을 채운다 (뷰어에서 직접 저장한 붙임을 넣는 경우)."""
+        dest = Path(n.get("folder") or "") / "붙임"
+        if not dest.is_dir():
+            return n
+        files = list(n.get("attachments") or [])
+        known = {os.path.normcase(str(Path(f["path"]).resolve())) for f in files if f.get("path")}
+        new = [p for p in sorted(dest.rglob("*")) if p.is_file() and not p.name.startswith(("~$", "."))
+               and os.path.normcase(str(p.resolve())) not in known]
+        if not new:
+            return n
+        for p in new:
+            item = {"name": str(p.relative_to(dest)).replace("\\", "/"), "path": str(p), "ok": True, "from": "직접 넣은 파일"}
+            missing = [i for i, f in enumerate(files) if not f.get("ok")]
+            j, sc = attach.best_match(p.name, [files[i]["name"] for i in missing]) if missing else (-1, 0)
+            if j >= 0:
+                files[missing[j]] = item          # '받지 못함' 자리를 채운다
+            else:
+                files.append(item)
+        self._store.update_notice_attachments(n["id"], files)
+        n["attachments"] = files
         return n
 
     def reanalyze(self, notice_id: int) -> dict:
@@ -980,9 +1013,13 @@ class Api:
                     mode = "llm"
                 except LLMError as e:
                     err = str(e)
+            rule = (report_mod.outline_from_notice(notice, purpose) if notice
+                    else report_mod.outline_from_text(material, purpose))
             if outline is None:
-                outline = (report_mod.outline_from_notice(notice, purpose) if notice
-                           else report_mod.outline_from_text(material, purpose))
+                outline = rule
+            elif not report_mod.plausible_title(outline.get("title", ""), rule["title"], tpl.headings):
+                # AI가 양식의 소제목 나열이나 공문과 무관한 제목을 내면 (파일 이름도 되므로) 규칙 제목을 쓴다
+                outline["title"] = rule["title"]
             job.message = "양식에 채우는 중…"
             data = report_mod.fill(tpl, outline, dept=s.user_dept)
             clean = report_mod.clean_outline(outline)

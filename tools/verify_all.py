@@ -313,7 +313,7 @@ def judge(case: dict, n: dict | None, err: str = "") -> list[str]:
         probs.append("본문에 빈 줄이 겹침")
     if body != unicodedata.normalize("NFC", body):
         probs.append("본문 한글 자모 분리")
-    for menu in ("로그인", "로그아웃", "사이트맵", "개인정보처리방침", "열린시정", "불러오는 중"):
+    for menu in ("로그인", "로그아웃", "사이트맵", "개인정보처리방침", "열린시정", "불러오는 중", "URL 복사", "홍길동"):
         if menu in body:
             probs.append(f"본문에 화면 메뉴 글자 '{menu}'")
     for phrase in exp.get("phrases", []):            # 변환 뷰어: 줄 순서·띄어쓰기가 되살아났는지
@@ -447,6 +447,12 @@ def main() -> int:
          "expect": {**N2, "att_names": ["참석자 명단 서식.xlsx"]}},
         {"path": "주소", "fmt": "옛 EUC-KR 인코딩 페이지", "run": lambda: job("collect_url", web + "/euckr/notice", "", False),
          "expect": {**N1}},
+        {"path": "주소", "fmt": "지자체·교육청 게시판형 (쿠키 리디렉션·메뉴 속 제목·기간 표·겹친 붙임 링크)",
+         "run": lambda: job("collect_url", web + "/board/view", "", False),
+         "expect": {"title": "2026학년도 기간제 교원 채용 서류 제출 안내",
+                    "dates": ["2026-11-20", "2026-11-25", "2026-12-02"],
+                    "whats": ["채용 서류 제출", "1차 교과 신청", "2차 비교과 신청"],
+                    "att_names": ["채용 서류 제출 서식.hwpx"], "phrases": ["가. 제출 기간"]}},
         {"path": "주소", "fmt": "잘못된 주소", "run": lambda: _expect_error(api.collect_url, "ftp://x", "", False),
          "expect": {"error": "http:// 또는 https://"}},
     ]

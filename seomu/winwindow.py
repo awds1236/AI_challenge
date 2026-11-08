@@ -668,6 +668,56 @@ ConvertTo-Json -InputObject @($lines) -Depth 5 -Compress
 """
 
 
+_PDF_RENDER_PS = r"""
+param([string]$Path, [string]$OutDir, [int]$Max)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
+$null = [Windows.Storage.StorageFolder, Windows.Storage, ContentType = WindowsRuntime]
+$null = [Windows.Data.Pdf.PdfDocument, Windows.Data.Pdf, ContentType = WindowsRuntime]
+$methods = [System.WindowsRuntimeSystemExtensions].GetMethods()
+$asTaskOp = ($methods | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+  $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+$asTaskAct = ($methods | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+  $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncAction' })[0]
+function Await($op, $type) { $t = $asTaskOp.MakeGenericMethod($type).Invoke($null, @($op)); $t.Wait(-1) | Out-Null; $t.Result }
+function AwaitAction($op) { $t = $asTaskAct.Invoke($null, @($op)); $t.Wait(-1) | Out-Null }
+$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Path)) ([Windows.Storage.StorageFile])
+$doc = Await ([Windows.Data.Pdf.PdfDocument]::LoadFromFileAsync($file)) ([Windows.Data.Pdf.PdfDocument])
+$folder = Await ([Windows.Storage.StorageFolder]::GetFolderFromPathAsync($OutDir)) ([Windows.Storage.StorageFolder])
+$n = [Math]::Min([int]$doc.PageCount, $Max)
+for ($i = 0; $i -lt $n; $i++) {
+  $page = $doc.GetPage($i)
+  $out = Await ($folder.CreateFileAsync("p$i.png", [Windows.Storage.CreationCollisionOption]::ReplaceExisting)) ([Windows.Storage.StorageFile])
+  $stream = Await ($out.OpenAsync([Windows.Storage.FileAccessMode]::ReadWrite)) ([Windows.Storage.Streams.IRandomAccessStream])
+  $opt = New-Object Windows.Data.Pdf.PdfPageRenderOptions
+  $opt.DestinationWidth = 1800
+  AwaitAction ($page.RenderToStreamAsync($stream, $opt))
+  $stream.Dispose(); $page.Dispose()
+}
+Write-Output $n
+"""
+
+
+def render_pdf_pages(path: Path, out_dir: Path, max_pages: int = 8, timeout: float = 120) -> list[Path]:
+    """Windows 내장 PDF 기능(Windows.Data.Pdf)으로 PDF 페이지를 그림으로 그린다 (인터넷·추가 프로그램 불필요).
+    글자를 선으로 바꿔 저장한 PDF·스캔 PDF를 글자 인식할 때 쓴다."""
+    if not IS_WIN:
+        return []
+    import subprocess
+    import tempfile
+    script = Path(tempfile.gettempdir()) / "seomu_pdf_render.ps1"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        script.write_text(_PDF_RENDER_PS, encoding="utf-8-sig")
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script),
+                        str(Path(path).resolve()), str(out_dir.resolve()), str(max_pages)],
+                       capture_output=True, timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        return []
+    return sorted(out_dir.glob("p*.png"), key=lambda p: int(re.findall(r"\d+", p.stem)[0]))
+
+
 def ocr_image(path: Path, timeout: float = 60) -> list[dict]:
     """Windows 내장 OCR로 이미지의 글자 줄을 읽는다. [{text,x,y,w,h,words}] (인터넷 불필요)"""
     if not IS_WIN:

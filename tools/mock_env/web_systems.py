@@ -167,6 +167,33 @@ class Handler(BaseHTTPRequestHandler):
             return self._send('<html><head><meta charset="utf-8"><title>PDF 문서보기</title></head><body>'
                               '<div class="viewerTop">문서보기 · 인쇄 · 저장</div>'
                               '<iframe src="/files/doc.pdf" style="width:100%;height:600px"></iframe></body></html>')
+        # ---- 지자체·교육청 게시판형 (실제 공개 게시판에서 본 구조를 흉내: 버튼이 든 페이지 제목 상자, 팝업 제목,
+        #      작성자 정보 줄, 시작~끝 기간 표, 기준일, '다운로드' 버튼과 파일 이름 링크가 같은 주소로 겹치는 붙임)
+        if p == "/board/view":
+            if "sess=1" not in (self.headers.get("Cookie") or ""):       # 쿠키를 심고 같은 주소로 다시 보낸다
+                self.send_response(302)
+                self.send_header("Set-Cookie", "sess=1; Path=/")
+                self.send_header("Location", "/board/view")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            return self._send(
+                '<html><head><meta charset="utf-8"><title> | ○○교육청</title></head><body>'
+                '<div id="header"><h2>민원/참여</h2><h2>뉴스/소식</h2><div class="search-tit">검색어를 입력해주세요 <button>검색</button></div></div>'
+                '<div class="page-title-wrap"><h2>보도자료</h2><button>열기</button><button>URL 복사</button><button>프린트</button></div>'
+                '<div class="modal"><h2 class="modal-title">교육청 맞춤형 콘텐츠 안내</h2></div>'
+                '<div id="contents"><div class="bbs_ViewA"><h3>2026학년도 기간제 교원 채용 서류 제출 안내</h3>'
+                '<ul class="bbsV_data"><li>작성자</li><li>홍길동</li><li>작성일자 2026.11.02</li><li>조회수 1,024</li></ul>'
+                '<div class="bbsV_cont">'
+                '<p>기간제 교원 채용 합격자는 아래 기간 내에 서류를 제출하여 주시기 바랍니다.</p>'
+                '<p>1. 채용 서류 제출</p><p>가. 제출 기간: 2026.11.16.(월) 09:00 ~ 2026.11.20.(금) 18:00</p>'
+                '<p>나. 제출방법: 방문 또는 등기우편</p><p>다. 기타: 1년 이내 발급된 신체검사서 제출 가능(기준일: 2027. 3. 1.)</p>'
+                '<table><tr><th>차수</th><th>유형</th><th>신청 기간</th></tr>'
+                '<tr><td>1차</td><td>교과</td><td>2026.11.23.(월) ~ 2026.11.25.(수)</td></tr>'
+                '<tr><td>2차</td><td>비교과</td><td>2026.11.30.(월) ~ 2026.12.02.(수)</td></tr></table>'
+                '</div><ul class="files"><li><a href="/files/onnara_form.hwpx" class="btn">다운로드</a>'
+                '<a href="/files/onnara_form.hwpx" class="btn-link">채용 서류 제출 서식.hwpx</a></li></ul></div></div>'
+                '<div id="footer">개인정보처리방침 Copyright © ○○교육청</div></body></html>')
         if p == "/euckr/notice":
             page = ('<html><head><meta http-equiv="Content-Type" content="text/html; charset=euc-kr"><title>공지</title></head>'
                     f'<body><div class="view_cont">{_p(N1["lines"])}</div></body></html>')

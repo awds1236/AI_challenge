@@ -180,6 +180,121 @@ def test_hwp5_binary(tmp_path):
     assert parse_file(renamed).count("제출 기한") == 60
 
 
+def test_real_board_structures():
+    """실제 공개 게시판에서 본 구조: 사이트·메뉴 이름이 아닌 게시물 제목, 겹친 붙임 링크, 화면 글자 정리."""
+    from seomu.collector import analyze_html, post_title
+    page = ('<html><head><title> | ○○교육청</title></head><body><div id="gnb"><h2>민원/참여</h2></div>'
+            '<div class="page-title-wrap"><h2>보도자료</h2><button>URL 복사</button></div>'
+            '<div class="modal"><h2 class="modal-title">맞춤형 콘텐츠</h2></div>'
+            '<div class="bbs_ViewA"><h3>2026학년도 채용 서류 제출 안내</h3><ul><li>작성자</li><li>홍길동</li>'
+            '<li>작성일자 2026.11.02</li></ul><div class="cont"><p>서류를 제출하여 주시기 바랍니다.</p></div>'
+            '<a href="/f?id=1">다운로드</a><a href="/f?id=1">채용 서식.hwpx</a></div></body></html>')
+    assert post_title(page) == "2026학년도 채용 서류 제출 안내"
+    info = analyze_html(page, "https://x.go.kr/")
+    assert info["title"] == "2026학년도 채용 서류 제출 안내"
+    assert [a["name"] for a in info["attachments"]] == ["채용 서식.hwpx"]
+    # 제목 상자 안의 분류 표시('일반', '일부')와 영어 병기는 뗀다
+    assert post_title('<div class="board-view"><div class="header"><div class="subject"><span>일반</span>'
+                      '<strong>자비유학 신청 안내 / Application Guide</strong></div></div></div>') == "자비유학 신청 안내"
+    assert post_title('<div class="subjectHead"><p class="subjectHead_tit">시행규칙 일부개정령안 입법예고<span>일부</span>'
+                      '</p></div>') == "시행규칙 일부개정령안 입법예고"
+    from seomu.notice_text import tidy_text
+    assert tidy_text("열기\nURL 복사현재 URL 복사 버튼\n작성자\n홍길동\n작성일자2026.01.28\n조회수3,250회\n본문") == "본문"
+
+
+def test_period_end_is_deadline():
+    from seomu.analyzer import rule_analysis
+    body = ("1. 채용 서류 제출\n가. 제출 기간: 2026.11.16.(월) 09:00 ~ 2026.11.20.(금) 18:00\n"
+            "나. 기타: 신체검사서 제출 가능(기준일: 2027. 3. 1.)\n차수\t유형\t신청 기간\n"
+            "1차\t교과\t2026.11.23.(월) ~ 2026.11.25.(수)\n마. 접수 마감\n2026년 12월 7일(월)\n"
+            "다. 일시: 2026. 11. 26.(목) 14:00 ~ 17:00")
+    a = rule_analysis("채용 서류 제출 안내", body, [], REF)
+    assert [(d["date"], d["time"], d["what"]) for d in a["deadlines"]] == [
+        ("2026-11-20", "18:00", "채용 서류 제출"), ("2026-11-25", "", "1차 교과 신청"), ("2026-12-07", "", "접수 마감")]
+    long = ("1. 일부개정안에 대하여 의견이 있는 단체 또는 개인은 2026. 12. 9.까지 온라인으로 의견을 제출하시거나, "
+            "다음 사항을 기재한 의견서룰 장관에게 제출하여 주시기 바랍니다.")
+    a = rule_analysis("시행규칙 일부개정령안 입법예고", long, [], REF)
+    assert a["deadlines"][0]["what"] == "의견서 제출"
+    assert a["summary"].startswith("시행규칙 일부개정령안 입법예고 — 의견서 제출 요청 (12월 9일(수)까지)")
+
+
+def test_url_fetch_keeps_cookies_and_windows_certs():
+    """쿠키를 심고 같은 주소로 다시 보내는 사이트(무한 리디렉션 방지), 중간 인증서 누락 사이트(Windows 저장소로 검증)."""
+    import urllib.request
+    from seomu import collector
+    opener = collector._opener()
+    kinds = {type(h).__name__ for h in opener.handlers}
+    assert "HTTPCookieProcessor" in kinds and "HTTPSHandler" in kinds
+    ctx = collector._ssl_context()
+    assert ctx.verify_mode != 0                     # 검증을 끄지 않는다
+    sys.path.insert(0, str(ROOT / "tools"))
+    from mock_env import web_systems
+    srv, base = web_systems.start(ROOT / "sample_data")
+    try:
+        markup, final = collector.fetch_url(base + "/board/view", timeout=10)
+        assert "2026학년도 기간제 교원 채용 서류 제출 안내" in markup and final.endswith("/board/view")
+    finally:
+        srv.shutdown()
+
+
+def test_found_while_using_the_app(api, tmp_path):
+    """실제 앱을 써 보며 찾은 문제: PDF 띄어쓰기(NUL), 일시만 있는 '행사', 지난 기한 할 일, 직접 넣은 붙임, 홈 순서, 보고서 괄호."""
+    from datetime import date, timedelta
+    from seomu.analyzer import event_info
+    from seomu.parsers import normalize
+    from seomu.report import outline_from_notice
+    assert normalize("2026학년도\x00겨울계절\x00및\x00\x0c다음") == "2026학년도 겨울계절 및\n다음"
+    assert event_info({"일시": "2026.2.10.(화) 17:00 예정"}) == {}
+    assert event_info({"교육명": "실무 과정", "일시": "11. 26."})["name"] == "실무 과정"
+    old = (date.today() - timedelta(days=60)).strftime("%Y. %m. %d.")
+    soon = (date.today() + timedelta(days=5)).strftime("%Y. %m. %d.")
+    body = f"제목 자료 제출\n1. 자료를 제출하여 주시기 바랍니다.\n가. 1차 제출 기한: {old}까지\n나. 2차 제출 기한: {soon}까지\n붙임 제출 서식 1부. 끝."
+    n = _wait(api, api.collect_text(body, "", False))
+    titles = [t["due"] for t in api.list_tasks(True) if t["notice_id"] == n["id"]]
+    assert titles == [(date.today() + timedelta(days=5)).isoformat()]          # 60일 전 기한은 할 일로 만들지 않는다
+    assert api.dashboard()["tasks"][0]["due"] == titles[0]
+    (Path(n["folder"]) / "붙임" / "제출 서식.hwpx").write_bytes(b"PK")          # 사용자가 직접 넣은 붙임
+    att = api.get_notice(n["id"])["attachments"]
+    assert [(f["name"], f["ok"]) for f in att] == [("제출 서식.hwpx", True)]
+    rep = outline_from_notice(api.get_notice(n["id"]))
+    texts = [it.get("text", "") for s in rep["sections"] for it in s["items"]]
+    assert any(t.endswith("까지 2차 제출") or "까지" in t for t in texts)
+    for s in rep["sections"]:
+        for it in s["items"]:
+            assert (it.get("head") or "").count("(") == (it.get("head") or "").count(")")
+    assert "\n" not in rep["summary"]
+
+
+def test_ai_result_guards():
+    """AI 결과 방어: 비워 둔 마감 시각은 규칙 결과로 채우고, 양식 소제목 나열 같은 보고서 제목은 쓰지 않는다."""
+    import json
+    from seomu.analyzer import analyze
+    from seomu.report import plausible_title
+
+    class FakeClient:
+        def pick_chat_model(self, m=""):
+            return "fake"
+
+        def chat(self, messages, model, **kw):
+            return json.dumps({"folder_name": "안전점검", "summary": "AI 요약", "submissions": [], "actions": [],
+                               "deadlines": [{"date": "2026-11-24", "time": "", "what": ""}]}, ensure_ascii=False)
+    body = (FORMATS / "문서24_공문.txt").read_text(encoding="utf-8")
+    a = analyze("2026년 하반기 학교 안전점검 결과 제출 요청", body, [], FakeClient(), ref=REF)
+    assert a["mode"] == "llm" and a["deadlines"][0]["time"] == "17:00" and a["deadlines"][0]["what"]
+    assert a["folder_name"] == "안전점검"                       # 제목과 겹치는 AI 이름은 받는다
+
+    class OddName(FakeClient):
+        def chat(self, messages, model, **kw):
+            return json.dumps({"folder_name": "테스트", "summary": "s", "deadlines": [], "submissions": [], "actions": []})
+    b = analyze("2026년 하반기 학교 안전점검 결과 제출 요청", body, [], OddName(), ref=REF)
+    assert b["folder_name"] == "2026년 하반기 학교 안전점검 결과 제출 요청"   # 지어낸 이름은 버린다
+    assert [d["date"] for d in b["deadlines"]] == ["2026-11-24"]               # AI가 놓친 기한은 규칙 결과로 보존
+    heads = ["추진 배경", "주요 내용", "향후 계획"]
+    assert not plausible_title("추진 배경, 주요 내용, 향후 계획", "안전점검 결과 제출 요청 관련 보고", heads)
+    assert not plausible_title("회의록", "안전점검 결과 제출 요청 관련 보고", heads)
+    assert plausible_title("학교 안전점검 결과 보고", "2026년 하반기 학교 안전점검 결과 제출 요청 관련 보고", heads)
+
+
 def test_reference_attachments_are_not_submissions():
     _t, a = analyze_file("문서24_공문.txt")
     items = [s["item"] for s in a["submissions"]]

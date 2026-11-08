@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """테스트용 가짜 llama-server: -m 모델 --port 포트 [--embedding]"""
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -40,7 +41,7 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.write(("data: " + json.dumps({"choices": [{"delta": {"content": tok}}]}, ensure_ascii=False) + "\n\n").encode())
             self.wfile.write(b"data: [DONE]\n\n")
             return
-        self._json({"choices": [{"message": {"content": "모델:" + model.split("/")[-1]}}]})
+        self._json({"choices": [{"message": {"content": "모델:" + os.path.basename(model)}}]})
 
 
 HTTPServer(("127.0.0.1", port), H).serve_forever()

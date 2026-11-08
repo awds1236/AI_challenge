@@ -139,13 +139,26 @@ def _merge_deadlines(deadlines: list[dict]) -> list[dict]:
     return sorted(best.values(), key=lambda d: (d["date"], d["time"]))
 
 
+def event_info(fields: dict) -> dict:
+    """행사·교육 정보. '일시' 하나만 있으면(발표 일시·접수 일시 등) 행사로 보지 않는다 — 행사명이나 장소가 있어야 한다."""
+    ev = {k: v for k, v in (("name", _get(fields, "행사명", "교육명", "회의명", "설명회명", "연수명")[1]),
+                            ("date", _get(fields, "일시")[1]), ("place", _get(fields, "장소")[1])) if v}
+    return ev if (ev.get("name") or ev.get("place")) else {}
+
+
 def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | None = None) -> dict:
     clean = clean_body(body, title)
     fields = extract_fields(clean)
     deadlines = []
     for d in best_deadlines(clean, ref):
+        before = clean[:d["pos"]].splitlines()[-12:]
+        # 위쪽 번호 제목('1. … 등록 원서 제출')과 표 머리글의 동사('신청 기간' → 신청)
+        heading = next((l for l in reversed(before[:-1]) if re.match(r"^\s*\d{1,2}\s*[.)]\s*\S", l)), "")
+        tv = next((m.group(1) for l in reversed(before[-8:]) for m in [re.search(r"(신청|제출|접수|모집|공모|응모)\s*기\s*간", l)] if m), "")
+        ln = clean.count("\n", 0, d["pos"])
+        prev = clean.splitlines()[ln - 1] if ln > 0 else ""
         deadlines.append({"date": d["date"], "time": d["time"] or "",
-                          "what": clean_what(d["context"], d["raw"], fields, title), "source": "규칙"})
+                          "what": clean_what(d["context"], d["raw"], fields, title, heading, tv, prev), "source": "규칙"})
     deadlines = _merge_deadlines(deadlines)
     _ml, method = _get(fields, "회신방법", "제출방법", "신청방법", "접수방법")
     _tl, to = _get(fields, "제출처", "회신처", "접수처", "신청처")
@@ -189,8 +202,7 @@ def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | N
     return {
         "folder_name": title,
         "summary": rule_summary(title, clean, fields, deadlines),
-        "event": {k: v for k, v in (("name", _get(fields, "행사명", "교육명", "회의명")[1]),
-                                    ("date", _get(fields, "일시")[1]), ("place", _get(fields, "장소")[1])) if v},
+        "event": event_info(fields),
         "deadlines": deadlines,
         "submissions": subs,
         "actions": actions,
@@ -202,13 +214,23 @@ def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | N
     }
 
 
+def _shares_word(name: str, title: str) -> bool:
+    """두 글자 이상 낱말(또는 그 일부)을 하나라도 함께 쓰는지."""
+    words = [w for w in re.split(r"[\s,·/()「」\[\]_]+", name or "") if len(w) >= 2]
+    ref = [w for w in re.split(r"[\s,·/()「」\[\]_]+", title or "") if len(w) >= 2]
+    if not ref:
+        return True
+    return any(w in r or r in w for w in words for r in ref)
+
+
 def analyze(title: str, body: str, files: list[dict], client: OllamaClient | None,
             chat_model: str = "", num_ctx: int = 8192, ref: date | None = None) -> dict:
     ref = ref or date.today()
+    if client is None:
+        # 규칙 분석은 붙임 내용을 쓰지 않는다 → 붙임(스캔 PDF는 글자 인식에 수십 초)을 읽지 않아 수집이 바로 끝난다
+        return rule_analysis(title, body, [], ref)
     attach = read_attachments(files)
     base = rule_analysis(title, body, attach, ref)
-    if client is None:
-        return base
     try:
         model = client.pick_chat_model(chat_model)
         attach_txt = "\n\n".join(f"<{a['name']}>\n{a['text']}" for a in attach) or "(없음)"
@@ -235,7 +257,8 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
         if isinstance(data.get(k), str) and data[k].strip():
             result[k] = data[k].strip()
     fn = data.get("folder_name")
-    if isinstance(fn, str) and 2 <= len(fn.strip()) <= 40:
+    if isinstance(fn, str) and 2 <= len(fn.strip()) <= 40 and _shares_word(fn, title):
+        # 공문 제목과 겹치는 낱말이 없는 이름('테스트' 등 AI가 지어낸 이름)은 쓰지 않는다
         result["folder_name"] = fn.strip()
     if isinstance(data.get("event"), dict):
         result["event"] = {k: str(v) for k, v in data["event"].items() if v}
@@ -248,6 +271,13 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
             continue
         llm_dl.append({"date": nd, "time": str(d.get("time") or "")[:5], "what": str(d.get("what") or "")[:160],
                        "source": "AI"})
+    # 같은 날짜면 AI가 비워 둔 시각·문구를 규칙 결과로 채운다 (AI는 '17:00' 같은 시각을 자주 빠뜨린다)
+    rule_by_date = {d["date"]: d for d in base["deadlines"]}
+    for d in llm_dl:
+        r = rule_by_date.get(d["date"])
+        if r:
+            d["time"] = d["time"] or r.get("time", "")
+            d["what"] = d["what"] or r.get("what", "")
     # 규칙 기반으로 찾았지만 AI가 놓친 기한은 보존
     have = {d["date"] for d in llm_dl}
     llm_dl.extend(d for d in base["deadlines"] if d["date"] not in have)

@@ -145,6 +145,10 @@ class Store:
         self.execute("UPDATE notices SET analysis=? WHERE id=?",
                      (json.dumps(analysis, ensure_ascii=False), notice_id))
 
+    def update_notice_attachments(self, notice_id: int, attachments: list) -> None:
+        self.execute("UPDATE notices SET attachments=? WHERE id=?",
+                     (json.dumps(attachments, ensure_ascii=False), notice_id))
+
     def _notice_row(self, r: dict) -> dict:
         r["attachments"] = json.loads(r.get("attachments") or "[]")
         r["analysis"] = json.loads(r.get("analysis") or "{}")

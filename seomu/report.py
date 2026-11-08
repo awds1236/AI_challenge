@@ -607,6 +607,23 @@ def _md(d: str) -> str:
         return d
 
 
+def plausible_title(title: str, reference: str, headings: list | None = None) -> bool:
+    """AI가 낸 보고서 제목이 쓸 만한지: 비어 있지 않고, 양식 소제목을 늘어놓은 것이 아니며,
+    공문 제목(규칙 제목)과 두 글자 이상 낱말을 하나라도 함께 쓴다."""
+    t = (title or "").strip()
+    if len(t) < 4:
+        return False
+    heads = set()
+    for h in headings or []:
+        text = h.get("text", "") if isinstance(h, dict) else str(h)
+        heads.update(w for w in re.split(r"[\s,·/]+", re.sub(r"^[□○\-※\s]+", "", text)) if len(w) >= 2)
+    words = [w for w in re.split(r"[\s,·/()「」]+", t) if len(w) >= 2]
+    if words and heads and sum(w in heads for w in words) >= len(words) * 0.6:
+        return False                                  # '추진 배경, 주요 내용, 향후 계획'
+    ref = {w for w in re.split(r"[\s,·/()「」\[\]]+", reference or "") if len(w) >= 2}
+    return not ref or any(w in ref or any(w in r or r in w for r in ref) for w in words)
+
+
 def outline_from_notice(notice: dict, purpose: str = "") -> dict:
     """공문 분석 결과로 규칙 기반 보고서 개요를 만든다 (AI 없이도 동작)."""
     a = notice.get("analysis") or {}
@@ -617,12 +634,17 @@ def outline_from_notice(notice: dict, purpose: str = "") -> dict:
     for k, label in (("name", "행사명"), ("date", "일시"), ("place", "장소")):
         if ev.get(k):
             overview.append({"head": label, "text": ev[k]})
+    target = next((v for k, v in (a.get("fields") or {}).items() if k.endswith("대상")), "")
+    if target:
+        overview.append({"head": "대상", "text": target})
     if a.get("contact"):
         overview.append({"head": "문의처", "text": a["contact"]})
     sections = [{"heading": "개요", "items": overview}]
     dl = a.get("deadlines") or []
     subs = a.get("submissions") or []
-    items = [{"head": f"{_md(d['date'])}{(' ' + d['time']) if d.get('time') else ''}", "text": d["what"]} for d in dl[:4]]
+    # 날짜에도 요일 괄호가 있어 '(11. 20.(금))'처럼 겹치지 않게, 머리는 '(기한)'으로 두고 날짜는 본문에 쓴다
+    items = [{"head": "기한", "text": f"{_md(d['date'])}{(' ' + d['time']) if d.get('time') else ''}까지 {d['what']}"}
+             for d in dl[:4]]
     for s in subs[:4]:
         extra = ", ".join(x for x in (s.get("how"), s.get("to")) if x)
         items.append({"head": "제출물", "text": s["item"] + (f" ({extra})" if extra else "")})
@@ -636,7 +658,9 @@ def outline_from_notice(notice: dict, purpose: str = "") -> dict:
     acts = [x for x in (a.get("actions") or []) if x][:5]
     if acts:
         sections.append({"heading": "조치 계획", "items": [{"text": x} for x in acts]})
-    return {"title": title, "summary": a.get("summary") or "", "sections": sections}
+    # 요약 상자는 한 문장: 둘째 줄(대상 등)은 개요 항목으로 옮겼다
+    summary = (a.get("summary") or "").splitlines()[0] if a.get("summary") else ""
+    return {"title": title, "summary": summary, "sections": sections}
 
 
 def outline_from_text(material: str, purpose: str = "") -> dict:

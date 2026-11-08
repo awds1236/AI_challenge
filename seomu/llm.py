@@ -68,9 +68,11 @@ class OllamaClient:
             body = e.read().decode("utf-8", "ignore")[:300]
             raise LLMError(f"Ollama 오류 {e.code}: {body}") from e
         except (urllib.error.URLError, OSError) as e:
+            import logging
+            logging.getLogger("seomu.llm").info("Ollama 연결 실패: %s", e)      # 기술적인 원인은 기록에만
             raise LLMError(
-                "로컬 AI 엔진(Ollama)에 연결할 수 없습니다. Ollama가 실행 중인지 확인하세요. "
-                f"({e})"
+                "AI 엔진이 연결되어 있지 않습니다. 설정 → AI 모델에서 [받기]를 누르면 내장 AI 엔진과 모델을 받아 "
+                "Ollama 없이 쓸 수 있습니다 (Ollama를 쓰신다면 Ollama를 실행해 주세요)."
             ) from e
 
     def _json(self, path: str, payload: dict | None = None, timeout: float | None = None) -> dict:
@@ -107,7 +109,7 @@ class OllamaClient:
         except LLMError:
             m = ""
         if not m:
-            raise LLMError("설치된 AI 모델이 없습니다. 예: `ollama pull gemma3:4b` 실행 후 다시 시도하세요.")
+            raise LLMError("설치된 AI 모델이 없습니다. 설정 → AI 모델에서 [받기]를 누르면 AI 답변을 쓸 수 있습니다.")
         return m
 
     def pick_embed_model(self, configured: str = "") -> str:

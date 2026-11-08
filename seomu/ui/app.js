@@ -60,6 +60,15 @@ async function api(name, ...args) {
       await sleep(300 * (i + 1));
     }
   }
+  if (r.status === 403) {
+    // 프로그램 내부 서버가 다시 시작돼 보안 토큰이 바뀌었다 → 화면을 새로 불러 새 토큰을 받는다 (한 번만)
+    if (!sessionStorage.getItem("seomu_reloaded")) {
+      try { sessionStorage.setItem("seomu_reloaded", "1"); } catch { /* 저장 불가해도 새로고침 */ }
+      location.reload();
+    }
+    throw new Error("프로그램이 다시 시작되었습니다. 창을 닫고 run.bat으로 다시 실행해 주세요.");
+  }
+  try { sessionStorage.removeItem("seomu_reloaded"); } catch { /* 무시 */ }
   const j = await r.json();
   if (!j.ok) throw new Error(j.error || "오류가 발생했습니다");
   return j.result;
@@ -323,7 +332,9 @@ async function doCollect(name, args) {
     });
     hud(false);
     const a = notice.analysis || {};
-    toast(`정리 완료: ${a.folder_name || notice.title} · 기한 ${(a.deadlines || []).length}건 등록` +
+    const stale = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
+    const live = (a.deadlines || []).filter((d) => d.date >= stale).length, old = (a.deadlines || []).length - live;
+    toast(`정리 완료: ${a.folder_name || notice.title} · 할 일 ${live}건 등록` + (old ? ` (이미 지난 기한 ${old}건은 상세에만 표시)` : "") +
       (a.ai_status === "running" ? " · 로컬 AI가 이어서 자세히 분석합니다" : ""), "ok", 5000);
     if (a.ai_status === "running") watchAI(notice.id);
     await loadNotices();
@@ -379,7 +390,7 @@ async function openNotice(id) {
     const dt = new Date(d.date + "T00:00:00");
     const dd = Math.round((dt - today) / 86400000);
     return `<div class="deadline"><div class="date"><div class="m">${dt.getMonth() + 1}월</div><div class="d">${dt.getDate()}</div></div>
-      <div class="what"><div>${esc(d.what)}</div><div class="muted small">${fmtDate(d.date)} ${esc(d.time || "")} · ${esc(d.source || "")}</div></div>${ddayBadge(dd)}</div>`;
+      <div class="what"><div>${esc(d.what)}</div><div class="muted small">${fmtDate(d.date)} ${esc(d.time || "")} · ${d.source === "AI" ? "AI 분석" : "본문에서 찾음"}</div></div>${dd < -14 ? '<span class="badge">지난 기한</span>' : ddayBadge(dd)}</div>`;
   }).join("") || `<div class="muted">본문에서 제출 기한을 찾지 못했습니다.</div>`;
   const subs = (a.submissions || []).map((s) => `<li><div>${esc(s.item)}${s.how || s.to ? `<div class="muted small">${esc([s.how, s.to].filter(Boolean).join(" · "))}</div>` : ""}</div></li>`).join("");
   const acts = (a.actions || []).map((x) => `<li>${esc(x)}</li>`).join("");
@@ -388,7 +399,7 @@ async function openNotice(id) {
   // 붙임: 누르면 앱 안에서 내용 미리보기 (한글·PDF 뷰어가 없는 PC에서도 확인), [열기]는 PC 프로그램으로
   const files = (n.attachments || []).map((f) => `<div class="attach" ${f.ok ? `data-preview="${esc(f.path)}"` : ""}>
       <div class="ext ${extOf(f.name)}">${esc(extOf(f.name)).slice(0, 4)}</div>
-      <div class="main-col"><div>${esc(f.name)}</div><div class="muted small">${f.ok ? "받기 완료 · 눌러서 내용 보기" : "받지 못함: " + esc(f.error || "")}</div></div>
+      <div class="main-col"><div>${esc(f.name)}</div><div class="muted small">${f.ok ? (f.from === "직접 넣은 파일" ? "직접 넣은 파일" : "공문 폴더에 있음") + " · 눌러서 내용 보기" : "받지 못함: " + esc(f.error || "")}</div></div>
       ${f.ok ? `<div class="acts"><button class="btn ghost sm" data-open="${esc(f.path)}">열기</button></div>` : ""}</div>`).join("")
     || `<div class="muted">붙임 파일이 없습니다.</div>`;
   const sumLines = String(a.summary || "-").split("\n");
@@ -848,7 +859,16 @@ function bind() {
   $("#pv-open").addEventListener("click", async () => { if (previewPath && !(await api("open_path", previewPath))) toast("파일을 열 수 없습니다", "err"); });
   $("#pv-copy").addEventListener("click", async () => { await copyText($("#pv-body").textContent); toast("글자를 복사했습니다", "ok"); });
   $("#nd-folder").addEventListener("click", () => currentNotice && api("open_notice_folder", currentNotice.id));
-  $("#nd-mail").addEventListener("click", async () => { if (!currentNotice) return; const id = currentNotice.id; closeSheet(); go("mail"); await loadMail(); $("#mc-notice").value = String(id); makeMail(); });
+  $("#nd-mail").addEventListener("click", async () => {
+    if (!currentNotice) return;
+    const id = currentNotice.id, ev = (currentNotice.analysis || {}).event || {};
+    closeSheet(); go("mail"); await loadMail(); $("#mc-notice").value = String(id);
+    // 공문 종류에 맞는 양식: 행사·교육 안내면 '행사 참석 안내', 아니면 '부서 제출 요청'
+    const want = ev.name ? "행사" : "제출 요청";
+    const t = state.templates.find((x) => x.name.includes(want));
+    if (t) $("#mc-template").value = String(t.id);
+    makeMail();
+  });
   $("#nd-reanalyze").addEventListener("click", async () => {
     if (!currentNotice) return;
     hud("다시 분석하는 중…");
@@ -996,7 +1016,7 @@ function bind() {
 
 // ------------------------------------------------------------------ 시작
 // 창이 열려 있다는 신호: 프로그램은 이 신호가 끊기면 창이 닫힌 것으로 보고 종료한다
-async function heartbeat() { try { await fetch("/api/heartbeat", { method: "POST", headers: { "Content-Type": "application/json", "X-Seomu-Token": window.SEOMU_TOKEN || "" }, body: "{}" }); } catch (e) { /* 다음 신호에서 다시 */ } }
+async function heartbeat() { try { await api("heartbeat"); } catch (e) { /* 다음 신호에서 다시 (토큰이 바뀌었으면 api()가 화면을 새로 불러온다) */ } }
 heartbeat(); setInterval(heartbeat, 5000);
 
 (async function init() {

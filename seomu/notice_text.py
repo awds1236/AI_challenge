@@ -21,7 +21,10 @@ _WEB_NOISE = re.compile(
     r"전체\s*메뉴|메뉴\s*(?:열기|닫기)?|홈|HOME|목록|목록\s*보기|목록으로|이전\s*글|다음\s*글|인쇄|프린트|출력|공유|"
     r"공유하기|스크랩|TOP|맨\s*위로|위로|검색|통합\s*검색|닫기|글자\s*크기|확대|축소|미리\s*보기|바로\s*보기|"
     r"내려\s*받기|다운\s*로드|첨부\s*파일\s*없음|개인정보\s*처리\s*방침|이용\s*약관|저작권\s*정책|"
-    r"이메일\s*무단\s*수집\s*거부|뷰어\s*다운로드|(?:copyright|ⓒ|©).*|(?:조회\s*수?|추천\s*수?)\s*[:：]?\s*[\d,]*)$",
+    r"이메일\s*무단\s*수집\s*거부|뷰어\s*다운로드|(?:copyright|ⓒ|©).*|(?:조회\s*수?|추천\s*수?)\s*[:：]?\s*[\d,]*\s*회?|"
+    r"열기|URL\s*복사.*|주소\s*복사.*|화면\s*크기\s*(?:축소|확대|초기화)|메인\s*페이지\s*(?:이동|로)?|"
+    r"(?:작성|등록|게시|수정)\s*(?:일|일자|일시)\s*[:：]?\s*[\d.\-: ]*|인쇄하기|공유\s*하기|SNS\s*공유|"
+    r"(?:본문|첨부)\s*보기|이전\s*페이지|맨\s*위로\s*가기)$",
     re.I)
 _BREADCRUMB = re.compile(r"^(?:홈|HOME|Home|처음)\s*[>›»∙·/]\s*\S")
 _ENUM_START = re.compile(r"^\s*(?:\d{1,2}\s*[.)]|[가-하]\s*[.)]|\(\s*[\w가-힣]{1,2}\s*\)|[①-⑳]|[-·○◦•※□■▶◆◇▷►*]|"
@@ -68,12 +71,21 @@ def tidy_text(text: str) -> str:
     t = t.replace("\r\n", "\n").replace("\r", "\n")
     raw = [re.sub(r"[ \t]+$", "", l) for l in t.split("\n")]
     lines = []
+    skip_next = False
     for l in raw:
         l = re.sub(r"^[ \t]+", "", l)
         l = re.sub(r"\t{2,}", "\t", l)
         l = _fix_label_spacing(l)
         l = re.sub(r" {2,}", " ", l)
-        if _WEB_NOISE.match(l.strip()) or _BREADCRUMB.match(l.strip()):
+        s = l.strip()
+        if skip_next and s:
+            skip_next = False
+            if len(s) <= 10:                 # 게시판 정보 칸 '작성자' 다음 줄의 이름
+                continue
+        if _WEB_NOISE.match(s) or _BREADCRUMB.match(s):
+            continue
+        if re.fullmatch(r"(?:작성자|글쓴이|작성부서|담당자명)\s*[:：]?", s):
+            skip_next = True
             continue
         lines.append(l)
     # 빈 줄이 거의 모든 줄 사이에 끼어 있으면(웹 복사) 한 줄 빈 줄은 없앤다
@@ -266,20 +278,24 @@ def purpose_paragraph(clean: str) -> str:
     if cur:
         paras.append(cur)
     req = re.compile(r"(요청|협조|바랍니다|부탁|알려|안내|제출|회신|개최|시행|신청|조사|통보|추천|참석|모집|공모)")
-    for p in paras:
-        if re.search(r"(관련\s*[:：]|^\s*\d+\s*[.)]\s*관련)", p) or _GREETING.search(p):
-            continue
-        if req.search(p):
-            return p
-    # 번호 문단이 없는 글: 인사말·머리글을 뺀 문장 중 요청이 담긴 첫 문장
-    for line in clean.splitlines():
+    strong = re.compile(r"(바랍니다|주시기|요청\s*드|부탁|하오니|협조하여|알려\s*드리|안내\s*드리|안내합니다|알립니다)")
+    lines = clean.splitlines()
+    first_num = next((i for i, l in enumerate(lines) if re.match(r"^\s*\d{1,2}\s*[.)]\s*\S", l)), len(lines))
+    cands = [p for p in paras if not (re.search(r"(관련\s*[:：]|^\s*\d+\s*[.)]\s*관련)", p) or _GREETING.search(p))]
+    # 번호 문단 앞의 안내 문장(게시판 글은 번호 없이 '…안내하오니 …바랍니다'로 시작하는 경우가 많다)
+    lead = []
+    for line in lines[:first_num]:
         s = line.strip()
-        if len(s) < 15 or _GREETING.search(s) or re.match(r"^(안녕하|수고|감사합니다)", s):
+        if len(s) < 15 or _GREETING.search(s) or re.match(r"^(안녕하|수고|감사합니다|축하)", s):
             continue
         if re.match(r"^[^:：]{1,12}[:：]", s) or _ENUM_START.match(s):
             continue
-        if req.search(s):
-            return s
+        lead.append(s)
+    ordered = lead + cands
+    for pat in (strong, req):                 # 요청 어미가 분명한 문장을 먼저
+        for p in ordered:
+            if pat.search(p):
+                return p
     return paras[0] if paras else ""
 
 
@@ -348,10 +364,18 @@ def rule_summary(title: str, clean: str, fields: dict, deadlines: list[dict] | N
         bg = summary_sentence(bg_line)
         bg = re.sub(r"^.{2,60}?(?:을|를)?\s*(?:위하여|위해서?|위한)\s+", "", bg)
         req = summary_sentence(_strip_due(req_line))
+        if " — " in req:                  # 요청 문장에도 '배경 — 요청'이 있으면 요청 부분만 (— 가 두 번 나오지 않게)
+            req = req.split(" — ")[-1]
         req = re.sub(r"^\S*(?:첨부한|붙임의?|별첨)\s+", "", req)
         first = f"{bg} — {re.sub(r'  +', ' ', req).strip()}"
     if len(first) < 6:
         first = re.sub(r"^\[[^\]]{1,20}\]\s*", "", title).strip()
+    elif len(first) > 100 or (" — " not in first and len(first) > 70):
+        # 법령 입법예고처럼 요청 문장이 아주 길면 '제목 — 의견 제출 요청'으로 줄인다
+        ov = _last_obj_verb(_strip_due(para or ""))
+        core = re.sub(r"\s*(?:안내|알림)$", "", re.sub(r"^\[[^\]]{1,20}\]\s*", "", title)).strip()
+        if ov and core:
+            first = f"{core} — {ov} 요청"
     due = next((d for d in (deadlines or []) if d.get("date")), None)
     if due and "까지" not in first and re.search(r"(요청|제출|회신|신청|등록|보고|접수)", first):
         first += f" ({_due_phrase(due)})"
@@ -363,17 +387,48 @@ def rule_summary(title: str, clean: str, fields: dict, deadlines: list[dict] | N
     return first + ("\n" + " · ".join(extra) if extra else "")
 
 
-def clean_what(context: str, raw_date: str, fields: dict, title: str) -> str:
-    """기한 줄을 '조사표 회신' 같은 할 일 문장으로."""
+_OBJ_VERB = re.compile(r"([가-힣A-Za-z0-9·]{2,20}?)(?:을|를)\s+(?:\S+\s+){0,5}?(제출|회신|신청|보고|등록|통보|참석|접수|작성)")
+_VERB = re.compile(r"(제출|회신|신청|보고|등록|통보|참석|접수|작성)")
+
+
+def _last_obj_verb(s: str) -> str:
+    """문장의 마지막 '무엇을 … 제출'에서 동사 바로 앞의 목적어를 고른다.
+    '다음 사항을 기재한 의견서를 장관에게 제출' → '의견서 제출' (흔한 오타 '룰'도 목적격 조사로 본다)"""
+    verbs = list(_VERB.finditer(s))
+    if not verbs:
+        return ""
+    v = verbs[-1]
+    window = s[max(0, v.start() - 60):v.start()]
+    objs = re.findall(r"([가-힣A-Za-z0-9·]{2,20}?)(?:을|를|룰)\s", window)
+    return f"{objs[-1]} {v.group(1)}" if objs else ""
+
+
+def _heading_task(heading: str, verb: str) -> str:
+    """'1. [경기도교육청] 2026학년도 초등학교 교사 등록 원서 제출' → '초등학교 교사 등록 원서 제출'"""
+    h = _ENUM.sub("", heading or "").strip()
+    h = re.sub(r"^\[[^\]]{1,30}\]\s*", "", h)
+    h = re.sub(r"^(?:20\d{2}|'\d{2})\s*(?:학년도|년도|년)\s*", "", h)
+    h = re.sub(r"\s*(?:안내|알림|요청|협조)$", "", h).strip(" .:")
+    if not h:
+        return ""
+    return h if re.search(r"(제출|회신|신청|접수|보고|등록|추천|통보|모집|응모)$", h) else f"{h} {verb}"
+
+
+def clean_what(context: str, raw_date: str, fields: dict, title: str, heading: str = "", table_verb: str = "",
+               prev: str = "") -> str:
+    """기한 줄을 '조사표 회신' 같은 할 일 문장으로.
+    heading: 그 줄 위의 번호 제목('1. … 등록 원서 제출'), table_verb: 표 머리글의 동사('신청 기간' → '신청')."""
     s = _ENUM.sub("", context or "").strip()
-    m = re.match(r"^(회신|제출|신청|접수|보고|등록|추천|통보)\s*기\s*한\s*[:：]?", s.replace(" ", "")[:12])
-    if m or re.match(r"^(회\s*신|제\s*출|신\s*청|접\s*수|보\s*고|등\s*록|추\s*천|통\s*보)\s*기\s*한", s):
+    m = re.match(r"^(회신|제출|신청|접수|보고|등록|추천|통보)\s*기\s*[한간]\s*[:：]?", s.replace(" ", "")[:12])
+    if m or re.match(r"^(회\s*신|제\s*출|신\s*청|접\s*수|보\s*고|등\s*록|추\s*천|통\s*보)\s*기\s*[한간]", s):
         verb = re.sub(r"\s", "", s)[:2]
         _l, obj = _get(fields, f"{verb}자료", f"{verb}서류", "제출서류", "제출자료", "회신자료", "제출물", "보고자료")
         obj = item_names(obj)
         if obj and verb in ("신청", "접수"):        # '신청서 신청'처럼 어색해지지 않게 서류는 '제출'
             verb = "제출"
-        return f"{'·'.join(obj)} {verb}".strip() if obj else f"{title} {verb}".strip()
+        if obj:
+            return f"{'·'.join(obj)} {verb}".strip()
+        return _heading_task(heading, verb) or f"{title} {verb}".strip()
     # '이수 기한: …', '결과 보고 기한: …'처럼 목록에 없는 '○○ 기한' 항목
     g = re.match(r"^([가-힣 ]{1,12}?)\s*기\s*한\s*[:：]", s)
     if g:
@@ -393,9 +448,24 @@ def clean_what(context: str, raw_date: str, fields: dict, title: str) -> str:
         return f"{'·'.join(item_names(obj))} {v}"
     if raw_date:
         s = s.replace(raw_date, " ")
+    # 기간의 다른 날짜·'~'·시각 조각을 뺀다 ('1차 계절학기 2026.06.08.(월) ~' → '1차 계절학기')
+    from .deadlines import DATE_PATTERNS
+    for pat in DATE_PATTERNS:
+        s = pat.sub(" ", s)
+    s = re.sub(r"\(\s*[월화수목금토일]\s*\)|\b\d{1,2}:\d{2}\b|[~∼～]", " ", s)
     s = re.sub(r"^\s*(까지|한)\b", "", re.sub(r"(?<=\s)(까지|한)(?=\s|$)", "", s))
     s = re.sub(r"\t+", " · ", s)
     s = re.sub(r"\s{2,}", " ", s).strip(" ·.,:")
+    if not s and prev:       # 날짜만 있는 줄: 바로 위의 짧은 항목 이름 ('마. 접수 마감' → '접수 마감')
+        label = _ENUM.sub("", prev).strip(" :：")
+        if 2 <= len(label) <= 15 and not re.search(r"\d", label):
+            return label
+    if s and table_verb and not re.search(r"(제출|회신|신청|접수|보고|등록|모집|응모)", s) and len(s) <= 40:
+        return f"{s.replace(' · ', ' ')} {table_verb}".strip()        # 표의 행: '1차 계절학기 신청'
+    if len(s) > 40:                     # 긴 문장: 동사 바로 앞의 '무엇을 … 제출' ('의견서를 … 제출하여' → '의견서 제출')
+        ov = _last_obj_verb(s)
+        if ov:
+            return ov
     if len(s) > 18 and re.search(r"(바랍니다|부탁드립니다|주시기|하시어|하여)", s):
         s = _nounize(_LEAD.sub("", s))          # 긴 문장은 '수요조사표 작성 · 회신 요청'처럼 줄인다
         s = re.sub(r"\s*요청$", "", s)

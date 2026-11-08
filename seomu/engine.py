@@ -34,6 +34,21 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def launch_error_message(e: OSError) -> str:
+    """엔진 실행 실패를 사용자가 할 일로 바꿔 알려 준다.
+    Windows 11의 스마트 앱 컨트롤·기관 보안 정책은 서명 없는 실행 파일(llama.cpp 공식 배포본도 서명이 없다)을
+    막을 수 있다 (WinError 4551·1260·225). 보안 설정을 끄라고 권하지 않고, 대안(Ollama)과 문의처를 안내한다."""
+    code = getattr(e, "winerror", None)
+    if code in (4551, 4552, 1260):
+        return ("Windows 보안 정책(스마트 앱 컨트롤 또는 기관 보안 정책)이 내장 AI 엔진(llama-server.exe) 실행을 막았습니다. "
+                "보안 설정은 그대로 두고, Ollama(서명된 설치 프로그램)를 설치해 설정 → AI 엔진에서 'Ollama'를 고르거나 "
+                "전산 담당자에게 허용을 요청하세요. AI 없이도 규칙 기반 분석·검색은 그대로 쓸 수 있습니다.")
+    if code == 225:
+        return ("백신 프로그램이 내장 AI 엔진(llama-server.exe)을 막았습니다. 전산 담당자에게 확인을 요청하거나 Ollama를 쓰세요. "
+                "AI 없이도 규칙 기반 분석·검색은 그대로 쓸 수 있습니다.")
+    return f"내장 AI 엔진을 실행하지 못했습니다: {e}"
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -141,7 +156,7 @@ class LocalEngine:
                                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             except OSError as e:
                 log.close()
-                raise LLMError(f"내장 AI 엔진을 실행하지 못했습니다: {e}") from e
+                raise LLMError(launch_error_message(e)) from e
             info = {"proc": proc, "model": model, "port": port, "log": log}
             self._procs[kind] = info
         url = f"http://127.0.0.1:{port}"

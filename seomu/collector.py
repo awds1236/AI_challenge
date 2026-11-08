@@ -154,6 +154,88 @@ def extract_title(text: str, html_title: str = "", headings: list[str] | None = 
     return "공문"
 
 
+_TITLE_ATTR = re.compile(r"(subject|tit|title|ntt_?sj|bbs_?sj|view_?head|headline|doc_?name)", re.I)
+_TITLE_BAD_ATTR = re.compile(r"(sub_?title|site|logo|menu|gnb|lnb|snb|nav|search|popup|pop|modal|layer|quick|footer|"
+                             r"banner|sitemap|location|breadcrumb|tab)", re.I)
+
+
+def _title_text(el) -> str:
+    """제목 요소의 글자에서 앞뒤의 짧은 분류 표시('일반', '공지', '일부', 'NEW')를 뗀다.
+    '<span>일반</span><strong>제목</strong>'처럼 태그 사이에 공백이 없어도 붙지 않게 조각 사이를 띄운다."""
+    text = re.sub(r"\s+", " ", " ".join(el.itertext())).strip()
+    for ch in el.iterdescendants():
+        if not isinstance(ch.tag, str):
+            continue
+        ct = re.sub(r"\s+", " ", ch.text_content() or "").strip()
+        if 1 <= len(ct) <= 4:
+            if text.startswith(ct + " "):
+                text = text[len(ct) + 1:]
+            elif text.endswith(" " + ct):
+                text = text[:-len(ct) - 1]
+    return text.strip()
+_VIEW_ATTR = re.compile(r"(view|bbs|board|ntt|article|detail|read|post|cont|doc)", re.I)
+_CHROME_ATTR = re.compile(r"(header|gnb|lnb|snb|nav|footer|menu|search|popup|sitemap|quick|util|banner)", re.I)
+
+
+def post_title(markup: str) -> str:
+    """게시판·문서 보기 화면에서 게시물 제목을 찾는다.
+    <title>·h1은 사이트·메뉴 이름인 경우가 많아, 본문 보기 영역 안의 제목 요소(h3, .subject, .tit …)에 점수를 매긴다."""
+    try:
+        import lxml.html  # type: ignore
+        doc = lxml.html.fromstring(markup)
+    except Exception:
+        return ""
+    # <title>과 스크립트로 바꾸는 document.title (게시물 제목이 들어 있는 경우가 있다)
+    page_titles = " ".join(re.findall(r"<title[^>]*>(.*?)</title>", markup, re.S | re.I)
+                           + re.findall(r"document\.title\s*=\s*[\"'](.*?)[\"']", markup, re.I))
+    site_title = re.sub(r"\s+", " ", (doc.findtext(".//title") or "")).strip()
+    best: tuple = (0, 0, "")
+    for el in doc.iter():
+        if not isinstance(el.tag, str) or el.tag.lower() in ("script", "style", "title", "option", "a", "button"):
+            continue
+        if el.xpath(".//a|.//button|.//input|.//select"):      # 게시물 제목에는 링크·버튼이 없다 (메뉴·도구 상자 제외)
+            continue
+        text = _title_text(el)
+        if not 8 <= len(text) <= 200 or re.search(r"(바로\s*가기|검색|메뉴$|로그인)", text):
+            continue
+        attr = f"{el.get('id', '')} {el.get('class', '')}"
+        ancestors = [a for a in el.iterancestors() if isinstance(a.tag, str)]
+        anc = " ".join(f"{a.get('id', '')} {a.get('class', '')}" for a in ancestors)
+        near = " ".join(f"{a.get('id', '')} {a.get('class', '')}" for a in ancestors[:2])     # 부모·조부모
+        score = 0
+        if _TITLE_BAD_ATTR.search(attr):
+            score -= 3                                          # 팝업·모달·메뉴 제목
+        elif _TITLE_ATTR.search(attr):
+            score += 3
+        elif re.search(r"(subject|tit)", near, re.I) and not _TITLE_BAD_ATTR.search(near):
+            score += 2                                          # 제목 상자 바로 안의 글자 (예: .subject > strong)
+        if el.tag.lower() in ("h1", "h2", "h3", "h4"):
+            score += 1
+        if _VIEW_ATTR.search(anc):
+            score += 2
+        # 머리말·메뉴 안에 있으면 감점. 단 게시물 보기 상자 안의 '머리'(예: .board-view > .header)는 제외
+        for i, a in enumerate(ancestors):
+            a_attr = f"{a.get('id', '')} {a.get('class', '')} {a.tag if a.tag in ('header', 'nav', 'footer') else ''}"
+            if _CHROME_ATTR.search(a_attr):
+                above = " ".join(f"{b.get('id', '')} {b.get('class', '')}" for b in ancestors[i + 1:])
+                if not _VIEW_ATTR.search(above):
+                    score -= 4
+                break
+        if _CHROME_ATTR.search(attr):
+            score -= 4
+        if text and text in page_titles:
+            score += 1
+        if text == site_title:
+            score -= 3
+        key = (score, -len(text), text)
+        if score >= 3 and key > best:
+            best = key
+    title = best[2]
+    # '한글 제목 / English Title' → 한글 부분만
+    m = re.match(r"^(.*[가-힣].*?)\s+/\s+[A-Za-z0-9 ,.:;'&()\-]+$", title)
+    return (m.group(1) if m else title)[:120]
+
+
 def analyze_html(markup: str, base_url: str = "") -> dict:
     lc = _LinkCollector()
     try:
@@ -161,19 +243,23 @@ def analyze_html(markup: str, base_url: str = "") -> dict:
     except Exception:
         pass
     text = main_text(markup)            # 메뉴·꼬리말을 뺀 본문 영역
-    attachments, seen = [], set()
+    attachments, by_key = [], {}
     for l in lc.links:
         if not is_attachment_link(l):
             continue
         href = l["href"]
         url = urllib.parse.urljoin(base_url, href) if href and not href.startswith("javascript") else ""
         key = url or (l["text"] + l["onclick"])
-        if key in seen:
+        name = l["text"] or l["title"] or Path(urllib.parse.urlparse(url).path).name
+        if key in by_key:
+            # 같은 붙임에 '다운로드' 버튼과 '파일이름.pdf' 링크가 함께 있으면 파일 이름을 쓴다
+            if not _EXT_RE.search(by_key[key]["name"] + " ") and _EXT_RE.search(name + " "):
+                by_key[key]["name"] = name
             continue
-        seen.add(key)
-        attachments.append({"name": l["text"] or l["title"] or Path(urllib.parse.urlparse(url).path).name,
-                            "url": url, "onclick": l["onclick"]})
-    return {"title": extract_title(text, lc.title, lc.h1), "text": text, "attachments": attachments}
+        by_key[key] = {"name": name, "url": url, "onclick": l["onclick"]}
+        attachments.append(by_key[key])
+    heads = [post_title(markup)] + lc.h1
+    return {"title": extract_title(text, lc.title, [h for h in heads if h]), "text": text, "attachments": attachments}
 
 
 # ---------------------------------------------------------------- 다운로드 보조
@@ -204,9 +290,31 @@ def filename_from_headers(cd: str | None, url: str, fallback: str = "붙임파�
     return safe_name(name or fallback, 120)
 
 
+_COOKIES = None
+
+
+def _ssl_context():
+    """Windows 인증서 저장소로 검증하는 SSL 설정.
+    공공기관 사이트 중에는 중간 인증서를 보내지 않는 곳이 많아 Python 기본 검증은 'unable to get local issuer
+    certificate'로 실패한다 (브라우저는 Windows가 중간 인증서를 찾아 줘서 열린다). truststore가 있으면 Windows와
+    같은 방식으로 검증한다. 검증 자체를 끄지는 않는다."""
+    import ssl
+    try:
+        import truststore  # type: ignore
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except Exception:
+        return ssl.create_default_context()
+
+
 def _opener():
     # 수집 대상 사이트(내부 그룹웨어 등)에는 시스템 프록시 설정을 그대로 따른다.
-    return urllib.request.build_opener()
+    # 쿠키를 유지해야 '세션 쿠키를 심고 같은 주소로 다시 보내는' 사이트에서 무한 리디렉션이 나지 않는다.
+    global _COOKIES
+    import http.cookiejar
+    if _COOKIES is None:
+        _COOKIES = http.cookiejar.CookieJar()
+    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_COOKIES),
+                                       urllib.request.HTTPSHandler(context=_ssl_context()))
 
 
 def iri_to_uri(url: str) -> str:
@@ -225,8 +333,11 @@ def iri_to_uri(url: str) -> str:
 def download_url(url: str, dest_dir: Path, name_hint: str = "", timeout: float = 60) -> Path:
     req = urllib.request.Request(iri_to_uri(url), headers={"User-Agent": "Mozilla/5.0 SeomuAI"})
     with _opener().open(req, timeout=timeout) as r:
-        name = filename_from_headers(r.headers.get("Content-Disposition"), r.geturl(), name_hint)
-        if "." not in name and name_hint and "." in name_hint:
+        cd = r.headers.get("Content-Disposition")
+        name = filename_from_headers(cd, r.geturl(), name_hint)
+        # 서버가 파일 이름을 알려 주지 않으면 주소 끝은 내부 이름('file-load', 'a1b2.hwpx')일 때가 많다
+        # → 링크에 보이는 파일 이름이 있으면 그것을 쓴다
+        if name_hint and _EXT_RE.search(name_hint + " ") and ("." not in name or not (cd and "filename" in cd.lower())):
             name = safe_name(name_hint, 120)
         path = unique_path(dest_dir / name)
         with open(path, "wb") as f:
@@ -656,6 +767,9 @@ class BrowserWorker:
                 except Exception:
                     continue
                 html_parts.append(h)
+                pt = post_title(h)                    # 게시물 제목 (사이트·메뉴 이름이 아닌)
+                if pt:
+                    headings.insert(0, pt)
                 try:
                     t = fr.evaluate("() => document.body ? document.body.innerText : ''")
                 except Exception:

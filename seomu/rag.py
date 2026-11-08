@@ -374,13 +374,23 @@ class RAGEngine:
             messages.append({"role": "user", "content": f"[근거]\n{ctx}\n\n[질문]\n{question}"})
             text = client.chat(messages, model, temperature=s.temperature, num_ctx=s.num_ctx, on_token=on_token,
                                max_tokens=900)
+            # 근거 목록: 답변이 인용했거나 관련이 깊은 조문까지만 (번호가 어긋나지 않게 뒤쪽만 잘라 낸다)
+            cited = {int(n) for n in re.findall(r"\[(\d{1,2})\]", text)}
+            top = hits[0].score or 1.0
+            keep = [i for i, h in enumerate(hits) if (i + 1) in cited or h.score >= top * 0.35]
+            sources = sources[:max(keep) + 1] if keep else sources[:1]
             return {"answer": text.strip(), "sources": sources, "mode": "llm", "model": model}
         except LLMError as e:
-            lines = [f"⚠️ 로컬 AI 모델을 사용할 수 없어 관련 조문만 찾아 보여드립니다.\n({e})\n"]
-            for i, h in enumerate(hits[:4], 1):
+            # AI 없이: 질문과 관련이 깊은 조문만 (가장 잘 맞는 조문보다 한참 덜 맞는 조문은 뺀다)
+            top = hits[0].score or 1.0
+            near = [h for h in hits[:4] if h.score >= top * 0.35] or hits[:1]
+            why = "설치된 AI 모델이 없어" if "모델" in str(e) else "로컬 AI에 연결할 수 없어"
+            lines = [f"{why} 질문과 관련된 조문을 찾아 보여 드립니다. "
+                     "(AI 답변을 쓰려면 설정 → AI 모델에서 [받기]를 누르세요.)\n"]
+            for i, h in enumerate(near, 1):
                 head = f"「{h.title}」 {h.heading}".strip()
                 lines.append(f"[{i}] {head}\n{h.text[:400]}{'…' if len(h.text) > 400 else ''}\n")
             msg = "\n".join(lines)
             if on_token:
                 on_token(msg)
-            return {"answer": msg, "sources": sources, "mode": "search"}
+            return {"answer": msg, "sources": [h.to_dict() for h in near], "mode": "search"}

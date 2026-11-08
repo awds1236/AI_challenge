@@ -25,7 +25,9 @@ DATE_PATTERNS = [
 
 DEADLINE_WORDS = ("까지", "기한", "마감", "한정", "기일", "내로", "이내")
 SUBMIT_WORDS = ("제출", "회신", "신청", "보고", "송부", "등록", "접수", "통보", "입력", "참가 신청")
-RANGE_TAIL = re.compile(r"\s*[~∼～\-]\s*(?:(?P<m2>1[0-2]|0?[1-9])\s*[.월]\s*)?(?P<d2>3[01]|[12]\d|0?[1-9])\s*[.일]?" + _WD)
+# '11. 13. ~ 17.'처럼 짧게 적은 끝날. '~ 2026. 2. 3.'처럼 연도부터 적은 끝 날짜는 따로 찾는다 (20을 20일로 읽지 않게)
+RANGE_TAIL = re.compile(r"\s*[~∼～\-]\s*(?!20\d{2}|[\'‘’`]\s*\d{2}\s*[.\-/])"
+                        r"(?:(?P<m2>1[0-2]|0?[1-9])\s*[.월]\s*)?(?P<d2>3[01]|[12]\d|0?[1-9])(?!\d)\s*[.일]?" + _WD)
 PHONE = re.compile(r"(?<!\d)(0\d{1,2})[-)\s.]?(\d{3,4})[-\s.](\d{4})(?!\d)")
 EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
@@ -98,8 +100,10 @@ def find_dates(text: str, ref: date | None = None) -> list[dict]:
                 score += 2
             if re.search(r"(기한|마감|제출일|회신일)\s*[:：]?\s*$", before):
                 score += 3
-            if re.search(r"(시행|생산|접수|작성|공고)\s*(일자|일)?\s*[:：]?\s*$", before):
+            if re.search(r"(시행|생산|접수|작성|공고|등록|게시|수정)\s*(일자|일)?\s*[:：]?\s*$", before):
                 score -= 3
+            if re.search(r"(기준\s*일?|발급\s*일?|기준\s*시점)\s*[:：]?\s*$", before):
+                score -= 4                    # '(기준일: 2026. 3. 1.)'은 기한이 아니다
             found.append({
                 "date": dt.isoformat(),
                 "end_date": end_date.isoformat() if end_date else None,
@@ -111,6 +115,21 @@ def find_dates(text: str, ref: date | None = None) -> list[dict]:
                 "pos": s,
             })
     found.sort(key=lambda x: x["pos"])
+    # '제출 기간: 2026. 1. 28.(수) 10:00 ~ 2026. 2. 3.(화) 18:00'처럼 시작~끝 날짜가 따로 적힌 기간은
+    # 끝 날짜가 기한이다 (신청·접수·제출·공모 기간일 때). 시작 날짜는 기한에서 뺀다.
+    lines = text.splitlines()
+    for a, b in zip(found, found[1:]):
+        gap = text[a["pos"] + len(a["raw"]):b["pos"]]
+        if not re.fullmatch(r"[\s.)]*(?:\d{1,2}:\d{2})?[\s.)]*[~∼～\-–][\s(]*", gap):
+            continue
+        a["score"] -= 4
+        a["is_deadline"] = a["score"] >= 3
+        ln = text.count("\n", 0, b["pos"])
+        around = " ".join(lines[max(0, ln - 8):ln + 1])        # 표의 머리글(예: '신청 기간')까지 본다
+        if re.search(r"(기간|기한|접수|신청|제출|마감|모집|공모|응모|의견)", around):
+            b["score"] = max(b["score"], 3) + 1
+            b["is_deadline"] = True
+            b["context"] = b["context"] or lines[ln][:200]
     return found
 
 

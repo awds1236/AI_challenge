@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from fake_engine import make_server
 from seomu.engine import LocalClient, LocalEngine, add_model_file, ollama_model_blob
 
 HERE = Path(__file__).parent
@@ -14,13 +15,7 @@ HERE = Path(__file__).parent
 
 @pytest.fixture()
 def engine(tmp_path):
-    if sys.platform.startswith("win"):
-        pytest.skip("가짜 실행 파일은 POSIX에서만")
-    eng_dir = tmp_path / "engine"
-    eng_dir.mkdir()
-    exe = eng_dir / "llama-server"
-    exe.write_text(f"#!/bin/sh\nexec {sys.executable} {HERE / 'fake_llama_server.py'} \"$@\"\n")
-    exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+    make_server(tmp_path / "engine")          # Windows: 가짜 llama-server.exe / POSIX: 셸 스크립트
     (tmp_path / "models").mkdir()
     (tmp_path / "models" / "gemma-4-E2B-it-QAT-Q4_0.gguf").write_bytes(b"GGUF")
     (tmp_path / "models" / "embeddinggemma-300m-Q8_0.gguf").write_bytes(b"GGUF")
@@ -28,6 +23,16 @@ def engine(tmp_path):
     e = LocalEngine(tmp_path)
     yield e
     e.stop()
+
+
+def test_launch_blocked_by_windows_policy_message():
+    """스마트 앱 컨트롤·보안 정책이 서명 없는 엔진을 막으면 보안 설정을 끄라고 하지 않고 대안을 안내한다."""
+    from seomu.engine import launch_error_message
+    e = OSError(22, "blocked")
+    e.winerror = 4551
+    msg = launch_error_message(e)
+    assert "스마트 앱 컨트롤" in msg and "Ollama" in msg and "끄" not in msg
+    assert "실행하지 못했습니다" in launch_error_message(OSError(2, "없음"))
 
 
 def test_engine_chat_stream_embed(engine):

@@ -380,8 +380,9 @@ def _raw_jpegs(page) -> list[tuple[str, bytes]]:
     return out
 
 
-def _ocr_pdf_images(reader, max_pages: int = 8) -> str:
-    """스캔 PDF: 페이지에 들어 있는 그림을 꺼내 OCR한다."""
+def _ocr_pdf_images(reader, max_pages: int = 8, path: Path | None = None) -> str:
+    """글자가 없는 PDF: 페이지 속 그림(스캔)을 꺼내 OCR한다. 그림도 없으면(글자를 선으로 바꿔 저장한 PDF)
+    Windows 내장 PDF 기능으로 페이지를 그려서 OCR한다."""
     import tempfile
     from . import winwindow
     if not winwindow.IS_WIN:
@@ -404,12 +405,20 @@ def _ocr_pdf_images(reader, max_pages: int = 8) -> str:
                 t = winwindow.ocr_body(0, image=p)
                 if t.strip():
                     texts.append(t)
+        if not texts and path is not None:
+            for p in winwindow.render_pdf_pages(Path(path), Path(td) / "render", max_pages):
+                t = winwindow.ocr_body(0, image=p)
+                if t.strip():
+                    texts.append(t)
     return "\n\n".join(texts)
 
 
 def normalize(text: str) -> str:
     import unicodedata
     text = unicodedata.normalize("NFC", html.unescape(text))      # 자모가 분리된 한글(NFD)을 붙인다
+    # 한글 프로그램에서 만든 PDF는 띄어쓰기가 NUL(\x00)로 나오는 경우가 많다 → 공백. 그 밖의 제어 문자는 뺀다
+    text = text.replace("\x00", " ").replace("\x0c", "\n")
+    text = re.sub(r"[\x01-\x08\x0b\x0e-\x1f\x7f]", "", text)
     text = re.sub(r"[​-‏⁠﻿]", "", text)
     text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\xa0", " ")
     text = re.sub(r"[ \t　]+\n", "\n", text)
@@ -561,7 +570,7 @@ def parse_pdf(path: Path) -> str:
         raise ParseError(f"PDF를 읽을 수 없습니다: {e}") from e
     text = "\n\n".join(pages)
     if len(re.sub(r"\s", "", text)) < 20:
-        ocr = _ocr_pdf_images(reader)            # 스캔 PDF → 그림 글자 읽기
+        ocr = _ocr_pdf_images(reader, path=path)            # 스캔 PDF → 그림 글자 읽기
         if ocr.strip():
             return normalize(fix_ocr_text(ocr))
         raise ParseError("PDF에 텍스트가 없습니다(스캔 이미지일 수 있음)")
