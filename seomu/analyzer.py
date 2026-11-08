@@ -34,12 +34,13 @@ SYSTEM = """당신은 공공기관 서무 직원을 돕는 비서입니다. 사�
 
 - folder_name: 폴더 이름으로 쓸 짧은 제목 (예: "OO행사 참여 요청", 25자 이내, 특수문자 금지)
 - summary: 이 공문이 '무엇을 요청·안내하는지'를 중심으로 2문장. 무엇을, 언제까지, 어떻게 해야 하는지 포함.
+  공문 어미('~하오니', '~하고자 합니다', '~바랍니다')를 쓰지 말고 '~해야 합니다' 문체로 쓰세요.
   기관 슬로건, 인사말('귀 기관의 무궁한 발전을…'), 수신·경유·발신 명의는 절대 넣지 마세요.
 - event: 행사/교육이 있으면 이름(name), 일시(date), 장소(place)
 - deadlines: 우리 기관(수신자)이 지켜야 할 제출·회신·신청 기한. date는 YYYY-MM-DD, time은 HH:MM(없으면 빈 문자열),
   what은 '조사표 회신', '참가신청서 제출'처럼 짧은 할 일 문장 (항목 번호·'회신기한 :' 같은 표기 제외)
 - submissions: 제출해야 할 문서/자료. item(서류명), how(제출 방법: 공문, 전자우편 등), to(제출처)
-- actions: 담당자가 해야 할 일을 순서대로 (짧은 문장, 5개 이내)
+- actions: 담당자가 해야 할 일을 순서대로, '○○ 작성', '○○ 제출'처럼 명사형으로 짧게 (5개 이내, 날짜는 넣지 마세요)
 - contact: 문의처 (부서, 전화, 메일)
 
 본문에 없는 내용은 만들지 말고 빈 값으로 두세요. 날짜에 연도가 없으면 오늘 기준으로 가장 가까운 미래 연도를 쓰세요.
@@ -214,6 +215,41 @@ def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | N
     }
 
 
+# ---------------------------------------------------------------- AI 결과 다듬기 (작은 모델은 문체가 들쭉날쭉하다)
+def tidy_ai_summary(s: str) -> str:
+    """AI 요약에 남은 공문 어미를 정리한다: '실시하오니, 각 학교는' → '실시하므로 각 학교는'."""
+    s = re.sub(r"하오니\s*,?\s*", "하므로 ", s or "")
+    s = re.sub(r"(?:하고자|하려고)\s*합니다", "합니다", s)
+    s = re.sub(r"하여\s*주시기\s*바랍니다", "해야 합니다", s)
+    s = re.sub(r"\s*바랍니다\.", "해야 합니다.", s)
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+
+def _iso_to_short(m) -> str:
+    return f"{int(m.group(2))}. {int(m.group(3))}."
+
+
+def tidy_ai_action(a: str) -> str:
+    """'교육 이수 결과 보고서를 작성합니다.' → '교육 이수 결과 보고서 작성', '2026-12-02까지' → '12. 2.까지'."""
+    a = re.sub(r"^\d+\s*[.)]\s+", "", (a or "").strip())           # 목록 번호 (날짜로 바꾸기 전에)
+    a = re.sub(r"(20\d{2})-(\d{2})-(\d{2})", _iso_to_short, a)
+    a = re.sub(r"\s*(?:해야\s*)?(?:합니다|됩니다|입니다)\.?$", "", a)
+    a = re.sub(r"(?:을|를)\s+(\S+?)(?:하|해)?$", r" \1", a)          # '보고서를 작성' → '보고서 작성'
+    a = re.sub(r"(작성|제출|회신|확인|취합|검토|신청|등록|보고|이수|참석|변경|실시|완료)(?:하기|함)$", r"\1", a)
+    return a.strip(" .")
+
+
+def tidy_ai_item(item: str) -> str:
+    """AI 제출물 이름을 규칙 분석과 같은 모양으로: '현황표(붙임 1 서식) 1부' → '현황표 (붙임 서식)'."""
+    word = re.search(r"(붙\s*임|첨\s*부|별\s*첨)", item or "")
+    names = item_names(item or "")
+    if not names:
+        return (item or "").strip()
+    label = re.sub(r"\s", "", word.group(1)) if word else "붙임"
+    mark = f" ({label} 서식)" if word or re.search(r"(서식|양식)", item) else ""
+    return " · ".join(names) + mark
+
+
 def _shares_word(name: str, title: str) -> bool:
     """두 글자 이상 낱말(또는 그 일부)을 하나라도 함께 쓰는지."""
     words = [w for w in re.split(r"[\s,·/()「」\[\]_]+", name or "") if len(w) >= 2]
@@ -256,6 +292,7 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
     for k in ("summary", "contact"):
         if isinstance(data.get(k), str) and data[k].strip():
             result[k] = data[k].strip()
+    result["summary"] = tidy_ai_summary(result["summary"])
     fn = data.get("folder_name")
     if isinstance(fn, str) and 2 <= len(fn.strip()) <= 40 and _shares_word(fn, title):
         # 공문 제목과 겹치는 낱말이 없는 이름('테스트' 등 AI가 지어낸 이름)은 쓰지 않는다
@@ -285,10 +322,12 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
     subs = []
     for s in data.get("submissions") or []:
         if isinstance(s, dict) and s.get("item"):
-            subs.append({"item": str(s["item"])[:160], "how": str(s.get("how") or ""), "to": str(s.get("to") or "")})
+            subs.append({"item": tidy_ai_item(str(s["item"]))[:160], "how": str(s.get("how") or ""),
+                         "to": str(s.get("to") or "")})
     if subs:
         result["submissions"] = subs
-    acts = [str(a)[:160] for a in (data.get("actions") or []) if str(a).strip()]
+    acts = [tidy_ai_action(str(a))[:160] for a in (data.get("actions") or []) if str(a).strip()]
+    acts = [a for i, a in enumerate(acts) if a and a not in acts[:i]]
     if acts:
         result["actions"] = acts
     return result

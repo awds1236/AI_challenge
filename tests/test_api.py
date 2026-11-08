@@ -89,7 +89,7 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setenv("SEOMU_DOWNLOADS", str(tmp_path / "dl"))
     from seomu.api import Api
     a = Api(tmp_path / "home")
-    a.save_settings({"ollama_url": f"http://127.0.0.1:{srv.server_address[1]}",
+    a.save_settings({"engine": "ollama", "ollama_url": f"http://127.0.0.1:{srv.server_address[1]}",
                      "regulation_dirs": [str(ROOT / "sample_data" / "regulations")]})
     yield a
     a.shutdown()

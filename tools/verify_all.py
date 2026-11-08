@@ -364,7 +364,7 @@ def main() -> int:
     from seomu.api import Api
     from mock_env import desktop, web_systems
     api = Api(work / "home")
-    api.save_settings({"ollama_url": "http://127.0.0.1:9", "browser_headless": True, "capture_foreground": False})
+    api.save_settings({"engine": "ollama", "ollama_url": "http://127.0.0.1:9", "browser_headless": True, "capture_foreground": False})
 
     # 홈페이지 게시판(주소 수집)용 정적 서버
     site = work / "site"

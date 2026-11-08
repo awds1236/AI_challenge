@@ -31,7 +31,7 @@ from .engine import LocalClient, LocalEngine, add_model_file, ollama_model_blob
 from .llm import LLMError, OllamaClient
 from . import models as model_catalog
 from . import attach, downloader, winwindow
-from .mail import DEFAULT_TEMPLATES, POLISH_PROMPT, VARIABLES, build_variables, render, tasks_to_ics
+from .mail import DEFAULT_TEMPLATES, POLISH_PROMPT, VARIABLES, build_variables, clean_polished, render, tasks_to_ics
 from .parsers import READABLE_EXT
 from .rag import RAGEngine
 from . import report as report_mod
@@ -919,9 +919,10 @@ class Api:
             model = c.pick_chat_model(s.chat_model)
             # 다듬은 글은 초안과 길이가 비슷하다: 생성 길이 상한을 초안 길이에 맞춰 군더더기 생성을 막는다
             limit = min(1536, int(len(body) * 1.1) + 160)
-            return {"body": c.chat([{"role": "user", "content": POLISH_PROMPT.format(body=body)}], model,
-                                   temperature=0.3, num_ctx=s.num_ctx, max_tokens=limit,
-                                   on_token=lambda t: setattr(job, "text", job.text + t)).strip()}
+            out = c.chat([{"role": "user", "content": POLISH_PROMPT.format(body=body)}], model,
+                         temperature=0.3, num_ctx=s.num_ctx, max_tokens=limit,
+                         on_token=lambda t: setattr(job, "text", job.text + t)).strip()
+            return {"body": clean_polished(out, body)}
         return self._run_job("polish", work)
 
     def save_mail_draft(self, subject: str, body: str, notice_id: int | None = None) -> str:

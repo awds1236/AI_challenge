@@ -182,6 +182,23 @@ POLISH_PROMPT = """다음은 공공기관 직원이 보낼 업무 메일 초안�
 {body}"""
 
 
+def clean_polished(out: str, draft: str) -> str:
+    """AI가 다듬은 메일에서 본문이 아닌 것을 걷어낸다.
+    작은 모델은 '본문만'이라고 해도 '제목: …', '수신: [관련 부서]' 같은 머리줄이나 초안에 없던 [빈칸]을 지어 붙인다."""
+    lines = (out or "").replace("```", "").strip().splitlines()
+    while lines and (not lines[0].strip() or re.match(r"^\s*(제목|수신|발신|참조|받는\s*사람|보내는\s*사람|Subject|To)\s*[:：]",
+                                                      lines[0], re.I)):
+        lines.pop(0)
+    keep = []
+    for l in lines:
+        new_slots = [x for x in re.findall(r"\[[^\]]{1,30}\]", l) if x not in draft]
+        if new_slots and len(re.sub(r"\[[^\]]*\]|\s", "", l)) < 8:      # 지어낸 빈칸만 있는 줄
+            continue
+        keep.append(l)
+    text = "\n".join(keep).strip()
+    return text if len(text) >= len(draft) * 0.4 else (out or "").strip()
+
+
 def ics_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
 

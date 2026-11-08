@@ -295,6 +295,29 @@ def test_ai_result_guards():
     assert plausible_title("학교 안전점검 결과 보고", "2026년 하반기 학교 안전점검 결과 제출 요청 관련 보고", heads)
 
 
+def test_tidy_real_model_output():
+    """실제 Gemma 4 E2B 출력에서 본 어색한 문장: 공문 어미가 남은 요약, 들쭉날쭉한 할 일, 서식 표시가 남은 제출물."""
+    from seomu.analyzer import tidy_ai_action, tidy_ai_item, tidy_ai_summary
+    assert tidy_ai_summary("안전점검을 실시하오니, 각 학교는 결과를 제출해야 합니다.") == "안전점검을 실시하므로 각 학교는 결과를 제출해야 합니다."
+    assert tidy_ai_summary("교육 수요를 조사하고자 합니다.") == "교육 수요를 조사합니다."
+    assert tidy_ai_action("부서별 집행잔액 현황을 취합합니다.") == "부서별 집행잔액 현황 취합"
+    assert tidy_ai_action("2026-12-02까지 보고서를 제출합니다.") == "12. 2.까지 보고서 제출"
+    assert tidy_ai_action("1. 명단 작성") == "명단 작성"
+    assert tidy_ai_item("집행잔액 현황표(붙임 1 서식) 1부") == "집행잔액 현황표 (붙임 서식)"
+    assert tidy_ai_item("참석자 명단 1부") == "참석자 명단"
+
+
+def test_polished_mail_drops_invented_headers():
+    """실제 모델이 '본문만' 지시에도 붙인 '제목: …', '수신: [관련 부서 또는 대상]' 줄은 걷어낸다."""
+    from seomu.mail import clean_polished
+    draft = "안녕하세요, 총무과 홍길동입니다.\n참석자 명단을 [내부서]로 제출 부탁드립니다.\n감사합니다."
+    out = ("제목: 「교육 참석자 명단 제출 요청」\n\n수신: [관련 부서 또는 대상]\n\n안녕하십니까. 총무과 홍길동입니다.\n"
+           "참석자 명단을 [내부서]로 제출하여 주시기 바랍니다.\n감사합니다.")
+    assert clean_polished(out, draft) == ("안녕하십니까. 총무과 홍길동입니다.\n참석자 명단을 [내부서]로 제출하여 주시기 바랍니다.\n"
+                                          "감사합니다.")
+    assert clean_polished("짧음", draft * 3) == "짧음"            # 거의 다 지워지면 원래 결과를 그대로 둔다
+
+
 def test_reference_attachments_are_not_submissions():
     _t, a = analyze_file("문서24_공문.txt")
     items = [s["item"] for s in a["submissions"]]
@@ -475,7 +498,7 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setenv("SEOMU_DOWNLOADS", str(tmp_path / "dl"))
     from seomu.api import Api
     a = Api(tmp_path / "home")
-    a.save_settings({"ollama_url": "http://127.0.0.1:9"})
+    a.save_settings({"engine": "ollama", "ollama_url": "http://127.0.0.1:9"})
     yield a
     a.shutdown()
 

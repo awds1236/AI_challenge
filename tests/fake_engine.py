@@ -85,9 +85,24 @@ def make_server(folder: Path) -> Path:
     return exe
 
 
+def smart_app_control_on() -> bool:
+    """Windows 11 스마트 앱 컨트롤이 켜져 있는지 (1 = 적용 중). 켜져 있으면 서명 없는 실행 파일을 막고 알림을 띄운다."""
+    if not IS_WIN:
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\CI\Policy") as k:
+            return winreg.QueryValueEx(k, "VerifiedAndReputablePolicyState")[0] == 1
+    except OSError:
+        return False
+
+
 def _skip_if_blocked(exe: Path) -> None:
-    """Windows 스마트 앱 컨트롤·보안 정책이 테스트용(서명 없는) 실행 파일을 막으면 실패 대신 건너뛴다."""
+    """Windows 스마트 앱 컨트롤·보안 정책이 테스트용(서명 없는) 실행 파일을 막으면 실패 대신 건너뛴다.
+    스마트 앱 컨트롤이 켜져 있으면 실행을 시도하지도 않는다: 막힐 때마다 화면에 'Windows 보안' 알림이 뜨기 때문."""
     import pytest
+    if smart_app_control_on():
+        pytest.skip("스마트 앱 컨트롤이 켜져 있어 테스트용(서명 없는) llama-server.exe를 실행하지 않음 (보안 알림 방지)")
     try:
         subprocess.run([str(exe), "--version"], capture_output=True, timeout=30,
                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
