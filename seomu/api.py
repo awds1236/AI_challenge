@@ -1017,6 +1017,28 @@ class Api:
             return {"body": clean_polished(out, body)}
         return self._run_job("polish", work)
 
+    def open_mail(self, subject: str, body: str = "") -> dict:
+        """기본 메일 프로그램(Outlook 등)의 새 메일 창을 연다 (Windows 표준 방식: ShellExecute로 mailto: 주소).
+        화면(WebView2)에서 mailto로 이동하면 막히거나 확인 창이 뜨는 경우가 있어 앱 안에서 연다.
+        Windows의 mailto 주소 길이 제한(약 2,000자) 때문에 본문이 길면 제목만 넘긴다 (본문은 화면에서 복사해 둔다)."""
+        import urllib.parse
+        q = urllib.parse.quote
+        url = f"mailto:?subject={q(subject or '')}&body={q(body or '')}"
+        with_body = len(url) <= 1900
+        if not with_body:
+            url = f"mailto:?subject={q(subject or '')}"
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(url)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", url])
+            else:
+                subprocess.Popen(["xdg-open", url])
+        except OSError as e:
+            raise RuntimeError("기본 메일 프로그램을 열 수 없습니다. [전체 복사]로 복사한 뒤 메일 프로그램에 붙여 넣으세요. "
+                               f"({e})") from e
+        return {"with_body": with_body}
+
     def save_mail_draft(self, subject: str, body: str, notice_id: int | None = None) -> str:
         """메일 초안을 공문 폴더(또는 다운로드 폴더)에 텍스트로 저장."""
         folder = None

@@ -932,10 +932,14 @@ function bind() {
   segmented($("#mail-mode"), (v) => $$(".mail-pane").forEach((p) => p.classList.toggle("on", p.dataset.mode === v)));
   $("#mc-make").addEventListener("click", () => makeMail().catch((e) => toast(e.message, "err")));
   $("#mc-copy").addEventListener("click", async () => { await copyText(`제목: ${$("#mc-subject").value}\n\n${$("#mc-body").value}`); toast("메일 내용을 복사했습니다", "ok"); });
-  $("#mc-mailto").addEventListener("click", () => {
-    const href = `mailto:?subject=${encodeURIComponent($("#mc-subject").value)}&body=${encodeURIComponent($("#mc-body").value)}`;
-    if (href.length > 1900) { copyText($("#mc-body").value); toast("본문이 길어 제목만 전달합니다. 본문은 복사되었으니 붙여넣기 하세요.", "info", 6000); location.href = `mailto:?subject=${encodeURIComponent($("#mc-subject").value)}`; }
-    else location.href = href;
+  $("#mc-mailto").addEventListener("click", async () => {
+    // 메일 프로그램이 안 뜨거나(설정 안 된 PC) 본문이 길어 제목만 넘어가도 바로 붙여 넣을 수 있게 본문은 늘 복사해 둔다
+    await copyText($("#mc-body").value);
+    try {
+      const r = await api("open_mail", $("#mc-subject").value, $("#mc-body").value);
+      toast(r.with_body ? "메일 프로그램을 엽니다. 열리지 않으면 복사해 둔 본문을 메일에 붙여 넣으세요."
+        : "본문이 길어 제목만 전달합니다. 본문은 복사해 두었으니 메일에 붙여 넣으세요.", "info", 7000);
+    } catch (e) { toast(e.message, "err", 7000); }
   });
   $("#mc-save").addEventListener("click", async () => { const nid = $("#mc-notice").value; const p = await api("save_mail_draft", $("#mc-subject").value, $("#mc-body").value, nid ? Number(nid) : null); toast(`저장했습니다: ${p}`, "ok", 6000); });
   $("#mc-polish").addEventListener("click", async () => {

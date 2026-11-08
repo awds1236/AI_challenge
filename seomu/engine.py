@@ -49,6 +49,56 @@ def launch_error_message(e: OSError) -> str:
     return f"내장 AI 엔진을 실행하지 못했습니다: {e}"
 
 
+_JOB = None
+
+
+def _kill_with_app(proc) -> None:
+    """엔진 프로세스를 Windows 작업 개체(Job Object)에 넣는다: 앱 프로세스가 어떻게 끝나든
+    (창 닫기·작업 관리자에서 끝내기·오류로 종료) 엔진도 함께 끝나 메모리를 돌려준다.
+    작업 개체를 쓸 수 없으면 아무것도 하지 않는다 (정상 종료 때는 shutdown()이 엔진을 끈다)."""
+    global _JOB
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        k32.OpenProcess.restype = wintypes.HANDLE
+        if _JOB is None:
+            class BASIC(ctypes.Structure):
+                _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                            ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                            ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                            ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                            ("SchedulingClass", wintypes.DWORD)]
+
+            class IO(ctypes.Structure):
+                _fields_ = [(n, ctypes.c_uint64) for n in ("r", "w", "o", "rt", "wt", "ot")]
+
+            class EXT(ctypes.Structure):
+                _fields_ = [("BasicLimitInformation", BASIC), ("IoInfo", IO), ("ProcessMemoryLimit", ctypes.c_size_t),
+                            ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                            ("PeakJobMemoryUsed", ctypes.c_size_t)]
+            job = k32.CreateJobObjectW(None, None)
+            if not job:
+                return
+            ext = EXT()
+            ext.BasicLimitInformation.LimitFlags = 0x2000          # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not k32.SetInformationJobObject(job, 9, ctypes.byref(ext), ctypes.sizeof(ext)):   # Extended limit
+                return
+            _JOB = job                                            # 앱이 끝나면 핸들이 닫혀 엔진도 끝난다
+        h = k32.OpenProcess(0x0001 | 0x0100, False, proc.pid)       # PROCESS_TERMINATE | PROCESS_SET_QUOTA
+        if h:
+            k32.AssignProcessToJobObject(_JOB, h)
+            k32.CloseHandle(h)
+    except Exception:
+        pass
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -133,7 +183,20 @@ class LocalEngine:
         with self._lock:
             info = self._procs.get(kind)
             if info and info["model"] == model and self._alive(info):
-                return f"http://127.0.0.1:{info['port']}"
+                if info.get("ready"):
+                    return f"http://127.0.0.1:{info['port']}"
+                # 다른 작업(앱 시작 때 미리 올리기 등)이 띄운 엔진이 아직 모델을 올리는 중이다 →
+                # 바로 요청하면 '503 Loading model'로 실패하므로 준비될 때까지 같이 기다린다
+                proc, port = info["proc"], info["port"]
+            else:
+                proc = None
+            if proc is None:
+                proc, port = self._launch(model, kind, ctx, threads)
+        return self._wait_ready(kind, proc, port, wait)
+
+    def _launch(self, model: str, kind: str, ctx: int, threads: int):
+        """엔진 프로세스를 띄운다 (RLock이라 ensure의 잠금 안에서 다시 잡아도 된다)."""
+        with self._lock:
             self.stop(kind)
             server = self.server_path()
             if not server:
@@ -157,8 +220,12 @@ class LocalEngine:
             except OSError as e:
                 log.close()
                 raise LLMError(launch_error_message(e)) from e
-            info = {"proc": proc, "model": model, "port": port, "log": log}
+            _kill_with_app(proc)                 # 앱이 비정상 종료돼도 엔진(메모리 수 GB)이 남지 않게
+            info = {"proc": proc, "model": model, "port": port, "log": log, "ready": False}
             self._procs[kind] = info
+        return proc, port
+
+    def _wait_ready(self, kind: str, proc, port: int, wait: float) -> str:
         url = f"http://127.0.0.1:{port}"
         end = time.time() + wait
         while time.time() < end:               # 모델 로드가 끝날 때까지 대기
@@ -168,6 +235,9 @@ class LocalEngine:
             try:
                 with _opener.open(url + "/health", timeout=2) as r:
                     if json.loads(r.read() or b"{}").get("status") in ("ok", "no slot available"):
+                        info = self._procs.get(kind)
+                        if info and info["proc"] is proc:
+                            info["ready"] = True
                         return url
             except (urllib.error.URLError, OSError, ValueError):
                 pass
