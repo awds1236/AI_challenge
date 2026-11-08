@@ -151,7 +151,26 @@
 
 ---
 
-## 설치와 실행 (Windows)
+## 가장 쉬운 방법: exe로 바로 실행 (Python 설치 불필요)
+
+1. [Releases](https://github.com/awds1236/AI_challenge/releases/latest)에서 **`SeomuAI-windows-x64.zip`**을 받아 압축을 풉니다.
+2. `SeomuAI` 폴더의 **`SeomuAI.exe`**를 더블클릭합니다. 프로그램 창이 열립니다.
+3. 처음 한 번은 **설정 → AI 모델**에서 **[받기]**를 눌러 AI 모델(약 3.3GB)을 받습니다. 내장 AI 엔진은 압축 파일에 들어 있어 Ollama가 필요 없습니다.
+   인터넷이 안 되는 PC는 `SeomuAI\models` 폴더에 `.gguf` 모델 파일을 직접 넣으면 됩니다.
+
+> Windows에서 '알 수 없는 게시자' 경고가 뜨면 **[추가 정보] → [실행]**을 누르세요(서명하지 않은 프로그램이라 뜨는 안내입니다).
+> 공문 목록·설정은 `%LOCALAPPDATA%\SeomuAI`, 수집한 공문은 `다운로드\서무비서` 폴더에 저장되므로 새 버전으로 바꿔도 그대로 남습니다.
+
+exe를 직접 만들려면(개발용):
+```bash
+.venv\Scripts\python.exe -m pip install pyinstaller
+```
+```bash
+.venv\Scripts\python.exe tools\build_exe.py
+```
+> `dist\SeomuAI\SeomuAI.exe`와 배포용 `dist\SeomuAI-windows-x64.zip`이 만들어집니다. 프로젝트의 `engine` 폴더가 있으면 내장 AI 엔진도 함께 넣습니다.
+
+## 설치와 실행 (Windows, 소스에서)
 
 **권장 사양**: Windows 10/11, RAM 16GB, Python 3.10 이상. GPU는 없어도 됩니다.
 
@@ -230,6 +249,7 @@
 │  ├─ storage.py      SQLite 로컬 저장소
 │  └─ ui/             Apple 스타일 화면 (HTML, CSS, JS, 외부 의존성 없음)
 ├─ tools/prepare_offline.ps1  업무망 설치 묶음 만들기 (엔진·모델·패키지)
+├─ tools/build_exe.py   실행 파일(SeomuAI.exe)과 배포용 zip 만들기
 ├─ tools/make_format_samples.py  여러 공문 시스템 형식의 예시(.mht·.eml·.zip) 만들기
 ├─ sample_data/       시연용 예시 내규와 공문 (formats/: 문서24·에듀파인·홈페이지·메일·전자결재 형식)
 └─ tests/             단위·통합 테스트 (pytest)
