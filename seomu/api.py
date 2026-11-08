@@ -504,6 +504,63 @@ class Api:
                                  detail=f"공문: {title}\n내용: {d['what']}" + (f"\n시각: {d['time']}" if d.get("time") else ""),
                                  due=d["date"], notice_id=nid)
 
+    @staticmethod
+    def _body_key(text: str) -> str:
+        return re.sub(r"\s+", "", text or "")
+
+    def _same_notice(self, text: str) -> dict | None:
+        """이미 수집한 공문 중 본문이 똑같은 것 (같은 공문을 다시 수집하면 공문·할 일이 겹쳐 생기던 문제).
+        본문을 읽지 못했거나 아주 짧으면 다른 공문일 수 있어 비교하지 않는다."""
+        key = self._body_key(text)
+        if len(key) < 60 or "본문을읽지못했습니다" in key:
+            return None
+        for r in self._store.query("SELECT id, body, folder FROM notices ORDER BY id DESC"):
+            if self._body_key(r.get("body")) == key and Path(r.get("folder") or "").is_dir():
+                return r
+        return None
+
+    def _merge_into(self, job: Job, dup: dict, cap: Captured) -> dict:
+        """같은 공문을 다시 수집했을 때: 새 공문을 만들지 않고, 이번에 새로 받은 붙임만 기존 공문 폴더에 더한다.
+        (완료 표시한 할 일·다시 분석한 결과는 그대로 둔다)"""
+        job.message = "이미 수집한 공문입니다 — 새 붙임만 더하는 중…"
+        dest = Path(dup["folder"]) / "붙임"
+        known = set()
+        if dest.is_dir():
+            for p in dest.rglob("*"):
+                if p.is_file():
+                    try:
+                        known.add(attach.file_hash(p))
+                    except OSError:
+                        pass
+        added = 0
+        for f in cap.files:
+            src = Path(f.get("path") or "")
+            if not f.get("ok") or not src.is_file():
+                continue
+            try:
+                h = attach.file_hash(src)
+            except OSError:
+                continue
+            if h in known:
+                continue
+            known.add(h)
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, unique_path(dest / src.name))
+            added += 1
+        # 이번 수집이 새로 만든 폴더는 지운다 (다운로드 폴더 안, 방금 만든 폴더일 때만)
+        try:
+            root = self._cfg.settings.resolved_download_root().resolve()
+            if cap.folder.exists() and root in cap.folder.resolve().parents \
+                    and cap.folder.resolve() != Path(dup["folder"]).resolve():
+                shutil.rmtree(cap.folder, ignore_errors=True)
+        except OSError:
+            pass
+        n = self.get_notice(dup["id"]) or {}            # 새로 넣은 붙임을 목록에 반영
+        n["duplicate"] = True
+        n["added_files"] = added
+        job.message = "완료"
+        return n
+
     def _finish_capture(self, job: Job, cap: Captured, use_ai: bool) -> dict:
         """① 규칙 기반 분석으로 바로 저장·표시 → ② 로컬 AI 보완 분석은 백그라운드에서."""
         job.message = "기한·제출물을 찾는 중…"
@@ -513,6 +570,9 @@ class Api:
             cap.text = tidy
             save_body(cap.folder, cap.title, tidy, "", cap.url)
         cap.title = clean_title(cap.title)
+        dup = self._same_notice(cap.text)
+        if dup:
+            return self._merge_into(job, dup, cap)
         cap.files = expand_archives(cap.files)          # zip 붙임은 풀어서 함께 읽는다
         if not cap.files:
             # 붙여넣기·주소 수집 등으로 파일이 따라오지 않았어도, 본문에 적힌 붙임은 '받지 못함'으로 알려 준다

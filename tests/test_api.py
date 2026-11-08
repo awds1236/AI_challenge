@@ -241,3 +241,28 @@ def test_capture_window_harvests_existing_attachment(api, tmp_path, monkeypatch)
     assert n["attach_summary"] == {"expected": 1, "found": 1, "extra": 0}
     assert (Path(n["folder"]) / "붙임" / "공공체육시설 문화체육프로그램 추첨제 현황 조사표.hwp").exists()
     assert n["analysis"]["deadlines"][0]["what"] == "조사표 회신" or n["analysis"]["deadlines"][0]["date"] == "2026-11-13"
+
+
+def test_recollecting_same_notice_does_not_duplicate(api, tmp_path):
+    """같은 공문을 다시 수집하면 공문·할 일이 겹쳐 생기지 않고, 완료 표시는 남고, 새 붙임만 더해진다."""
+    body = ("제목 청사 소방시설 점검 협조\n1. 청사 소방시설 정기 점검을 실시하오니 협조하여 주시기 바랍니다.\n"
+            "2. 점검 결과 확인서를 2026. 12. 20.(일)까지 회신하여 주시기 바랍니다.\n붙임 결과 확인서 서식 1부. 끝.")
+    first = wait(api, api.collect_text(body, "", False))
+    tasks = [t for t in api.list_tasks() if t["notice_id"] == first["id"]]
+    assert tasks
+    api.update_task(tasks[0]["id"], {"done": True})
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "공문.txt").write_text(body, encoding="utf-8")
+    (src / "결과 확인서 서식.txt").write_text("결과 확인서\n부서: ", encoding="utf-8")
+    again = wait(api, api.collect_files([str(src / "공문.txt"), str(src / "결과 확인서 서식.txt")], "", 0, False))
+    assert again["id"] == first["id"] and again["duplicate"] and again["added_files"] == 1
+    assert len(api.list_notices()) == 1
+    tasks2 = [t for t in api.list_tasks() if t["notice_id"] == first["id"]]
+    assert len(tasks2) == len(tasks) and any(t["done"] for t in tasks2)
+    assert any(f["ok"] and "결과 확인서" in f["name"] for f in again["attachments"])
+    folders = [p for p in (tmp_path / "dl" / "서무비서").iterdir() if p.is_dir()]
+    assert len(folders) == 1                                    # 다시 수집하며 만든 폴더는 지워진다
+    # 다른 공문은 그대로 새로 만든다
+    other = wait(api, api.collect_text(body.replace("12. 20.", "12. 21."), "", False))
+    assert other["id"] != first["id"] and not other.get("duplicate")

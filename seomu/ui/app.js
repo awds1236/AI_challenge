@@ -334,8 +334,13 @@ async function doCollect(name, args) {
     const a = notice.analysis || {};
     const stale = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
     const live = (a.deadlines || []).filter((d) => d.date >= stale).length, old = (a.deadlines || []).length - live;
-    toast(`정리 완료: ${a.folder_name || notice.title} · 할 일 ${live}건 등록` + (old ? ` (이미 지난 기한 ${old}건은 상세에만 표시)` : "") +
-      (a.ai_status === "running" ? " · 로컬 AI가 이어서 자세히 분석합니다" : ""), "ok", 5000);
+    if (notice.duplicate) {
+      toast(`이미 수집한 공문입니다: ${a.folder_name || notice.title} · ` +
+        (notice.added_files ? `새 붙임 ${notice.added_files}개를 더했습니다` : "새로 더할 붙임이 없습니다") + " (할 일은 그대로)", "info", 5000);
+    } else {
+      toast(`정리 완료: ${a.folder_name || notice.title} · 할 일 ${live}건 등록` + (old ? ` (이미 지난 기한 ${old}건은 상세에만 표시)` : "") +
+        (a.ai_status === "running" ? " · 로컬 AI가 이어서 자세히 분석합니다" : ""), "ok", 5000);
+    }
     if (a.ai_status === "running") watchAI(notice.id);
     await loadNotices();
     openNotice(notice.id);
