@@ -191,7 +191,9 @@ async function refreshAI() {
     chip.classList.toggle("bad", !(st.ok && st.chat_model));
     $(".ai-chip-text", chip).textContent = st.ok && st.chat_model
       ? `${st.engine === "builtin" ? "내장 AI" : "로컬 AI"} · ${st.chat_model}`
-      : (st.engine === "builtin" ? "모델 파일 없음 (검색 모드)" : "AI 엔진 미연결 (검색 모드)");
+      : st.need_engine
+        ? ((st.engine_install || {}).state === "running" ? "AI 엔진 받는 중… (검색 모드)" : "AI 엔진 파일 없음 (검색 모드)")
+        : (st.engine === "builtin" ? "모델 파일 없음 (검색 모드)" : "AI 엔진 미연결 (검색 모드)");
     chip.title = st.ok ? `모델: ${st.models.join(", ") || "없음"}` : st.error || "";
     const dl = $("#model-list");
     dl.innerHTML = (st.models || []).map((m) => `<option value="${esc(m)}">`).join("");
@@ -683,17 +685,32 @@ async function loadModels() {
   const eng = c.engine || {};
   state.engine = eng.kind;
   $$("#engine-seg button").forEach((b) => b.classList.toggle("on", b.dataset.v === (eng.setting || "auto")));
-  $("#engine-status").innerHTML = eng.kind === "builtin"
+  $("#engine-status").innerHTML = eng.need_engine && (eng.setting || "auto") !== "ollama"
+    ? `<span style="color:var(--orange)">내장 엔진 · 실행 엔진 파일(llama-server.exe) 없음</span> · 모델 폴더: <a data-open="${esc(eng.model_dir)}">${esc(eng.model_dir)}</a>`
+    : eng.kind === "builtin"
     ? `내장 엔진 사용 중 (Ollama 불필요·인터넷 불필요) · 모델 폴더: <a data-open="${esc(eng.model_dir)}">${esc(eng.model_dir)}</a>`
     : `Ollama 사용 중` + (eng.server ? "" : " · 내장 엔진 없음 — 모델 카드의 [받기]를 누르면 엔진과 모델을 함께 받아 Ollama 없이 동작합니다");
   const builtin = eng.kind === "builtin";
   // 내장 엔진을 쓰거나 Ollama가 꺼져 있으면: [받기]로 엔진+모델 파일을 자동으로 받는다
   const dlMode = builtin || !c.engine_ok;
   const hasBuiltin = !!eng.server && (eng.models || []).length > 0;
-  const notice = !c.engine_ok && !builtin
+  // 모델 파일은 있는데 실행 엔진(llama-server)만 없다: 엔진만 받거나 지정하면 바로 동작
+  const inst = eng.install || {};
+  const engineNotice = eng.need_engine && (eng.setting || "auto") !== "ollama"
+    ? `<div class="engine-notice warn-notice"><b>모델 파일은 있지만 AI 실행 엔진(llama-server.exe)이 없어 AI를 쓰지 못하고 있습니다.</b><br>
+        ${inst.state === "running" ? "AI 엔진을 자동으로 받는 중입니다… 끝나면 바로 AI 분석을 씁니다." :
+          `인터넷이 되면 [AI 엔진 받기](약 30MB)를, 업무망 PC라면 다른 PC에서 받은 llama.cpp 압축 파일(이름에 bin-win-cpu-x64)이나 llama-server.exe를 [엔진 파일 지정]으로 넣어 주세요.
+           ${inst.state === "error" ? `<div class="small" style="color:var(--orange);margin-top:4px">자동 받기 실패: ${esc(inst.message)}</div>` : ""}`}
+        <div class="row tight" style="margin-top:8px">
+          <button class="btn primary sm" data-engine-dl ${inst.state === "running" ? "disabled" : ""}>${svg("download")} AI 엔진 받기</button>
+          <button class="btn sm" data-engine-pick>엔진 파일 지정</button>
+          <span class="muted small">넣을 폴더: <a data-open="${esc(eng.engine_dir || "")}">${esc(eng.engine_dir || "")}</a></span>
+        </div></div>`
+    : "";
+  const notice = engineNotice || (!c.engine_ok && !builtin
     ? (hasBuiltin
       ? `<div class="engine-notice">Ollama가 실행 중이 아닙니다. 이 PC에는 내장 엔진과 모델이 이미 있으니 위에서 <b>[자동]</b> 또는 <b>[내장 엔진]</b>을 고르면 바로 쓸 수 있습니다.</div>`
-      : `<div class="engine-notice">Ollama가 실행 중이 아닙니다. 쓰실 모델의 <b>[받기]</b>를 누르면 Ollama 없이 동작하는 내장 엔진과 모델을 자동으로 받습니다.</div>`) : "";
+      : `<div class="engine-notice">Ollama가 실행 중이 아닙니다. 쓰실 모델의 <b>[받기]</b>를 누르면 Ollama 없이 동작하는 내장 엔진과 모델을 자동으로 받습니다.</div>`) : "");
   state.catalog = c.models;
   $("#model-grid").innerHTML = notice + c.models.map((m) => {
     const installed = dlMode ? (builtin && m.installed) : m.installed;
@@ -999,6 +1016,17 @@ function bind() {
   $("#model-grid").addEventListener("click", async (e) => {
     const u = e.target.closest("[data-use]"), p = e.target.closest("[data-pull]"), d = e.target.closest("[data-mdel]"), g = e.target.closest("[data-gguf]");
     const oi = e.target.closest("[data-oimport]"), dl = e.target.closest("[data-dl]");
+    if (e.target.closest("[data-engine-dl]")) {
+      if (!confirm("AI 실행 엔진(llama.cpp, 약 30MB)을 인터넷에서 받습니다. 받아 둔 모델 파일은 그대로 씁니다.")) return;
+      return modelJob("install_engine", [], "AI 엔진을 넣었습니다. 이제 AI 분석을 쓸 수 있습니다.");
+    }
+    if (e.target.closest("[data-engine-pick]")) {
+      let p = "";
+      if (state.info.native) { const r = await api("pick_files", false); p = r && r[0]; }
+      else p = prompt("llama.cpp 압축 파일(.zip)이나 llama-server.exe의 경로를 입력하세요", "") || "";
+      if (!p) return;
+      return modelJob("import_engine", [p], "AI 엔진을 넣었습니다. 이제 AI 분석을 쓸 수 있습니다.");
+    }
     if (dl) {
       const m = (state.catalog || []).find((x) => x.id === dl.dataset.dl) || {};
       const size = m.dl ? m.dl.gb : m.download_gb;

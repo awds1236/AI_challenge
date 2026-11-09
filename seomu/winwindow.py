@@ -619,6 +619,37 @@ def attachment_names(hwnd: int) -> list[str]:
     return list(dict.fromkeys(n for n in names if n))[:30]
 
 
+def screen_attachment_names(hwnd: int, trace: list | None = None, use_ocr: bool = True) -> list[str]:
+    """뷰어 화면의 '붙임목록'·'첨부파일' 칸에 보이는 문서 이름 (확장자가 있는 이름만).
+
+    본문 영역만 읽는 본문 글자 인식은 옆·위 패널의 붙임 목록을 빼 버리므로, 창 전체를 따로 살핀다.
+    ① UI Automation 목록 항목 → ② 창 전체 글자 인식(OCR, 창을 앞으로 가져오지 않음) 순서."""
+    from . import attach
+    trace = trace if trace is not None else []
+    if not IS_WIN:
+        return []
+    names: list[str] = []
+    try:
+        listed = attachment_names(hwnd)
+        names = attach.file_names_in("\n".join(listed))
+        if listed:
+            trace.append(f"화면 목록 항목 {len(listed)}개 중 문서 이름 {len(names)}개: {names}")
+    except Exception as e:
+        trace.append(f"화면 목록 항목 읽기 오류: {e}")
+    if use_ocr:
+        try:
+            import tempfile
+            img = Path(tempfile.gettempdir()) / "seomu_attach_list.png"
+            # 확대는 글자 인식 쪽(OCR 스크립트)에 맡긴다 (큰 창을 파이썬으로 키우면 느리다)
+            lines = ocr_image(img, timeout=90, scale=2) if save_window_image(hwnd, img) else []
+            found = attach.file_names_in("\n".join(l.get("text", "") for l in lines))
+            trace.append(f"창 전체 글자 인식 {len(lines)}줄 중 문서 이름 {len(found)}개: {found}")
+            names = attach.merge_names(names, found)
+        except Exception as e:
+            trace.append(f"창 전체 글자 인식 오류: {e}")
+    return names
+
+
 # ---------------------------------------------------------------- 일반 Win32 컨트롤 (추가 패키지 불필요)
 def _norm(s: str) -> str:
     return "".join(ch for ch in (s or "") if not ch.isspace() and ch not in "&.…").lower()

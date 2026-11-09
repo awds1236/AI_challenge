@@ -27,7 +27,7 @@ from .collector import (BrowserWorker, Captured, clean_title, collect_from_files
 from .config import Config
 from .deadlines import dday
 from .notice_text import short_task, tidy_text
-from .engine import LocalClient, LocalEngine, add_model_file, ollama_model_blob
+from .engine import ENGINE_MISSING, LocalClient, LocalEngine, add_model_file, ollama_model_blob
 from .llm import LLMError, OllamaClient
 from . import models as model_catalog
 from . import attach, downloader, winwindow
@@ -55,6 +55,12 @@ def _has_open_program(ext: str) -> bool:
         return True
 
 
+# 이름으로 캐시 폴더를 가릴 수 없는 일반 프로그램 (브라우저·탐색기·문서 편집기 등)
+GENERIC_PROCESSES = {"explorer.exe", "msedge.exe", "chrome.exe", "whale.exe", "firefox.exe", "iexplore.exe",
+                     "notepad.exe", "hwp.exe", "hword.exe", "winword.exe", "excel.exe", "acrord32.exe", "acrobat.exe",
+                     "python.exe", "pythonw.exe", "seomuai.exe", "applicationframehost.exe"}
+
+
 class Job:
     def __init__(self, kind: str):
         self.id = uuid.uuid4().hex[:12]
@@ -76,6 +82,8 @@ class Api:
     def __init__(self, home: Path | None = None):
         self._cfg = Config(home)
         self._engine = LocalEngine(self._cfg.home)
+        self._engine_install: dict = {"state": "", "message": ""}    # 엔진 자동 받기 상태 (화면 표시용)
+        self._engine_install_lock = threading.Lock()
         self._store = Store(self._cfg.db_path)
         self._rag = RAGEngine(self._store, self._client, lambda: self._cfg.settings)
         self._jobs: dict[str, Job] = {}
@@ -113,7 +121,9 @@ class Api:
     def engine_info(self) -> dict:
         return {"kind": self._engine_kind(), "setting": self._cfg.settings.engine,
                 "server": self._engine.server_path(), "models": list(self._engine.models()),
-                "model_dir": str(self._engine.writable_model_dir()), "running": self._engine.running()}
+                "model_dir": str(self._engine.writable_model_dir()), "running": self._engine.running(),
+                "engine_dir": str(self._engine.writable_engine_dir()),
+                "need_engine": self._engine.missing_engine(), "install": dict(self._engine_install)}
 
     def _run_job(self, kind: str, fn: Callable[[Job], object]) -> dict:
         job = Job(kind)
@@ -193,6 +203,15 @@ class Api:
             st["embed_model"] = c.pick_embed_model(s.embed_model)
         st["local_only"] = not s.allow_remote_llm or self._engine_kind() == "builtin"
         st["engine"] = self._engine_kind()
+        # 모델 파일은 있는데 실행 엔진(llama-server)만 없다 → '모델 없음'이 아니라 '엔진 없음'으로 알린다
+        st["need_engine"] = not st["ok"] and s.engine != "ollama" and self._engine.missing_engine()
+        st["engine_install"] = dict(self._engine_install)
+        if st["need_engine"]:
+            st["error"] = ENGINE_MISSING
+            if self._engine_install["state"] == "running":
+                st["error"] = "모델 파일은 있고, AI 실행 엔진(llama-server)을 받는 중입니다. 잠시 뒤 자동으로 AI 분석을 씁니다."
+            elif self._engine_install["state"] == "error":
+                st["error"] = ENGINE_MISSING + f" (자동 받기 실패: {self._engine_install['message']})"
         if not st["ok"] and st["engine"] == "ollama" and self._engine.available():
             # Ollama를 골랐는데 꺼져 있다: 이 PC에는 내장 엔진·모델이 있으니 받을 필요 없이 바꾸기만 하면 된다
             st["error"] = ("Ollama가 실행 중이 아닙니다. 이 PC에는 내장 AI 엔진과 모델이 이미 있으니, 설정 → AI 엔진을 "
@@ -283,6 +302,7 @@ class Api:
             if not self._engine.server_path():
                 job.message = "AI 엔진 받는 중…"
                 downloader.install_engine(self._engine.writable_engine_dir(), cb)
+                self._engine.forget_server()
             path = downloader.download_model(m["dl"], self._engine.writable_model_dir(), cb)
             values = {"embed_model" if m["kind"] == "embed" else "chat_model": path.stem}
             if self._cfg.settings.engine == "ollama":
@@ -320,6 +340,49 @@ class Api:
             add_model_file(self._engine, str(blob), src_name.replace(":", "-"), self._progress(job))
             return self.model_catalog()
         return self._run_job("import", work)
+
+    def install_engine(self) -> dict:
+        """[AI 엔진 받기]: 모델 파일은 그대로 두고 실행 엔진(llama.cpp llama-server)만 받는다."""
+        def work(job: Job):
+            job.message = "AI 엔진 받는 중…"
+            self._install_engine_now(self._progress(job))
+            return self.model_catalog()
+        return self._run_job("engine", work)
+
+    def import_engine(self, path: str) -> dict:
+        """[엔진 파일 지정]: 받아 둔 llama.cpp 압축 파일(.zip)이나 llama-server.exe로 엔진을 넣는다 (인터넷 불필요)."""
+        if not (path or "").strip():
+            raise ValueError("llama.cpp 압축 파일(.zip)이나 llama-server.exe를 지정하세요")
+
+        def work(job: Job):
+            job.message = "AI 엔진 파일을 넣는 중…"
+            self._engine.stop()
+            downloader.install_engine_from(path, self._engine.writable_engine_dir())
+            self._engine.forget_server()
+            self._engine_install = {"state": "done", "message": ""}
+            if self._cfg.settings.engine == "ollama":
+                self.save_settings({"engine": "auto"})
+            return self.model_catalog()
+        return self._run_job("engine", work)
+
+    def _install_engine_now(self, on_progress=None) -> None:
+        with self._engine_install_lock:
+            self._engine.forget_server()
+            if self._engine.server_path():
+                self._engine_install = {"state": "done", "message": ""}
+                return
+            self._engine_install = {"state": "running", "message": ""}
+            try:
+                self._engine.stop()
+                downloader.install_engine(self._engine.writable_engine_dir(), on_progress)
+            except Exception as e:
+                self._engine_install = {"state": "error", "message": (str(e) or e.__class__.__name__)[:300]}
+                raise
+            finally:
+                self._engine.forget_server()
+            self._engine_install = {"state": "done", "message": ""}
+            if self._cfg.settings.engine == "ollama":
+                self.save_settings({"engine": "auto"})
 
     def set_engine(self, kind: str) -> dict:
         if kind not in ("auto", "builtin", "ollama"):
@@ -625,6 +688,11 @@ class Api:
             return
         s = self._cfg.settings
         started = time.time()
+        if s.engine != "ollama" and self._engine.missing_engine() and self._engine_install["state"] != "error":
+            try:                       # 모델은 있는데 엔진만 없다 → 엔진을 받고 이어서 AI 분석 (받는 중이면 기다린다)
+                self._install_engine_now()
+            except Exception:
+                pass
         a = analyze(n["title"], n["body"], n["attachments"], self._client(), s.chat_model, s.num_ctx)
         if a.get("mode") == "llm":
             a["ai_status"] = "done"
@@ -647,6 +715,14 @@ class Api:
     def preload_model(self) -> None:
         """앱 시작 시 답변 모델을 미리 메모리에 올려 첫 질문·분석을 빠르게 한다."""
         def run():
+            # 모델 파일은 있는데 엔진만 없으면(엔진 폴더를 빠뜨리고 복사·백신이 지움 등) 엔진을 알아서 받아 둔다
+            if self._cfg.settings.engine != "ollama" and self._engine.missing_engine():
+                try:
+                    self._install_engine_now()
+                    logging.getLogger("seomu").info("AI 엔진을 자동으로 받았습니다: %s", self._engine.server_path())
+                except Exception as e:          # 인터넷이 안 되는 PC 등: 화면에서 [엔진 파일 지정]을 안내
+                    logging.getLogger("seomu").warning("AI 엔진 자동 받기 실패: %s", e)
+                    return
             try:
                 c = self._client()
                 c.preload(c.pick_chat_model(self._cfg.settings.chat_model))
@@ -742,6 +818,13 @@ class Api:
             with winwindow.capturable(hwnd_, trace):            # 최소화된 창도 화면 밖에서 펼쳐 읽는다
                 text, how = winwindow.extract_text(hwnd_, say, trace, found)
                 shot = winwindow.capture_png(hwnd_)
+                # 뷰어의 '붙임목록'·'첨부파일' 칸 (본문 글자 인식은 본문 단만 읽어 옆·위 패널의 붙임 이름을 놓친다)
+                say("화면에서 붙임 목록을 찾는 중…")
+                try:
+                    screen_names = winwindow.screen_attachment_names(hwnd_, trace)
+                except Exception as e:             # 화면 읽기 실패가 수집을 막지 않게
+                    trace.append(f"화면 붙임 목록 오류: {e}")
+                    screen_names = []
             text = (text or "").replace("\r\n", "\n").replace("\r", "\n")   # 프로그램마다 줄 구분이 다르다
             win_title = clean_title(win["title"])
             # 폴더 이름: 직접 입력 > 본문의 '제목' 줄 > 창 제목
@@ -763,6 +846,12 @@ class Api:
             # ---- 붙임: 본문의 '붙임/첨부' 목록으로 모아야 할 파일을 먼저 알아낸다
             expected = attach.expected_attachments(text)
             trace.append(f"본문의 붙임 목록 {len(expected)}개: {expected}")
+            # 창 제목·창에 열린 문서 자체(한글로 연 공문 등)는 붙임이 아니다
+            own = [x for x in (attach.name_from_title(win["title"]), Path(found.get("document") or "").name) if x]
+            screen_names = [n for n in screen_names if not any(attach.name_score(n, o) >= 1.0 for o in own)]
+            if screen_names:
+                expected = attach.merge_names(expected, screen_names)
+                trace.append(f"화면의 붙임 이름을 더한 붙임 목록 {len(expected)}개: {expected}")
             got: dict[str, dict] = {}          # 붙임 이름 → 모은 파일
             extras: list[dict] = []            # 목록과 이름이 안 맞지만 새로 생긴 파일
             hashes: set[str] = set()
@@ -824,6 +913,14 @@ class Api:
             # ① 이미 PC에 있는 파일 (뷰어가 열 때 내려받은 임시·캐시 파일, 최근 문서 등)
             say("PC에 이미 내려받아진 붙임파일을 찾는 중…")
             harvest(started - 3 * 3600)
+            if not expected and win["process"].lower() not in GENERIC_PROCESSES:
+                # 붙임 이름을 전혀 알 수 없을 때: 뷰어가 공문을 열면서 붙임을 받아 둔 캐시 폴더(경로에 프로그램 이름)에서
+                # 최근 30분 안에 생긴 문서만 가져온다 (그림·글자 파일은 뷰어 설정·아이콘일 수 있어 뺀다)
+                for f in attach.viewer_files(win["process"], started - 1800, exclude=folder)[:10]:
+                    if Path(f["path"]).suffix.lower() in (".txt", ".png", ".jpg", ".jpeg", ".csv"):
+                        continue
+                    if take(f["path"], None):
+                        trace.append(f"뷰어 캐시 폴더의 최근 파일: {f['path']}")
             # ② 저장/다운로드 버튼
             state = ""
             # 'PC저장'을 누르면 뷰어가 띄운 저장 창이 화면 맨 앞에 뜬다 (뷰어 프로그램이 하는 일이라 막을 수 없다)
@@ -878,6 +975,8 @@ class Api:
                 left = missing()
                 hint = (f"붙임 {len(got)}/{len(expected)}개를 모았습니다. 남은 붙임은 그 창에서 저장하면 자동으로 모읍니다."
                         if expected else "새로 저장되는 붙임파일을 기다리는 중…")
+                if left and not winwindow.foreground_allowed():
+                    hint += " ('PC저장 자동 누르기'를 켜면 뷰어의 저장 버튼을 대신 누릅니다)"
                 hint += f" (최대 {max(0, int(deadline - time.time()))}초 더 기다림 · [붙임 수집 완료]를 누르면 바로 정리)"
                 if not text:
                     hint += " 본문을 읽지 못했습니다. 그 창에서 본문을 복사(Ctrl+A, Ctrl+C 또는 [본문복사])하면 바로 받습니다."

@@ -338,3 +338,39 @@ def install_engine(engine_dir: Path, on_progress: Progress = None) -> Path:
             if p.is_file() and (p.name.startswith("llama-") or p.suffix in ("", ".so", ".dylib")):
                 p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return server
+
+
+def install_engine_from(source: str | Path, engine_dir: Path) -> Path:
+    """이미 받아 둔 llama.cpp 압축 파일(.zip/.tar.gz)이나 llama-server 실행 파일(또는 그 폴더)로 엔진을 넣는다.
+    인터넷이 안 되는 업무망 PC에서 USB 등으로 가져온 엔진을 등록할 때 쓴다."""
+    src = Path(str(source).strip().strip('"'))
+    engine_dir = Path(engine_dir)
+    exe = "llama-server.exe" if sys.platform.startswith("win") else "llama-server"
+    if not src.exists():
+        raise LLMError(f"파일을 찾을 수 없습니다: {src}")
+    with tempfile.TemporaryDirectory() as tmp:
+        if src.is_dir():
+            found = src / exe if (src / exe).is_file() else next(src.rglob(exe), None)
+        elif src.name.lower() == exe.lower():
+            found = src
+        elif src.name.lower().endswith((".zip", ".tar.gz", ".tgz", ".tar")):
+            staging = Path(tmp) / "x"
+            staging.mkdir()
+            try:
+                _extract(src, staging)
+            except (zipfile.BadZipFile, tarfile.TarError, OSError) as e:
+                raise LLMError(f"압축 파일을 풀지 못했습니다: {e}") from e
+            found = next(staging.rglob(exe), None)
+        else:
+            raise LLMError(f"llama.cpp 압축 파일(.zip)이나 {exe}를 지정하세요.")
+        if not found:
+            raise LLMError(f"지정한 곳에 {exe}가 없습니다. 이름에 'bin-win-cpu-x64'가 들어간 llama.cpp 배포 파일인지 확인하세요.")
+        if engine_dir.resolve() == found.parent.resolve():
+            return found
+        if engine_dir.exists():
+            shutil.rmtree(engine_dir, ignore_errors=True)
+        shutil.copytree(found.parent, engine_dir)
+    server = engine_dir / exe
+    if not sys.platform.startswith("win"):
+        server.chmod(server.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return server
