@@ -150,6 +150,9 @@ class Store:
         )
         return cur.lastrowid
 
+    def update_notice_body(self, notice_id: int, body: str) -> None:
+        self.execute("UPDATE notices SET body=? WHERE id=?", (body, notice_id))
+
     def update_notice_analysis(self, notice_id: int, analysis: dict) -> None:
         self.execute("UPDATE notices SET analysis=? WHERE id=?",
                      (json.dumps(analysis, ensure_ascii=False), notice_id))

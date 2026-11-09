@@ -116,3 +116,27 @@ def test_copied_text_from_our_own_screen_is_rejected():
             "모든 데이터는 이 PC에만 저장됩니다")
     assert ww.looks_like_our_ui(ours)
     assert not ww.looks_like_our_ui("2026년 하반기 중대시민재해 점검계획 알림\n자체점검표를 제출하여 주시기 바랍니다.")
+
+
+def test_ocr_body_reading_is_off_by_default(tmp_path):
+    """본문은 글자를 그대로 가져온다(본문복사 버튼 → 복사 붙여넣기). 화면 글자 인식은 설정에서 켰을 때만."""
+    from seomu.config import Config
+    s = Config(tmp_path).settings
+    assert s.capture_ocr_body is False and s.capture_foreground is True
+    ww.set_ocr_body_allowed(False)
+    assert not ww.ocr_body_allowed()
+    ww.set_ocr_body_allowed(True)
+    assert ww.ocr_body_allowed()
+    ww.set_ocr_body_allowed(False)
+    assert {"본문복사", "내용 복사", "전체 복사"} <= set(ww.BODY_COPY_NAMES) and "복사" not in ww.BODY_COPY_NAMES
+
+
+def test_info_popups_are_confirmed_but_decisions_are_left_to_user():
+    """뷰어의 '본문 내용이 복사되었습니다' 같은 알림 창은 [확인]을 대신 누르고, 결정을 묻는 창은 누르지 않는다."""
+    def auto(msg):
+        return bool(ww._INFO_POPUP.search(msg)) and not ww._ASK_POPUP.search(msg)
+    assert auto("본문 내용이 복사되었습니다. [Ctrl + V] 키를 이용하여 붙여넣기를 하십시오.")
+    assert auto("저장되었습니다.") and auto("다운로드가 완료되었습니다.")
+    assert not auto("문서를 삭제하시겠습니까?")
+    assert not auto("저장하지 않고 종료하시겠습니까?")
+    assert not auto("결재를 진행하시겠습니까?") and not auto("네트워크 오류가 발생했습니다.")

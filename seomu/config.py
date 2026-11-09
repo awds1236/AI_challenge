@@ -57,7 +57,10 @@ class Settings:
     browser_headless: bool = False
     # 열린 창 수집에서 본문을 못 읽었을 때 창을 앞으로 가져와 전체 선택·복사·화면 클릭까지 시도할지
     # (기본: 하지 않음 — 보고 있던 화면을 가로채지 않고 뒤에 있는 창에서만 읽는다)
-    capture_foreground: bool = False
+    capture_foreground: bool = True
+    # 본문을 화면 글자 인식(OCR)으로 읽을지 (기본 끔: 도구모음·메뉴 글자가 섞이고 틀린 글자가 생긴다.
+    # 본문복사 버튼 → 전체 선택·복사로 글자를 그대로 가져온다)
+    capture_ocr_body: bool = False
 
     # 사용자 정보 (메일 서명 등)
     user_name: str = ""

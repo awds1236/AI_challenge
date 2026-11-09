@@ -479,3 +479,38 @@ def test_old_bogus_body_attachments_are_cleaned_when_opened(api, tmp_path):
              for x in ("< 한눈에 보기 >", "구분", "세션 1")]
     api._store.update_notice_attachments(n["id"], bogus)                # 예전 버전이 저장한 상태를 흉내
     assert [f for f in api.get_notice(n["id"])["attachments"] if not f["ok"]] == []
+
+
+def test_recollecting_same_notice_read_differently_is_not_duplicated(api, tmp_path):
+    """같은 공문을 한 번은 글자 인식(잡글자 섞임), 한 번은 본문복사(깨끗함)로 읽어도 하나로 합치고 본문은 깨끗한 쪽으로."""
+    clean = ("2026년 하반기 중대시민재해 점검계획 알림 및 자체점검표 제출 요청\n"
+             "1. 귀 기관의 무궁한 발전을 기원합니다.\n"
+             "2. 중대재해처벌법에 따라 2026년도 하반기 안전·보건 의무 이행사항에 대하여 점검을 실시하고자 하오니 "
+             "해당 관리기관에서는 자체점검 후 자체점검표(공중이용시설)를 작성하여 2026. 11. 11.(수)까지 제출하여 주시기 바랍니다.\n"
+             "붙임 1. 자체점검표(공중이용시설) 1부. 끝.")
+    ocr = ("E RP\n회니기한 공람지정 내배부\n붙임문서 본문복사 PCIdLY 새미름 임,니저장 인쇄\n"
+           "2026년\n하반기 중대시민재해 점검계획 알림 및 자체점검표 제출 요제목\n1. 귀 기관의 무궁한 발전을 기원합니다.\n"
+           "2. 중대재해처벌법에\n따라 2026년도 하반기안전 보건 의무 이행사항에 대하여 점검을\n실시하고자 하오니 해당 관리기관에서는")
+    title = "2026년 하반기 중대시민재해 점검계획 알림 및 자체점검표 제출 요청"
+    first = wait(api, api.collect_text(ocr, title, False))
+    again = wait(api, api.collect_text(clean, title, False))
+    assert again["id"] == first["id"] and again["duplicate"] and again["body_updated"]
+    assert len(api.list_notices()) == 1
+    n = api.get_notice(first["id"])
+    assert "PCIdLY" not in n["body"] and "자체점검표(공중이용시설)를 작성하여" in n["body"]
+    assert [d["date"] for d in n["analysis"]["deadlines"]] == ["2026-11-11"]
+    # 다른 공문은 합치지 않는다
+    other = wait(api, api.collect_text("시민체감 서비스 개선과제 발굴\n각 부서에서는 개선과제를 발굴하여 2026. 11. 20.(금)까지 "
+                                       "제출하여 주시기 바랍니다. 우수 과제는 포상할 예정입니다.", "시민체감 서비스 개선과제 발굴", False))
+    assert other["id"] != first["id"] and len(api.list_notices()) == 2
+
+
+def test_capture_window_twice_while_running_is_refused(api, monkeypatch):
+    from seomu import winwindow
+    from seomu.api import Job
+    monkeypatch.setattr(winwindow, "available", lambda: True)
+    j = Job("capture_window")
+    api._jobs[j.id] = j                                      # 수집이 진행 중인 상태
+    with pytest.raises(ValueError, match="수집하는 중"):
+        api.capture_window(1, "", False, 20)
+    j.status = "done"
