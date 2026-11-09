@@ -168,7 +168,8 @@ class Api:
     # ------------------------------------------------------------ 상태/설정
     # 문서를 읽는 데 필요한 패키지: (가져올 이름, 설치 이름, 무엇에 쓰는지)
     NEEDED_PACKAGES = (("olefile", "olefile", "HWP(한글 5.0) 읽기"), ("pypdf", "pypdf", "PDF 읽기"),
-                       ("openpyxl", "openpyxl", "엑셀(XLSX) 읽기"), ("lxml", "lxml", "보고서·서식 채우기"))
+                       ("openpyxl", "openpyxl", "엑셀(XLSX) 읽기·서식 채우기"), ("xlrd", "xlrd", "엑셀 97-2003(XLS) 읽기"),
+                       ("lxml", "lxml", "보고서·서식 채우기"))
 
     def missing_packages(self) -> list[dict]:
         import importlib.util
@@ -697,6 +698,35 @@ class Api:
     def delete_form(self, name: str) -> dict:
         self._forms().delete(name)
         return self.list_forms()
+
+    def fill_notice_form(self, notice_id: int, path: str) -> dict:
+        """공문에 붙은 서식(HWPX·DOCX·XLSX·TXT)을 공문 내용·내 정보로 채워 공문 폴더의 '작성'에 새 파일로 만든다.
+        원본 붙임은 그대로 둔다. 모르는 칸은 비워 두고 목록으로 알려 준다."""
+        n = self._store.get_notice(int(notice_id))
+        if not n:
+            raise ValueError("공문을 찾을 수 없습니다")
+        src = Path(path)
+        folder = Path(n["folder"]).resolve()
+        if not src.is_file() or folder not in src.resolve().parents:
+            raise ValueError("이 공문의 붙임 파일이 아닙니다")
+        ext = src.suffix.lower()
+        if ext not in forms_mod.FORM_EXT and ext != ".xls":
+            raise ValueError("HWPX·DOCX·XLSX·XLS·TXT 서식만 채울 수 있습니다 (HWP·DOC 서식은 한글·워드에서 HWPX·DOCX로 저장해 올려 주세요)")
+        vals = forms_mod.Values(forms_mod.notice_values(n, self._profile()), forms_mod.body_values(n.get("body") or ""))
+        out_dir = folder / "작성"
+        out_dir.mkdir(exist_ok=True)
+        if ext == ".xls":                          # 옛 엑셀 서식: XLSX로 옮겨서 채운다
+            conv = out_dir / f".{src.stem}_변환.xlsx"
+            forms_mod.xls_to_xlsx(src, conv)
+            out = unique_path(out_dir / f"{src.stem}_작성.xlsx")
+            try:
+                r = forms_mod.fill_file(conv, vals, out)
+            finally:
+                conv.unlink(missing_ok=True)
+        else:
+            out = unique_path(out_dir / f"{src.stem}_작성{src.suffix}")
+            r = forms_mod.fill_file(src, vals, out)
+        return {"path": str(out), "name": out.name, **r}
 
     def fill_guide_form(self, guide_id: int, form_index: int, body: str = "", template: str = "") -> dict:
         """상황 안내의 서식 초안을 올려 둔 기관 서식에 채워 새 파일로 저장한다."""

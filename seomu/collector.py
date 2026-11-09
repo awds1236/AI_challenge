@@ -526,11 +526,11 @@ def expand_archives(files: list[dict], max_files: int = 200, max_bytes: int = 50
 
 
 def save_eml_attachments(eml: Path, dest: Path) -> list[dict]:
-    """메일(.eml)에 첨부된 파일을 붙임 폴더로 꺼낸다."""
-    from .parsers import read_eml
+    """메일(.eml·Outlook .msg)에 첨부된 파일을 붙임 폴더로 꺼낸다."""
+    from .parsers import read_eml, read_msg
     files = []
     try:
-        m = read_eml(eml)
+        m = read_msg(eml) if eml.suffix.lower() == ".msg" else read_eml(eml)
     except Exception:
         return files
     for name, data in m["files"]:
@@ -543,7 +543,8 @@ def save_eml_attachments(eml: Path, dest: Path) -> list[dict]:
     return files
 
 
-_BODY_EXT_ORDER = {".pdf": 0, ".hwpx": 1, ".docx": 2, ".hwp": 3, ".html": 4, ".htm": 4, ".txt": 5}
+_BODY_EXT_ORDER = {".pdf": 0, ".hwpx": 1, ".docx": 2, ".hwp": 3, ".doc": 3, ".odt": 3, ".html": 4, ".htm": 4,
+                   ".mht": 4, ".rtf": 5, ".txt": 5}
 
 
 def body_text_unreadable(text: str) -> bool:
@@ -596,7 +597,8 @@ def collect_from_files(paths: list[str], root: Path, title: str = "", body_index
         text = f"(본문을 읽지 못했습니다: {e})"
         read_ok = False
     # 본문을 못 읽었으면 오류 문장 대신 파일 이름을 제목으로
-    title = title or (extract_title(text) if read_ok else "") or re.sub(r"[_]+", " ", body_src.stem).strip()
+    stem = re.sub(r"^\s*\[(?:본문|스캔|원문|사본|공문)\]\s*", "", body_src.stem)     # '[스캔] 제목.pdf' → '제목'
+    title = title or (extract_title(text) if read_ok else "") or re.sub(r"[_]+", " ", stem).strip()
     folder = make_notice_folder(root, title)
     save_body(folder, title, text, "", str(body_src))
     files = []
@@ -606,7 +608,7 @@ def collect_from_files(paths: list[str], root: Path, title: str = "", body_index
         shutil.copy2(f, dest)
         if f != body_src:
             files.append({"name": dest.name, "path": str(dest), "ok": True})
-        if f.suffix.lower() == ".eml":                     # 메일 공문: 첨부 파일도 붙임으로
+        if f.suffix.lower() in (".eml", ".msg"):           # 메일 공문: 첨부 파일도 붙임으로
             files.extend(save_eml_attachments(f, folder / "붙임"))
     return Captured(title, text, "", str(body_src), folder, files)
 

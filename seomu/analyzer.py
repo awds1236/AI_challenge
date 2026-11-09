@@ -128,7 +128,7 @@ def _norm_date(s: str) -> str | None:
 _FORM_WORDS = re.compile(r"(서식|양식|신청서|조사표|계획서|명단|확인서|동의서|보고서|제출서|현황표|점검표|체크리스트|"
                          r"작성표|명세서|목록|카드|이력서|추천서|제안서|응답지|설문지|대장|실적)")
 _REFERENCE_WORDS = re.compile(r"(안내문|안내서|안내|계획(?:\(안\))?$|공고문?|내규|지침|매뉴얼|가이드|리플릿|포스터|홍보물|"
-                              r"요령|규정|법령|사례집|참고|목록\s*$|일정표|프로그램)")
+                              r"요령|규정|법령|사례집|참고|목록\s*$|일정표|프로그램|\(초안\)|초안$)")
 
 
 def _core(s: str) -> str:
@@ -203,10 +203,11 @@ def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | N
             continue
         if s.startswith("[붙임]"):
             name = s.replace("[붙임] ", "")
-            # 참고용 붙임(안내문·계획·지침)은 제출물이 아니다. 서식·신청서·조사표만 남긴다
-            if not _FORM_WORDS.search(name) or (_REFERENCE_WORDS.search(name) and not re.search(r"(서식|양식)", name)):
+            stem = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", name)        # '지정 검진기관 목록.pdf' → 확장자를 떼고 본다
+            # 참고용 붙임(안내문·계획·지침·검토용 초안)은 제출물이 아니다. 서식·신청서·조사표만 남긴다
+            if not _FORM_WORDS.search(stem) or (_REFERENCE_WORDS.search(stem) and not re.search(r"(서식|양식)", stem)):
                 continue
-            s = re.sub(r"\s*(서식|양식)$", "", name) + " (붙임 서식)"
+            s = re.sub(r"\s*\(?(서식|양식)\)?$", "", stem) + " (붙임 서식)"
         elif len(s) > 40 or re.search(r"(바랍니다|주시기|요청|부탁|드립니다|합니다|십시오|하여|바람)", s):
             # 요청 문장은 그대로 제출물 이름이 아니다 → '무엇을 제출'의 '무엇'만 ('부서별 폐기 물품 목록').
             # 붙임 목록·서류 항목을 다 본 뒤에 겹치지 않을 때만 더한다 (붙임의 정식 이름·서식 표시를 살린다)

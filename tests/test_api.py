@@ -534,7 +534,7 @@ def test_unreadable_body_is_not_analyzed_by_ai(api, tmp_path, monkeypatch):
     a = n["analysis"]
     assert a["ai_status"] == "off" and "olefile" in a["body_error"] and a["summary"].startswith("본문을 읽지 못해")
     assert a["deadlines"] == [] and any(f["ok"] and f["name"].endswith(".pdf") for f in n["attachments"])
-    assert {m["package"] for m in api.missing_packages()} <= {"olefile", "pypdf", "openpyxl", "lxml"}
+    assert {m["package"] for m in api.missing_packages()} <= {"olefile", "pypdf", "openpyxl", "xlrd", "lxml"}
     assert "missing_packages" in api.app_info()
 
 

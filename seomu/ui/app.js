@@ -606,6 +606,21 @@ function renderWindows() {
 
 // 공문 상세 시트
 let currentNotice = null;
+// 공문에 붙은 서식(신청서·명단·결과 보고서 등)을 공문 내용·내 정보로 채운다 → 공문 폴더의 '작성'에 새 파일
+const FORM_EXTS = ["hwpx", "docx", "xlsx", "xls", "txt"];
+function isForm(name) {
+  return FORM_EXTS.includes(extOf(name)) && /서식|양식|신청서|명단|보고서|조사서|확인서|서약서|계획서|일지|대장|점검표|회신서|동의서|신고서/.test(name || "");
+}
+async function fillNoticeForm(path) {
+  if (!currentNotice) return;
+  try {
+    const r = await api("fill_notice_form", currentNotice.id, path);
+    const miss = (r.missing || []).length ? ` · 직접 채울 칸: ${r.missing.slice(0, 6).join(", ")}${r.missing.length > 6 ? " 등" : ""}` : "";
+    toast(`${r.name} 을(를) 만들었습니다 (채운 칸 ${r.filled.length}개${miss}). 공문 폴더의 '작성'에 있습니다.`, "ok", 9000);
+    openPath(r.path);
+  } catch (e) { toast(e.message, "err", 8000); }
+}
+
 async function openNotice(id) {
   const n = await api("get_notice", id);
   if (!n) return;
@@ -630,7 +645,7 @@ async function openNotice(id) {
   const files = (n.attachments || []).map((f) => `<div class="attach" ${f.ok ? `data-preview="${esc(f.path)}"` : ""}>
       <div class="ext ${extOf(f.name)}">${esc(extOf(f.name)).slice(0, 4)}</div>
       <div class="main-col"><div>${esc(f.name)}</div><div class="muted small">${f.ok ? (f.from === "직접 넣은 파일" ? "직접 넣은 파일" : "공문 폴더에 있음") + " · 눌러서 내용 보기" : "받지 못함: " + esc(f.error || "")}</div></div>
-      ${f.ok ? `<div class="acts"><button class="btn ghost sm" data-open="${esc(f.path)}">열기</button></div>` : ""}</div>`).join("")
+      ${f.ok ? `<div class="acts">${isForm(f.name) ? `<button class="btn ghost sm" data-fillform="${esc(f.path)}" title="공문 내용과 내 정보로 이 서식을 채워 새 파일로 만듭니다">서식 채우기</button>` : ""}<button class="btn ghost sm" data-open="${esc(f.path)}">열기</button></div>` : ""}</div>`).join("")
     || `<div class="muted">붙임 파일이 없습니다.</div>`;
   // 요약: 첫 줄은 핵심, ' — ' 뒤의 설명과 다음 줄들은 한 줄씩 (긴 한 줄로 이어 붙이지 않는다)
   const sumParts = String(a.summary || "-").split("\n").flatMap((l) => l.split(/\s+—\s+/)).map((l) => l.trim()).filter(Boolean);
@@ -1061,6 +1076,7 @@ function bind() {
     const nav = t.closest(".nav-item"); if (nav) return go(nav.dataset.page);
     const g = t.closest("[data-goto]"); if (g && !t.closest("[data-notice]")) return go(g.dataset.goto);
     const n = t.closest("[data-notice]"); if (n) return openNotice(Number(n.dataset.notice));
+    const ff = t.closest("[data-fillform]"); if (ff) { await fillNoticeForm(ff.dataset.fillform); return; }
     const o = t.closest("[data-open]"); if (o) { await openPath(o.dataset.open); return; }
     const pv = t.closest("[data-preview]"); if (pv) return previewFile(pv.dataset.preview);
     const cite = t.closest(".cite");
