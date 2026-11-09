@@ -752,7 +752,12 @@ async function loadMail() {
   const curN = $("#mc-notice").value;
   $("#mc-notice").innerHTML = `<option value="">(공문 없이 양식만)</option>` + state.notices.map((n) => `<option value="${n.id}">${esc((n.analysis || {}).folder_name || n.title)}</option>`).join("");
   if (curN) $("#mc-notice").value = curN;
-  $("#tpl-vars").innerHTML = r.variables.map((v) => `<button class="chip" data-var="${esc(v)}">{{${esc(v)}}}</button>`).join("");
+  $("#tpl-vars").innerHTML = ["본문", ...r.variables].map((v) => `<button class="chip" data-var="${esc(v)}">{{${esc(v)}}}</button>`).join("");
+  const curP = $("#pl-template").value, curPN = $("#pl-notice").value;
+  $("#pl-template").innerHTML = `<option value="">(양식 없이 형식에 맞춰)</option>` + r.templates.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join("");
+  if (curP) $("#pl-template").value = curP;
+  $("#pl-notice").innerHTML = `<option value="">(공문 없이)</option>` + state.notices.map((n) => `<option value="${n.id}">${esc((n.analysis || {}).folder_name || n.title)}</option>`).join("");
+  if (curPN) $("#pl-notice").value = curPN;
   renderTplList();
 }
 function renderTplList() {
@@ -1206,6 +1211,50 @@ function bind() {
   setupDrop($("#drop-report"), addReportTemplates);
   $("#nd-report").addEventListener("click", async () => { if (!currentNotice) return; const id = currentNotice.id; closeSheet(); go("report"); await loadReport(); $("#rp-notice").value = String(id); });
   segmented($("#mail-mode"), (v) => $$(".mail-pane").forEach((p) => p.classList.toggle("on", p.dataset.mode === v)));
+  // 문서 다듬기
+  let plKind = "mail";
+  segmented($("#pl-kind"), (v) => { plKind = v; $("#pl-mailto").disabled = v !== "mail"; });
+  $("#pl-go").addEventListener("click", async () => {
+    const draft = $("#pl-draft").value;
+    if (!draft.trim()) return toast("다듬을 내용을 입력하세요", "info");
+    const btn = $("#pl-go"); btn.disabled = true;
+    $("#pl-meta").textContent = "다듬는 중…";
+    try {
+      const tid = $("#pl-template").value, nid = $("#pl-notice").value;
+      const r = await runJob("polish_draft", [draft, plKind, tid ? Number(tid) : null, nid ? Number(nid) : null, $("#pl-ai").checked],
+        (st) => { if (st.message) $("#pl-meta").textContent = st.message; });
+      $("#pl-subject").value = r.subject || ""; $("#pl-body").value = r.body || "";
+      $("#pl-meta").textContent = r.mode === "llm" ? `로컬 AI로 다듬음 (${r.model || ""})` : (r.warning ? `규칙으로 다듬음 · ${r.warning}` : "규칙으로 다듬음");
+    } catch (e) { toast(e.message, "err"); $("#pl-meta").textContent = ""; }
+    finally { btn.disabled = false; }
+  });
+  $("#pl-copy").addEventListener("click", async () => {
+    const sub = $("#pl-subject").value.trim();
+    await copyText((plKind === "mail" && sub ? `제목: ${sub}\n\n` : "") + $("#pl-body").value);
+    toast("복사했습니다", "ok");
+  });
+  $("#pl-save").addEventListener("click", async () => {
+    const nid = $("#pl-notice").value;
+    try { const p = await api("save_mail_draft", $("#pl-subject").value, $("#pl-body").value, nid ? Number(nid) : null); toast(`저장했습니다: ${p}`, "ok", 6000); }
+    catch (e) { toast(e.message, "err"); }
+  });
+  $("#pl-mailto").addEventListener("click", async () => {
+    try {
+      const r = await api("open_mail", $("#pl-subject").value, $("#pl-body").value);
+      if (!r.with_body) { await copyText($("#pl-body").value); toast("본문이 길어 제목만 넘겼습니다. 본문은 복사해 두었으니 붙여 넣으세요.", "info", 7000); }
+    } catch (e) { toast(e.message, "err", 8000); }
+  });
+  $("#tpl-from-example").addEventListener("click", async () => {
+    const text = $("#tpl-example").value;
+    if (!text.trim()) return toast("보낸 메일을 붙여 넣으세요", "info");
+    try {
+      const r = await api("template_from_example", text, "");
+      toast(`'${r.name}' 양식으로 저장했습니다. 이름·내용을 확인해 주세요.`, "ok", 6000);
+      $("#tpl-example").value = "";
+      state.tplSel = r.id;
+      await loadMail();
+    } catch (e) { toast(e.message, "err"); }
+  });
   $("#mc-make").addEventListener("click", () => makeMail().catch((e) => toast(e.message, "err")));
   $("#mc-copy").addEventListener("click", async () => { await copyText(`제목: ${$("#mc-subject").value}\n\n${$("#mc-body").value}`); toast("메일 내용을 복사했습니다", "ok"); });
   $("#mc-mailto").addEventListener("click", async () => {

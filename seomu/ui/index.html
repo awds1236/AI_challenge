@@ -29,7 +29,7 @@
       <button class="nav-item" data-page="guide"><i data-icon="sparkle"></i><span>상황 안내</span></button>
       <button class="nav-item" data-page="collect"><i data-icon="tray"></i><span>공문 수집</span><em class="nav-badge" id="badge-notices"></em></button>
       <button class="nav-item" data-page="tasks"><i data-icon="check"></i><span>할 일·일정</span><em class="nav-badge red" id="badge-tasks"></em></button>
-      <button class="nav-item" data-page="mail"><i data-icon="mail"></i><span>메일 양식</span></button>
+      <button class="nav-item" data-page="mail"><i data-icon="mail"></i><span>문서 다듬기</span></button>
       <button class="nav-item" data-page="report"><i data-icon="doc"></i><span>보고서 작성</span></button>
       <div class="nav-label">관리</div>
       <button class="nav-item" data-page="library"><i data-icon="books"></i><span>규정 저장소</span></button>
@@ -285,13 +285,38 @@
     <!-- 메일 양식 -->
     <section class="page" id="page-mail">
       <header class="page-head">
-        <div><div class="eyebrow">자주 쓰는 양식 + 공문 내용 = 메일 초안</div><h1>메일 양식</h1></div>
+        <div><div class="eyebrow">대충 쓴 메모 → 메일·공문·보고·메시지 / 내 양식 + 공문 내용 = 초안</div><h1>문서 다듬기</h1></div>
         <div class="segmented" id="mail-mode">
-          <button class="on" data-v="compose">메일 만들기</button><button data-v="edit">양식 관리</button>
+          <button class="on" data-v="polish">다듬기</button><button data-v="compose">양식으로 만들기</button><button data-v="edit">내 양식 관리</button>
         </div>
       </header>
 
-      <div class="mail-pane on" data-mode="compose">
+      <div class="mail-pane on" data-mode="polish">
+        <div class="grid-mail">
+          <div class="card">
+            <label class="field"><span>만들 형식</span>
+              <div class="segmented" id="pl-kind"><button class="on" data-v="mail">메일</button><button data-v="official">공문</button><button data-v="report">보고</button><button data-v="message">메시지</button></div></label>
+            <label class="field"><span>내 양식 (선택)</span><select class="input" id="pl-template"></select></label>
+            <label class="field"><span>관련 공문 (선택)</span><select class="input" id="pl-notice"></select></label>
+            <label class="field grow"><span>대충 쓴 내용</span><textarea class="input" id="pl-draft" rows="10"
+              placeholder="메모처럼 써도 됩니다.&#10;예)&#10;11월 체육관 대관 일정 공유&#10;다음주 화요일(11/18) 오전 10시 점검 있음&#10;대관 신청은 11월 14일까지 회신해줘"></textarea></label>
+            <label class="switch-row"><span>로컬 AI로 문장 다듬기</span><input type="checkbox" class="switch" id="pl-ai" checked></label>
+            <button class="btn primary full" id="pl-go"><i data-icon="sparkle"></i>다듬기</button>
+            <div class="muted small" style="margin-top:8px">숫자·날짜·연락처는 그대로 둡니다. AI가 바꾸면 규칙으로 다듬은 결과를 보여 줍니다. 내 양식을 고르면 그 짜임과 문체를 따릅니다.</div>
+          </div>
+          <div class="card mail-preview">
+            <label class="field"><span>제목</span><input class="input" id="pl-subject"></label>
+            <label class="field grow"><span>다듬은 글</span><textarea class="input" id="pl-body" rows="16"></textarea></label>
+            <div class="row wrap"><span class="muted small grow" id="pl-meta"></span>
+              <button class="btn" id="pl-save"><i data-icon="download"></i>초안 저장</button>
+              <button class="btn" id="pl-mailto"><i data-icon="mail"></i>메일 앱으로</button>
+              <button class="btn primary" id="pl-copy"><i data-icon="copy"></i>전체 복사</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mail-pane" data-mode="compose">
         <div class="grid-mail">
           <div class="card">
             <label class="field"><span>양식</span><select class="input" id="mc-template"></select></label>
@@ -318,6 +343,9 @@
           <div class="card">
             <div class="card-head"><h3>양식 목록</h3><button class="btn sm" id="tpl-new"><i data-icon="plus"></i>새 양식</button></div>
             <ul class="list selectable" id="tpl-list"></ul>
+            <div class="guide-sub">보낸 메일로 내 양식 만들기</div>
+            <textarea class="input" id="tpl-example" rows="5" placeholder="자주 보내는 메일을 그대로 붙여 넣으세요. 첫 줄이 '제목: …'이면 메일 제목이 됩니다. 내 이름·부서·연락처는 자동으로 변수가 되고, 메모가 들어갈 자리에는 {{본문}}을 적어 두세요."></textarea>
+            <div class="row end"><button class="btn sm primary" id="tpl-from-example"><i data-icon="plus"></i>양식으로 저장</button></div>
           </div>
           <div class="card">
             <label class="field"><span>양식 이름</span><input class="input" id="tpl-name"></label>

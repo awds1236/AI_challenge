@@ -31,7 +31,7 @@ from .notice_text import short_task, tidy_text
 from .engine import ENGINE_MISSING, LocalClient, LocalEngine, add_model_file, ollama_model_blob
 from .llm import LLMError, OllamaClient
 from . import models as model_catalog
-from . import attach, downloader, forms as forms_mod, guide as guide_mod, winwindow
+from . import attach, downloader, forms as forms_mod, guide as guide_mod, polish as polish_mod, winwindow
 from .mail import DEFAULT_TEMPLATES, POLISH_PROMPT, VARIABLES, build_variables, clean_polished, render, tasks_to_ics
 from .parsers import READABLE_EXT
 from .rag import RAGEngine
@@ -1461,6 +1461,50 @@ class Api:
                            and not p.name.startswith(("메일초안", "~$", "."))]
         return {"subject": subject, "body": body, "missing": list(dict.fromkeys(m1 + m2)),
                 "attachments": attachments}
+
+    # ---- 문서 다듬기: 대충 쓴 메모 → 메일·공문·보고·메시지
+    def _profile(self) -> dict:
+        s = self._cfg.settings
+        return {"user_name": s.user_name, "user_dept": s.user_dept, "user_phone": s.user_phone,
+                "user_email": s.user_email}
+
+    def polish_draft(self, draft: str, kind: str = "mail", template_id: int | None = None,
+                     notice_id: int | None = None, use_ai: bool = True) -> dict:
+        """메모를 고른 형식(또는 내 양식)으로 다듬는다. AI가 없거나 숫자·날짜를 바꾸면 규칙 결과."""
+        if kind not in polish_mod.KINDS:
+            raise ValueError("형식을 고르세요")
+        if not (draft or "").strip():
+            raise ValueError("다듬을 내용을 입력하세요 (메모처럼 대충 써도 됩니다)")
+        template = self._store.get_template(int(template_id)) if template_id else None
+        notice = self._store.get_notice(int(notice_id)) if notice_id else None
+        variables = build_variables(notice, self._cfg.settings)
+        rule = polish_mod.rule_polish(draft, kind, self._profile(), template, variables)
+
+        def work(job: Job):
+            res = dict(rule, mode="rule", warning="")
+            if use_ai:
+                job.message = "로컬 AI가 다듬는 중…"
+                try:
+                    c = self._client()
+                    model = c.pick_chat_model(self._cfg.settings.chat_model)
+                    ai = polish_mod.ai_polish(c, model, draft, kind, rule,
+                                              (template or {}).get("body", ""), self._cfg.settings.num_ctx)
+                    if kind == "mail" and not template:      # 서명은 규칙으로 (AI가 이름·연락처를 지어내지 않게)
+                        sig = polish_mod._signature(self._profile())
+                        if sig and sig.splitlines()[0] not in ai["body"]:
+                            ai["body"] = ai["body"].rstrip() + "\n\n" + sig
+                    res = dict(ai, mode="llm", model=model, warning="")
+                except LLMError as e:
+                    res["warning"] = str(e)
+            return res
+        return self._run_job("polish_draft", work)
+
+    def template_from_example(self, text: str, name: str = "") -> dict:
+        """보낸 메일을 붙여 넣으면 내 양식으로 저장한다 (내 이름·부서·연락처·메일은 변수로)."""
+        t = polish_mod.template_from_example(text, self._profile())
+        name = (name or "").strip() or (t["subject"][:20] if t["subject"] else "내 메일 양식")
+        tid = self._store.save_template(name, t["subject"], t["body"], None)
+        return {"id": tid, "name": name, **t}
 
     def polish_mail(self, body: str) -> dict:
         def work(job: Job):
