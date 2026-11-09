@@ -75,20 +75,23 @@ def parse_dates(text: str, ref: date) -> list[date]:
                 found.append((m.start(), date(y, int(m.group(1)), int(m.group(2)))))
             except ValueError:
                 pass
-    rel = {"오늘": 0, "금일": 0, "내일": 1, "명일": 1, "모레": 2, "글피": 3}
-    for m in re.finditer(r"(오늘|금일|내일|명일|모레|글피)", text):
+    rel = {"오늘": 0, "금일": 0, "내일": 1, "명일": 1, "모레": 2, "글피": 3,
+           "어제": -1, "전일": -1, "그제": -2, "그저께": -2, "엊그제": -2}
+    for m in re.finditer(r"(오늘|금일|내일|명일|모레|글피|어제|그저께|엊그제|그제)", text):
         found.append((m.start(), ref + timedelta(days=rel[m.group(1)])))
     for m in re.finditer(r"(\d{1,2})\s*일\s*(?:뒤|후)", text):
         found.append((m.start(), ref + timedelta(days=int(m.group(1)))))
     last_weeks, last_day = None, None
-    for m in re.finditer(r"(이번\s*주|금주|다음\s*주|차주|담주|다다음\s*주)?\s*([월화수목금토일])요일", text):
+    past_talk = bool(re.search(_AFTER, text))        # '목요일에 다녀왔는데' → 지난 목요일
+    for m in re.finditer(r"(이번\s*주|금주|다음\s*주|차주|담주|다다음\s*주|지난\s*주|저번\s*주)?\s*([월화수목금토일])요일", text):
         w = re.sub(r"\s", "", m.group(1) or "")
         if w:
-            weeks = 2 if w == "다다음주" else 1 if w in ("다음주", "차주", "담주") else 0
+            weeks = (2 if w == "다다음주" else 1 if w in ("다음주", "차주", "담주")
+                     else -1 if w in ("지난주", "저번주") else 0)
         else:                       # '다음 주 수요일부터 목요일까지': 앞에서 말한 주를 이어 쓴다
             weeks = last_weeks if last_weeks is not None else 0
         d = _next_weekday(ref, WEEKDAYS.index(m.group(2)), weeks)
-        if (weeks == 0 and d < ref) or (last_day and d < last_day):
+        if (weeks == 0 and d < ref and not past_talk) or (last_day and d < last_day):
             d += timedelta(days=7)
         last_weeks, last_day = weeks, d
         found.append((m.start(), d))
@@ -120,6 +123,11 @@ def parse_dates(text: str, ref: date) -> list[date]:
     return out
 
 
+# 일이 이미 끝났다는 말 ('출장 다녀와서 정산') → 출발 전 절차는 지난 단계로 본다
+_AFTER = (r"(다녀와|다녀왔|갔다\s*와|갔다\s*왔|복귀|돌아와|돌아왔|마쳤|마치고|끝났|끝나고|끝난|마친|"
+          r"정산|복명|사후|다녀온)")
+
+
 def detect_kind(text: str) -> str:
     best, score = "", 0
     for k, v in KINDS.items():
@@ -148,10 +156,18 @@ def parse_situation(text: str, ref: date | None = None) -> dict:
     if im:
         item = re.sub(r"^(?:부서|사무실|팀)\s*", "", im.group(1)).strip()
     hm = re.search(r"(\d+(?:\.\d+)?)\s*시간", t)
-    return {"text": t, "kind": detect_kind(t), "start": dates[0].isoformat() if dates else "",
-            "end": (dates[-1] if len(dates) > 1 and dates[-1] >= dates[0] else (dates[0] if dates else None)).isoformat()
-            if dates else "", "place": place, "purpose": purpose, "amount": amount, "item": item,
-            "hours": float(hm.group(1)) if hm else 0.0, "today": ref.isoformat()}
+    phase = "after" if re.search(_AFTER, t) else ""
+    start = dates[0] if dates else None
+    end = (dates[-1] if len(dates) > 1 and dates[-1] >= dates[0] else start) if dates else None
+    assumed = ""
+    if phase == "after" and not dates:
+        # 날짜 없이 '다녀와서 정산' → 오늘 마친 것으로 보고 사후 기한을 계산한다 (화면에 알린다)
+        start = end = ref
+        assumed = "오늘 마친 것으로 보고 기한을 계산했습니다. '11월 12일에 다녀왔어요'처럼 날짜를 말하면 정확히 계산합니다."
+    return {"text": t, "kind": detect_kind(t), "start": start.isoformat() if start else "",
+            "end": end.isoformat() if end else "", "place": place, "purpose": purpose, "amount": amount,
+            "item": item, "hours": float(hm.group(1)) if hm else 0.0, "today": ref.isoformat(),
+            "phase": phase, "assumed": assumed}
 
 
 # ---------------------------------------------------------------- 규정 → 절차
@@ -297,6 +313,13 @@ def build_steps(hits: list, sit: dict) -> dict:
                     prev_due = due
             elif _LIMIT.search(c):
                 checks.append({"text": c, "basis": basis})
+    if sit.get("phase") == "after":
+        # 일을 마친 뒤: '전날까지'·'사전' 단계와 같은 조문의 단계는 이미 지난 단계 (안내만 하고 할 일에서 뺀다)
+        before = {st["basis"] for st in steps if re.search(r"(전\s*까지|전날|전일|사전)", st["due_text"])}
+        for st in steps:
+            if not st["skip"] and (st["basis"] in before):
+                st["skip"] = "이미 지난 단계 (시작 전 절차) — 하지 않았다면 부서장에게 사후 처리를 문의하세요"
+                st["late"] = False
     # 날짜 순으로 놓되, 날짜가 없는 단계는 규정에서 바로 앞 단계 곁에 둔다 ('출장명령' 다음의 '관외 출장 결재')
     key, last = [], ""
     for i, st in enumerate(steps):
@@ -395,6 +418,9 @@ def build_forms(sit: dict, found_forms: list[str], basis_of: dict[str, str]) -> 
             hit = next((b for k, b in basis_of.items() if k[:2] in f or f[:2] in k), "")
             if hit:
                 basis_of[f] = hit
+    if sit.get("phase") == "after":
+        pre = re.compile(r"(출장명령|출장\s*신청|승인\s*요청|개최\s*계획|신청서)$")
+        names = [n for n in names if not pre.search(n)] or names
     if not names:
         names = [GENERIC_FORM]
     out, seen = [], set()
@@ -476,7 +502,7 @@ def make_guide(situation: str, search: Callable[[str], list], client=None, model
         built["prep"] = [p for p in built["prep"] if any(p in st["text"] for st in live)]
     forms = build_forms(sit, built["forms"], basis_of)
     tasks = build_tasks(built["steps"], sit, forms, built["prep"])
-    kind = sit["kind"] or "일반"
+    kind = (sit["kind"] or "일반") + (" 후속 처리" if sit.get("phase") == "after" and sit["kind"] else "")
     when = _period(sit) if sit["start"] else "날짜 미정"
     if live:
         summary = (f"{kind} 상황({when})입니다. 규정에서 찾은 절차 {len(live)}단계"
@@ -494,6 +520,8 @@ def make_guide(situation: str, search: Callable[[str], list], client=None, model
         "forms": forms, "prep": built["prep"], "tasks": tasks, "tips": [],
         "sources": [h.to_dict() for h in (rel if rel or sit["kind"] else hits[:2])], "mode": "rule",
     }
+    if sit.get("assumed"):
+        result["notice"] = sit["assumed"]
     late = [s for s in built["steps"] if s.get("late")]
     if late:
         result["notice"] = (f"규정의 기한이 이미 지난 단계가 {len(late)}개 있습니다 ({late[0]['due_text']}). "

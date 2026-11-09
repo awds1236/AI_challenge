@@ -212,7 +212,7 @@ def test_capture_window_simulated(api, tmp_path, monkeypatch):
     folder = Path(n["folder"])
     assert folder.name.endswith("2026년도 회계마감에 따른 협조사항 알림")
     assert (folder / "붙임" / "계약심의위원회 운영 내규.hwp").exists()
-    assert not (dl / "계약심의위원회 운영 내규.hwp").exists()   # 다운로드 폴더에서 옮겨 정리
+    assert (dl / "계약심의위원회 운영 내규.hwp").exists()       # 원본 보호: 다운로드 폴더의 원본은 그대로 둔다
     assert [d["date"] for d in n["analysis"]["deadlines"]] == ["2026-11-13", "2026-11-27", "2026-12-28"]
     assert n["capture_method"] == "본문복사 버튼"
     assert (folder / "수집기록.txt").exists()

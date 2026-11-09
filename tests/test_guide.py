@@ -233,3 +233,20 @@ def test_ai_failure_falls_back_to_rule():
     assert r["mode"] == "rule" and r["ai_error"] and r["steps"]
     with pytest.raises(ValueError):
         guide.make_guide("", _search_sample())
+
+
+def test_after_trip_settlement_like_contest_example(api, monkeypatch):
+    """공고문 예시 '출장 다녀와서 정산해야 해요': 출발 전 절차는 지난 단계로, 복명서·정산 기한은 날짜로."""
+    r = _guide(api, "출장 다녀와서 정산해야 해요", monkeypatch)
+    sit = r["situation"]
+    assert sit["phase"] == "after" and sit["end"] == "2026-11-09" and "오늘 마친 것으로" in r["notice"]
+    assert r["summary"].startswith("출장 후속 처리")
+    live = [s for s in r["steps"] if not s["skip"]]
+    assert [s["due"] for s in live] == ["2026-11-12", "2026-11-19"]          # 복명서 3일, 정산 7일
+    assert all("이미 지난 단계" in s["skip"] for s in r["steps"] if "제7조" in s["basis"])
+    assert [f["name"] for f in r["forms"]] == ["출장 복명서"]                 # 출장 신청서는 내지 않는다
+    assert not any("출장명령" in t["title"] for t in r["tasks"])
+    r = _guide(api, "어제까지 대전 출장 다녀왔는데 정산해야 해요", monkeypatch)
+    assert r["situation"]["end"] == "2026-11-08" and not r.get("notice", "").startswith("오늘")
+    assert guide.parse_situation("지난주 목요일에 출장 다녀왔어요", REF)["start"] == "2026-11-05"
+    assert guide.parse_situation("그저께 행사 끝났어요", REF)["start"] == "2026-11-07"

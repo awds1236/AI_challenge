@@ -1704,10 +1704,8 @@ class FileWatcher:
         self.dest.mkdir(parents=True, exist_ok=True)
         target = unique_path(self.dest / safe_name(src.name, 150))
         try:
-            if src.parent.name.lower() == "downloads":
-                shutil.move(str(src), target)  # 다운로드 폴더 파일은 옮겨서 정리
-            else:
-                shutil.copy2(src, target)       # 바탕화면·문서·임시 폴더 파일은 복사
+            # 원본 보호: 사용자 PC의 파일은 옮기거나 지우지 않고 복사만 한다 (공문 폴더에 사본을 모은다)
+            shutil.copy2(src, target)
         except OSError as e:
             return {"name": src.name, "path": "", "ok": False, "error": str(e)[:200]}
         item = {"name": target.name, "path": str(target), "ok": True, "from": str(src.parent)}
