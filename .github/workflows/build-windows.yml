@@ -37,12 +37,21 @@ jobs:
           python -m pip install pyinstaller pywebview pypdf truststore pillow olefile openpyxl uiautomation lxml
 
       - name: 시험 (pytest)
+        # CI에는 사람이 없는 화면이라 실제 창 조작(앞으로 가져오기·Ctrl+A/C·UI Automation)을 끈다
+        #   (러너 콘솔에 키 입력이 들어가면 러너가 끊길 수 있음)
+        timeout-minutes: 10
+        env:
+          SEOMU_NO_FOREGROUND: "1"
+          SEOMU_DISABLE_UIA: "1"
+          SEOMU_HOME: ${{ runner.temp }}\seomu_home
+          SEOMU_DOWNLOADS: ${{ runner.temp }}\seomu_dl
         run: |
-          python -m pip install pytest
-          python -m pytest -q -p no:cacheprovider
+          python -m pip install pytest pytest-timeout
+          python -m pytest -q -p no:cacheprovider --timeout=120
         continue-on-error: true
 
       - name: 내장 AI 엔진 받기 (llama.cpp 공식 CPU 빌드)
+        timeout-minutes: 10
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -71,9 +80,11 @@ jobs:
           Get-ChildItem engine | Select-Object Name, Length | Format-Table
 
       - name: 실행 파일 만들기 (SeomuAI.exe)
+        timeout-minutes: 20
         run: python tools/build_exe.py --no-playwright --no-zip
 
       - name: 실행 시험 (프로그램이 켜지고 화면을 내주는지)
+        timeout-minutes: 5
         run: |
           $p = Start-Process -FilePath dist\SeomuAI\SeomuAI.exe -ArgumentList "--no-open","--port","18765" -PassThru
           $ok = $false
@@ -87,6 +98,7 @@ jobs:
           Write-Host "실행 시험 통과"
 
       - name: 설치 파일 만들기 (SeomuAI-Setup.exe)
+        timeout-minutes: 10
         run: |
           $ver = (python -c "import seomu; print(seomu.__version__)").Trim()
           if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
@@ -101,6 +113,7 @@ jobs:
           Get-Item dist\SeomuAI-Setup.exe | Select-Object Name, Length
 
       - name: 설치 시험 (조용히 설치 → 설치된 프로그램 실행)
+        timeout-minutes: 5
         run: |
           $dir = "$env:RUNNER_TEMP\SeomuAI-test"
           $p = Start-Process -FilePath dist\SeomuAI-Setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CURRENTUSER","/DIR=$dir" -PassThru -Wait
