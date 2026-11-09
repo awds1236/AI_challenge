@@ -185,8 +185,9 @@
 
 ## 가장 쉬운 방법: exe로 바로 실행 (Python 설치 불필요)
 
-1. [Releases](https://github.com/awds1236/AI_challenge/releases/latest)에서 **`SeomuAI-windows-x64.zip`**을 받아 압축을 풉니다.
-2. `SeomuAI` 폴더의 **`SeomuAI.exe`**를 더블클릭합니다. 프로그램 창이 열립니다.
+1. [Releases](https://github.com/awds1236/AI_challenge/releases/latest)에서 **`SeomuAI-Setup.exe`**를 받아 실행합니다.
+   관리자 권한 없이 설치되고, 설치가 끝나면 바로 실행됩니다 (바탕화면·시작 메뉴 바로가기 생성).
+2. 다음부터는 바탕화면의 **서무비서 AI**를 누르면 됩니다.
 3. 처음 한 번은 **설정 → AI 모델**에서 **[받기]**를 눌러 AI 모델(약 3.3GB)을 받습니다. 내장 AI 엔진은 압축 파일에 들어 있어 Ollama가 필요 없습니다.
    인터넷이 안 되는 PC는 `SeomuAI\models` 폴더에 `.gguf` 모델 파일을 직접 넣으면 됩니다.
 
@@ -201,6 +202,8 @@ exe를 직접 만들려면(개발용):
 .venv\Scripts\python.exe tools\build_exe.py
 ```
 > `dist\SeomuAI\SeomuAI.exe`와 배포용 `dist\SeomuAI-windows-x64.zip`이 만들어집니다. 프로젝트의 `engine` 폴더가 있으면 내장 AI 엔진도 함께 넣습니다.
+> 설치 파일(`SeomuAI-Setup.exe`)은 Inno Setup으로 `iscc tools\installer.iss`를 실행하면 만들어집니다.
+> GitHub의 **Actions → Windows 설치 파일 → Run workflow**를 누르면 Windows 빌드 서버가 엔진을 넣어 설치 파일을 만들고, 설치·실행 시험을 거쳐 Releases에 올립니다.
 
 ## 설치와 실행 (Windows, 소스에서)
 
