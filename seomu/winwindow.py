@@ -71,9 +71,10 @@ def is_own_temp(path: str | Path) -> bool:
 
 
 def copy_allowed() -> bool:
-    """전체 선택·복사(Ctrl+A/C)는 창을 잠깐(1~2초) 앞으로 가져온 뒤 원래 보던 창으로 되돌린다.
-    글자 인식(OCR)보다 정확하므로 OCR 전에 시도한다. 검증·테스트(SEOMU_NO_FOREGROUND)에서만 막는다."""
-    return not os.environ.get("SEOMU_NO_FOREGROUND")
+    """전체 선택·복사(Ctrl+A/C)는 키보드 입력이라 그 창이 맨 앞에 있어야만 된다 (뒤에서는 할 수 없다).
+    그래서 '창을 앞으로 가져오기'를 허용했을 때만 쓴다. 기본은 뒤에서 되는 방법(본문복사 버튼·열린 문서 파일·
+    UI Automation 글자 읽기·화면 글자 인식)만 쓴다."""
+    return foreground_allowed()
 
 
 # ---------------------------------------------------------------- Win32 (ctypes)
@@ -1456,8 +1457,9 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
                  trace: list | None = None, found: dict | None = None) -> tuple[str, str]:
     """(본문, 사용한 방법). trace에 단계별 기록을 남긴다.
 
-    글자를 그대로 가져오는 방법부터, 글자 인식(OCR)은 마지막에 시도한다:
-    본문복사 → 창에 열린 문서 파일 → 화면 글자 정보 → 편집 칸 → 문서 파일 찾기 → 전체 선택·복사 → 화면 넘김 글자 인식.
+    모두 창을 앞으로 가져오지 않고 뒤에서 읽는다 (사용자 작업을 방해하지 않는다):
+    본문복사 버튼 → 창에 열린 문서 파일 → UI Automation 글자 정보 → 편집 칸 → 문서 파일 찾기 → 화면 넘김 글자 인식(OCR).
+    '창을 앞으로 가져오기'를 허용했을 때만 OCR 전에 전체 선택·복사(Ctrl+A/C)를 한다 (키보드 입력은 맨 앞 창에만 들어간다).
     found["html"]에는 복사한 HTML(붙임 링크 포함)을 넣어 준다 (있을 때).
     어느 방법도 충분하지 않으면 그중 가장 긴 결과라도 돌려준다 (빈손으로 끝내지 않는다).
     found["document"]에는 창에 열려 있던 문서 파일 경로를 넣어 준다 (찾았을 때)."""
@@ -1525,7 +1527,7 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
         # ⑥ 전체 선택·복사 (Ctrl+A, Ctrl+C) — 글자를 그대로 가져오므로 OCR보다 정확하다.
         #    창을 잠깐 앞으로 가져왔다가 원래 보던 창으로 되돌린다. 복사된 HTML(붙임 링크)도 함께 받아 둔다
         if copy_allowed():
-            log("문서를 전체 선택·복사하는 중… (잠깐 그 창이 앞에 뜹니다)")
+            log("문서를 전체 선택·복사하는 중… (허용한 설정이라 잠깐 그 창이 앞에 뜹니다)")
             t, html = copy_all(hwnd, trace, fresh, marker)
             if html:
                 found["html"] = html
@@ -1533,7 +1535,7 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
                 return t, "전체 선택·복사"
             keep(t, "전체 선택·복사 (일부)")
         else:
-            trace.append("전체 선택·복사 생략 (검증 모드)")
+            trace.append("전체 선택·복사 생략: 창을 앞으로 가져오지 않는 설정 (뒤에서 되는 방법만 사용)")
         # ⑦ 마지막: 창 화면을 그려 받아(PrintWindow, 가려져 있어도 됨) 글자 인식 — 화면을 넘겨 가며 끝까지
         log("화면 글자 인식(OCR)으로 본문을 읽는 중…")
         t = scroll_ocr_body(hwnd, log, trace)
@@ -1547,16 +1549,32 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
             set_clipboard(previous)
 
 
+def _is_front(hwnd: int) -> bool:
+    """맨 앞(키보드 입력을 받는) 창이 그 창(또는 그 창과 같은 프로그램의 창)이고, 서무비서 자신이 아닌지."""
+    fg = int(user32.GetForegroundWindow() or 0)
+    if not fg:
+        return False
+    if _pid(fg) == os.getpid() or _process_name(_pid(fg)).lower() in ("seomuai.exe", "python.exe", "pythonw.exe"):
+        return False
+    root = int(user32.GetAncestor(fg, 2) or fg)        # GA_ROOT
+    return fg == int(hwnd) or root == int(hwnd) or _pid(fg) == _pid(hwnd)
+
+
 def copy_all(hwnd: int, trace: list, fresh: Callable[[], str], marker: str) -> tuple[str, str]:
     """창을 잠깐 앞으로 가져와 전체 선택·복사하고, 원래 앞에 있던 창으로 되돌린다. (글자, HTML)"""
     prev = int(user32.GetForegroundWindow() or 0)
     set_clipboard(marker)
     try:
-        trace.append(f"전체 선택·복사: 창 맨 앞으로 {activate(hwnd)}")
+        activate(hwnd)
+        if not _is_front(hwnd):
+            # Windows가 창 전환을 막았다 → 지금 맨 앞 창(서무비서 등)에 Ctrl+A/C가 들어가지 않게 키를 보내지 않는다
+            trace.append("전체 선택·복사 생략: 그 창을 앞으로 가져오지 못함 (Windows 창 전환 제한)")
+            return "", ""
+        trace.append("전체 선택·복사: 그 창이 맨 앞에 있음을 확인")
         _hotkey(VK_CONTROL, 0x41)                     # 먼저 클릭 없이 (링크를 잘못 누르지 않게)
         time.sleep(0.3)
         _hotkey(VK_CONTROL, 0x43)
-        if not _wait(lambda: bool(fresh()), 1.5):
+        if not _wait(lambda: bool(fresh()), 1.5) and _is_front(hwnd):
             doc = _largest_child(hwnd) or hwnd          # 글자 영역에 초점이 없으면 왼쪽 여백을 눌러 초점을 준다
             l, t, r, b = _rect(doc)
             if r - l > 50 and b - t > 50:

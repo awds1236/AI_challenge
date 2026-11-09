@@ -96,3 +96,15 @@ def test_editor_unsaved_marker_and_browser_file_url():
     assert ww._path_from_url("file:///C:/Users/a/%EA%B3%B5%EB%AC%B8.pdf") == r"C:\Users\a\공문.pdf"
     assert ww._path_from_url("C:/Users/a/공문.pdf#page=2") == r"C:\Users\a\공문.pdf"
     assert ww._path_from_url("https://example.go.kr/a.pdf") == ""
+
+
+def test_copy_needs_foreground_permission(monkeypatch):
+    """전체 선택·복사는 키보드 입력이라 창이 맨 앞에 있어야 한다 → 기본(뒤에서만 읽기)에서는 하지 않는다."""
+    monkeypatch.delenv("SEOMU_NO_FOREGROUND", raising=False)
+    ww.set_foreground_allowed(False)
+    assert not ww.copy_allowed()
+    ww.set_foreground_allowed(True)
+    assert ww.copy_allowed()
+    monkeypatch.setenv("SEOMU_NO_FOREGROUND", "1")
+    assert not ww.copy_allowed()
+    ww.set_foreground_allowed(False)

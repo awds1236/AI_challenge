@@ -972,6 +972,24 @@ class Api:
     def list_windows(self) -> list[dict]:
         return winwindow.list_windows()
 
+    def install_uia(self) -> dict:
+        """뒤에서 화면 글자를 읽는 데 필요한 uiautomation 패키지를 설치한다 (소스 실행일 때, 인터넷 필요)."""
+        if winwindow.uia_available():
+            return {"job_id": self._run_job("uia", lambda job: {"ok": True, "already": True})["job_id"]}
+        if getattr(sys, "frozen", False):
+            raise RuntimeError("실행 파일(exe)에는 이미 들어 있어야 합니다. 최신 실행 파일로 다시 받아 주세요.")
+
+        def work(job: Job):
+            job.message = "uiautomation 설치 중… (1분 정도)"
+            r = subprocess.run([sys.executable, "-m", "pip", "install", "uiautomation"], capture_output=True,
+                               text=True, timeout=600, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if r.returncode != 0:
+                raise RuntimeError("설치하지 못했습니다 (인터넷 연결 또는 pip 확인): " + (r.stderr or r.stdout)[-300:])
+            import importlib
+            importlib.invalidate_caches()
+            return {"ok": winwindow.uia_available()}
+        return self._run_job("uia", work)
+
     def job_signal(self, job_id: str, name: str) -> bool:
         job = self._jobs.get(job_id)
         if not job:
