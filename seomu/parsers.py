@@ -487,6 +487,7 @@ def parse_docx(path: Path) -> str:
 
 # ---------------------------------------------------------------- HWP 5.0 (바이너리)
 HWPTAG_PARA_TEXT = 67
+HWPTAG_DISTRIBUTE_DOC_DATA = 28
 _EXT_CTRL = {1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23}
 
 
@@ -526,6 +527,121 @@ def _hwp_records(data: bytes):
         pos += size
 
 
+# ---- 배포용 HWP: ViewText의 본문은 AES-128(ECB)로 암호화돼 있다 (HWP 5.0 공개 문서 형식의 '배포용 문서 데이터')
+def _aes_tables():
+    sbox = [0] * 256
+    p = q = 1
+    while True:                               # GF(2^8)에서 역원을 차례로 구해 S-box를 만든다
+        p = p ^ ((p << 1) & 0xFF) ^ (0x1B if p & 0x80 else 0)
+        q ^= q << 1
+        q ^= q << 2
+        q ^= q << 4
+        q &= 0xFF
+        if q & 0x80:
+            q ^= 0x09
+        x = q ^ ((q << 1 | q >> 7) & 0xFF) ^ ((q << 2 | q >> 6) & 0xFF) ^ ((q << 3 | q >> 5) & 0xFF) \
+            ^ ((q << 4 | q >> 4) & 0xFF)
+        sbox[p] = x ^ 0x63
+        if p == 1:
+            break
+    sbox[0] = 0x63
+    inv = [0] * 256
+    for i, v in enumerate(sbox):
+        inv[v] = i
+    return sbox, inv
+
+
+_SBOX: list[int] = []
+_INV_SBOX: list[int] = []
+
+
+def _xt(a: int) -> int:
+    a <<= 1
+    return (a ^ 0x1B) & 0xFF if a & 0x100 else a
+
+
+def _mul(a: int, b: int) -> int:
+    r = 0
+    while b:
+        if b & 1:
+            r ^= a
+        a = _xt(a)
+        b >>= 1
+    return r
+
+
+def _aes128_ecb_decrypt(key: bytes, data: bytes) -> bytes:
+    try:                                       # 있으면 빠른 라이브러리를 쓴다
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # type: ignore
+        d = Cipher(algorithms.AES(key), modes.ECB()).decryptor()
+        return d.update(data) + d.finalize()
+    except ImportError:
+        return _aes128_ecb_decrypt_py(key, data)
+
+
+def _aes128_ecb_decrypt_py(key: bytes, data: bytes) -> bytes:
+    """추가 패키지 없이 쓰는 AES-128 복호화 (배포용 문서 본문은 수십 KB라 충분히 빠르다)."""
+    global _SBOX, _INV_SBOX
+    if not _SBOX:
+        _SBOX, _INV_SBOX = _aes_tables()
+    sb, isb = _SBOX, _INV_SBOX
+    w = [list(key[i:i + 4]) for i in range(0, 16, 4)]
+    rcon = 1
+    for i in range(4, 44):
+        t = list(w[i - 1])
+        if i % 4 == 0:
+            t = [sb[t[1]] ^ rcon, sb[t[2]], sb[t[3]], sb[t[0]]]
+            rcon = _xt(rcon)
+        w.append([w[i - 4][j] ^ t[j] for j in range(4)])
+    rk = [sum(w[r * 4:r * 4 + 4], []) for r in range(11)]
+    m9, m11, m13, m14 = ([_mul(i, k) for i in range(256)] for k in (9, 11, 13, 14))
+    out = bytearray()
+    for off in range(0, len(data) - 15, 16):
+        s = [b ^ k for b, k in zip(data[off:off + 16], rk[10])]
+        for r in range(9, -1, -1):
+            s = [s[((i // 4 - i % 4) % 4) * 4 + i % 4] for i in range(16)]          # 행 이동 되돌리기
+            s = [isb[b] ^ k for b, k in zip(s, rk[r])]
+            if r:
+                n = []
+                for c in range(4):
+                    a0, a1, a2, a3 = s[c * 4:c * 4 + 4]
+                    n += [m14[a0] ^ m11[a1] ^ m13[a2] ^ m9[a3], m9[a0] ^ m14[a1] ^ m11[a2] ^ m13[a3],
+                          m13[a0] ^ m9[a1] ^ m14[a2] ^ m11[a3], m11[a0] ^ m13[a1] ^ m9[a2] ^ m14[a3]]
+                s = n
+        out += bytes(s)
+    return bytes(out)
+
+
+def _distdoc_key(data: bytes) -> bytes:
+    """배포용 문서 데이터(256바이트)에서 AES 키를 꺼낸다: 앞 4바이트를 씨앗으로 한 난수표(MSVC rand)로 XOR을 풀고
+    4 + (씨앗 & 0xF) 위치의 16바이트를 키로 쓴다."""
+    seed = struct.unpack_from("<I", data, 0)[0]
+    state = seed
+    table = bytearray(256)
+    i = 0
+    while i < 256:
+        state = (state * 214013 + 2531011) & 0xFFFFFFFF
+        val = (state >> 16) & 0xFF
+        state = (state * 214013 + 2531011) & 0xFFFFFFFF
+        count = ((state >> 16) & 0xF) + 1
+        for _ in range(count):
+            if i < 256:
+                table[i] = val
+                i += 1
+    plain = bytes(a ^ b for a, b in zip(data[:256], table))
+    off = 4 + (seed & 0xF)
+    return plain[off:off + 16]
+
+
+def _distdoc_section(raw: bytes) -> bytes:
+    header = struct.unpack_from("<I", raw, 0)[0]
+    if header & 0x3FF != HWPTAG_DISTRIBUTE_DOC_DATA or (header >> 20) & 0xFFF != 256:
+        raise ParseError("배포용 HWP의 형식을 알 수 없습니다")
+    key = _distdoc_key(raw[4:260])
+    body = raw[260:]
+    return _aes128_ecb_decrypt(key, body[:len(body) // 16 * 16])
+
+
 def parse_hwp(path: Path) -> str:
     try:
         import olefile  # type: ignore
@@ -537,15 +653,19 @@ def parse_hwp(path: Path) -> str:
         header = ole.openstream("FileHeader").read()
         flags = struct.unpack_from("<I", header, 36)[0]
         compressed = bool(flags & 0x1)
-        if flags & 0x4:
-            raise ParseError("배포용(암호화) HWP 문서는 읽을 수 없습니다")
+        if flags & 0x2:
+            raise ParseError("암호가 걸린 HWP 문서는 읽을 수 없습니다 (한글에서 암호를 풀고 저장해 주세요)")
+        distributed = bool(flags & 0x4)             # 배포용 문서: 본문이 ViewText에 암호화돼 있다
+        stream = "ViewText" if distributed else "BodyText"
         sections = sorted(
-            (e for e in ole.listdir() if len(e) == 2 and e[0] == "BodyText" and e[1].startswith("Section")),
+            (e for e in ole.listdir() if len(e) == 2 and e[0] == stream and e[1].startswith("Section")),
             key=lambda e: int(re.findall(r"\d+", e[1])[0]),
         )
         out: list[str] = []
         for entry in sections:
             raw = ole.openstream(entry).read()
+            if distributed:
+                raw = _distdoc_section(raw)
             if compressed:
                 try:
                     raw = zlib.decompress(raw, -15)

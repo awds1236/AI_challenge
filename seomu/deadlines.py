@@ -92,7 +92,8 @@ def find_dates(text: str, ref: date | None = None) -> list[dict]:
             after = text[e:e + 14]
             before = text[max(0, s - 30):s]
             score = 0
-            if re.match(r"\s*\)?\s*(까지|한)", after):
+            direct = bool(re.match(r"\s*\)?\s*(까지|한)", after))
+            if direct:
                 score += 3
             if any(w in line for w in DEADLINE_WORDS):
                 score += 1
@@ -113,8 +114,15 @@ def find_dates(text: str, ref: date | None = None) -> list[dict]:
                 "score": score,
                 "is_deadline": score >= 3,
                 "pos": s,
+                "direct": direct,
             })
     found.sort(key=lambda x: x["pos"])
+    # 한 줄에 '…까지'가 바로 붙은 날짜가 있으면, 같은 줄의 다른 날짜(행사 기간 '(11.10.~11.11.)' 등)는
+    # 줄 전체의 '제출·까지' 낱말 점수를 받지 않는다 — 기한은 '까지'가 붙은 날짜다
+    for d in found:
+        if not d["direct"] and any(o is not d and o["direct"] and o["context"] == d["context"] for o in found):
+            d["score"] -= 3
+            d["is_deadline"] = d["score"] >= 3
     # '제출 기간: 2026. 1. 28.(수) 10:00 ~ 2026. 2. 3.(화) 18:00'처럼 시작~끝 날짜가 따로 적힌 기간은
     # 끝 날짜가 기한이다 (신청·접수·제출·공모 기간일 때). 시작 날짜는 기한에서 뺀다.
     lines = text.splitlines()
