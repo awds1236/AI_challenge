@@ -18,7 +18,7 @@ from pathlib import Path
 DOC_EXT = {".hwp", ".hwpx", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".txt",
            ".csv", ".jpg", ".jpeg", ".png", ".odt", ".ods", ".odp", ".show", ".cell", ".egg", ".7z", ".gul",
            ".hwt", ".hml"}
-SKIP_DIRS = {"microsoft", "google", "mozilla", "packages", "nvidia", "intel", "amd", "crashdumps", "d3dscache",
+SKIP_DIRS = {"seomu_work", "microsoft", "google", "mozilla", "packages", "nvidia", "intel", "amd", "crashdumps", "d3dscache",
              "npm-cache", "pip", "node_modules", ".git", "__pycache__", "seomuai", "python", "programs",
              "fontcache", "iconcache", "comms", "connecteddevicesplatform", "cache2", "code cache",
              "gpucache", "service worker", "indexeddb", "webcache", "inetcache"}
@@ -39,17 +39,47 @@ _COUNT_TAIL = re.compile(r"\s*(?:각\s*)?\d+\s*(?:부|매|권|장|건|식|개)\s
 
 def expected_attachments(body: str) -> list[str]:
     """본문의 '붙임' 표기에서 붙임 문서 이름 목록을 뽑는다."""
+    body = body or ""
+
+    def is_own_label(mm) -> bool:
+        # 붙임 문서 자신의 이름표: 문서 맨 위(첫 두 줄)의 '붙임1. ○○ 안내서' — 붙임 목록이 아니다
+        before = [l for l in body[:mm.start()].splitlines() if l.strip()]
+        line_end = body.find("\n", mm.end())
+        line = body[mm.end(): line_end if line_end >= 0 else len(body)]
+        return len(before) <= 1 and not re.search(r"\d+\s*(?:부|매|권)|끝\s*\.", line)
+
     m = None
-    for m in _ATTACH_HEAD.finditer(body or ""):
-        pass                       # 보통 마지막 '붙임'이 실제 붙임 목록
+    for mm in _ATTACH_HEAD.finditer(body):
+        if not is_own_label(mm):
+            m = mm                 # 보통 마지막 '붙임'이 실제 붙임 목록
     if not m:
-        for m in _ATTACH_INLINE.finditer(body or ""):
-            pass
+        for mm in _ATTACH_INLINE.finditer(body):
+            if not is_own_label(mm):
+                m = mm
     if not m:
         return []
     tail = body[m.end():]
     end = re.search(r"끝\s*\.", tail)
-    tail = tail[: end.start()] if end else "\n".join(tail.splitlines()[:12])
+    if end:
+        tail = tail[: end.start()]
+    else:
+        # '끝.'이 없으면 붙임 항목처럼 생긴 줄까지만 ('1. ○○ 1부', '○○.hwp')
+        # — 그 아래 본문('< 한눈에 보기 >', '구분', '세션 1' 등)을 붙임 이름으로 읽지 않는다
+        lines = tail.splitlines()
+        keep = [lines[0]] if lines else []
+        item = re.compile(r"^\s*(?:\d{1,2}\s*[.)]|[①②③④⑤⑥⑦⑧⑨⑩]|[-·○]\s)|\d+\s*(?:부|매|권)\s*\.?\s*$|\.[A-Za-z]{2,5}\s*$")
+        for l in lines[1:12]:
+            if not l.strip():
+                if len(keep) > 1:
+                    break
+                continue
+            if not item.search(l) or re.search(r"[가-힣]{2,8}\s*[:：]\s*\S", l):   # '3. 문의처: …' 같은 본문 항목
+                break
+            keep.append(l)
+        first = (keep[0] if keep else "").strip()
+        if len(keep) == 1 and first and not item.search(first) and len(first) > 40:
+            return []                       # '붙임' 뒤에 문장이 이어진 것 — 붙임 목록이 아님
+        tail = "\n".join(keep)
     tail = tail.replace("\t", " ")
     # '1. A 1부. 2. B 1부.' / 줄바꿈 / '①' 형식 모두 나눈다
     parts = re.split(r"(?:^|\s)(?:\d{1,2}\s*[.)]|[①②③④⑤⑥⑦⑧⑨⑩])\s+", "\n" + tail)
@@ -187,7 +217,8 @@ def candidate_files(since: float, roots: list[tuple[Path, int]] | None = None, b
                 for e in it:
                     try:
                         if e.is_file(follow_symlinks=False):
-                            if os.path.splitext(e.name)[1].lower() in DOC_EXT and not e.name.startswith(("~$", ".")):
+                            if (os.path.splitext(e.name)[1].lower() in DOC_EXT and not e.name.startswith(("~$", "."))
+                                    and not e.name.lower().startswith("seomu_")):
                                 st = e.stat()
                                 if st.st_mtime >= since and st.st_size > 0:
                                     add(e.path, st)
@@ -230,6 +261,37 @@ def same_document(expected: str, filename: str) -> bool:
         return name_score(expected, filename) >= 0.8
     covered = sum(1 for w in want if w in have or any(w in h or h in w for h in have if len(h) >= 2))
     return covered / len(want) >= 0.8
+
+
+def meaningless_name(filename: str) -> bool:
+    """뷰어가 붙인 관리용 이름인지 ('15684_AT_db6840f3cbd3435fb84962add454f41c.pdf', 'tmp1a2b.hwp' 등)."""
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    if re.search(r"[0-9a-f]{12,}", stem, re.I) or re.fullmatch(r"(?:tmp|temp|file|download|attach)?[\W_\d]*", stem, re.I):
+        return True
+    return not re.search(r"[가-힣]", stem) and len(re.findall(r"[A-Za-z]{3,}", stem)) == 0
+
+
+def match_by_content(text: str, names: list[str]) -> int:
+    """파일 내용(앞부분)에 붙임 이름의 낱말이 가장 많이 들어 있는 붙임의 번호. 확실하지 않으면 -1.
+    붙임 문서는 보통 첫머리에 제목(=붙임 이름)이 있다."""
+    head = re.sub(r"\s+", " ", (text or "")[:3000])
+    if len(head) < 10 or not names:
+        return -1
+    flat = head.replace(" ", "")
+    scored = []
+    for i, n in enumerate(names):
+        want = _words(n)
+        if not want:
+            continue
+        cov = sum(1 for w in want if w in flat) / len(want)
+        exact = re.sub(r"\s", "", n) in flat
+        scored.append((1.0 if exact else cov, i))
+    if not scored:
+        return -1
+    scored.sort(reverse=True)
+    best, i = scored[0]
+    second = scored[1][0] if len(scored) > 1 else 0.0
+    return i if best >= 0.75 and best - second >= 0.15 else -1
 
 
 def match_files(expected: list[str], files: list[dict], threshold: float = 0.45,

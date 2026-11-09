@@ -1101,8 +1101,44 @@ class Api:
 
             watcher = winwindow.FileWatcher(winwindow.watch_dirs(), dest)
 
+            tmp_root = os.path.normcase(os.path.abspath(os.environ.get("TEMP") or os.environ.get("TMP") or "~none~"))
+
+            def assign(item: dict, how: str, from_temp: bool = False) -> None:
+                """새로 들어온 파일을 붙임 이름에 짝짓는다: 이름 → (이름이 관리용 번호면) 내용.
+                내용으로 맞춘 파일은 붙임 이름으로 바꾼다. 임시 폴더의 짝 없는 파일은 버린다(다른 프로그램 파일)."""
+                p = Path(item["path"])
+                i, sc = attach.best_match(item["name"], missing()) if missing() else (-1, 0)
+                if i >= 0 and attach.meaningless_name(item["name"]):
+                    i = -1                                  # 번호 이름이 우연히 비슷한 것은 믿지 않는다
+                if i < 0 and missing():
+                    try:
+                        from .parsers import parse_file
+                        i = attach.match_by_content(parse_file(p), missing())
+                    except Exception as e:                 # 읽을 수 없는 형식 → 이름만으로
+                        trace.append(f"'{p.name}' 내용 읽기 실패: {e}")
+                        i = -1
+                    if i >= 0:
+                        label = missing()[i]
+                        if attach.meaningless_name(p.name) or attach.name_score(label, p.name) < 0.6:
+                            new = unique_path(p.with_name(safe_name(label, 120) + p.suffix.lower()))
+                            try:
+                                p.rename(new)
+                                trace.append(f"'{p.name}' → '{new.name}' (내용으로 확인한 붙임 이름으로 바꿈)")
+                                item = dict(item, name=new.name, path=str(new))
+                            except OSError as e:
+                                trace.append(f"이름 바꾸기 실패 {p.name}: {e}")
+                        how += " · 내용으로 확인"
+                if i >= 0:
+                    got[missing()[i]] = item
+                    trace.append(f"'{item['name']}' ← {how}")
+                elif from_temp:
+                    p.unlink(missing_ok=True)               # 임시 폴더의 다른 프로그램 파일: 붙임이 아니다
+                    trace.append(f"임시 폴더의 관계없는 파일 제외: {item['name']}")
+                else:
+                    extras.append(item)
+
             def absorb() -> None:
-                """폴더 감시로 새로 들어온 파일을 붙임 목록에 짝지어 준다."""
+                """폴더 감시로 새로 들어온 파일과 공문 폴더에 바로 저장된 파일을 붙임 목록에 짝지어 준다."""
                 for item in watcher.poll():
                     try:
                         h = attach.file_hash(item["path"])
@@ -1112,12 +1148,32 @@ class Api:
                         Path(item["path"]).unlink(missing_ok=True)
                         continue
                     hashes.add(h)
-                    i, sc = attach.best_match(item["name"], missing()) if missing() else (-1, 0)
-                    if i >= 0:
-                        got[missing()[i]] = item
-                        trace.append(f"'{item['name']}' ← 폴더 감시 (일치도 {sc:.2f})")
-                    else:
-                        extras.append(item)
+                    src = os.path.normcase(os.path.abspath(item.get("from") or ""))
+                    assign(item, "폴더 감시", from_temp=src.startswith(tmp_root))
+                # 뷰어의 저장 창에서 공문 폴더로 바로 저장한 파일 (폴더 감시는 공문 폴더 안을 보지 않는다)
+                known = {os.path.normcase(str(Path(f["path"]).resolve())) for f in list(got.values()) + extras}
+                for f in sorted(dest.iterdir()) if dest.is_dir() else []:
+                    if not f.is_file() or f.name.startswith(("~$", ".")) or f.suffix.lower() in winwindow.PARTIAL_EXT:
+                        continue
+                    key = os.path.normcase(str(f.resolve()))
+                    if key in known or key in claimed:
+                        continue
+                    try:
+                        size = f.stat().st_size
+                        h = attach.file_hash(f)
+                    except OSError:
+                        continue
+                    if size == 0 or claimed_size.get(key) != size:  # 쓰는 중 → 크기가 그대로일 때 다음 번에
+                        claimed_size[key] = size
+                        continue
+                    claimed.add(key)
+                    if h in hashes:
+                        continue
+                    hashes.add(h)
+                    assign({"name": f.name, "path": str(f), "ok": True, "from": "뷰어 저장"}, "뷰어 'PC저장'")
+
+            claimed: set[str] = set()
+            claimed_size: dict[str, int] = {}
 
             # ① 이미 PC에 있는 파일 (뷰어가 열 때 내려받은 임시·캐시 파일, 최근 문서 등)
             say("PC에 이미 내려받아진 붙임파일을 찾는 중…")
@@ -1161,7 +1217,7 @@ class Api:
                     trace.append(f"저장 버튼 단계 오류: {e}")
                     state = ""
                 trace.append(f"저장 버튼: {state or '찾지 못함'}")
-                end = time.time() + (6 if state else 0)
+                end = time.time() + (8 if state else 0)
                 while time.time() < end and missing():
                     absorb()
                     time.sleep(0.5)
@@ -1267,10 +1323,18 @@ class Api:
     def _rescan_attachments(self, n: dict) -> dict:
         """공문 폴더의 '붙임'에 사용자가 나중에 넣은 파일을 붙임 목록에 더한다.
         이름이 맞으면 '받지 못함'으로 남아 있던 항목을 채운다 (뷰어에서 직접 저장한 붙임을 넣는 경우)."""
+        files = list(n.get("attachments") or [])
+        # 예전 규칙으로 본문을 잘못 읽어 생긴 '받지 못함' 붙임(문서 첫머리 '붙임1.' 아래 본문 등)은 정리한다
+        expected = set(attach.expected_attachments(n.get("body") or ""))
+        cleaned = [f for f in files if f.get("ok") or not str(f.get("error", "")).startswith("본문에 적힌 붙임")
+                   or f.get("name") in expected]
+        if len(cleaned) != len(files):
+            files = cleaned
+            self._store.update_notice_attachments(n["id"], files)
+            n["attachments"] = files
         dest = Path(n.get("folder") or "") / "붙임"
         if not dest.is_dir():
             return n
-        files = list(n.get("attachments") or [])
         known = {os.path.normcase(str(Path(f["path"]).resolve())) for f in files if f.get("path")}
         new = [p for p in sorted(dest.rglob("*")) if p.is_file() and not p.name.startswith(("~$", "."))
                and os.path.normcase(str(p.resolve())) not in known]

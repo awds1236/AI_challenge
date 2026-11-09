@@ -596,8 +596,10 @@ async function openNotice(id) {
       <div class="main-col"><div>${esc(f.name)}</div><div class="muted small">${f.ok ? (f.from === "직접 넣은 파일" ? "직접 넣은 파일" : "공문 폴더에 있음") + " · 눌러서 내용 보기" : "받지 못함: " + esc(f.error || "")}</div></div>
       ${f.ok ? `<div class="acts"><button class="btn ghost sm" data-open="${esc(f.path)}">열기</button></div>` : ""}</div>`).join("")
     || `<div class="muted">붙임 파일이 없습니다.</div>`;
-  const sumLines = String(a.summary || "-").split("\n");
-  const summary = `${esc(sumLines[0])}${sumLines.length > 1 ? `<span class="sub">${esc(sumLines.slice(1).join(" · "))}</span>` : ""}`;
+  // 요약: 첫 줄은 핵심, ' — ' 뒤의 설명과 다음 줄들은 한 줄씩 (긴 한 줄로 이어 붙이지 않는다)
+  const sumParts = String(a.summary || "-").split("\n").flatMap((l) => l.split(/\s+—\s+/)).map((l) => l.trim()).filter(Boolean);
+  const summary = `<div class="sum-head">${esc(sumParts[0] || "-")}</div>` +
+    (sumParts.length > 1 ? `<ul class="sum-sub">${sumParts.slice(1).map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : "");
   $("#nd-body").innerHTML = `
     <div class="section"><h4>요약</h4><div class="summary-box">${summary}</div></div>
     <div class="section"><h4>제출 기한</h4>${dls}</div>
@@ -606,7 +608,8 @@ async function openNotice(id) {
       <div class="section"><h4>할 일</h4>${acts ? `<ul class="check-list">${acts}</ul>` : '<div class="muted">-</div>'}</div>
     </div>
     ${evRows.length ? `<div class="section"><h4>행사 정보</h4><dl class="kv">${evRows.map((r) => `<dt>${r[0]}</dt><dd>${esc(r[1])}</dd>`).join("")}</dl></div>` : ""}
-    ${a.contact ? `<div class="section"><h4>문의처</h4><div>${esc(a.contact)}</div></div>` : ""}
+    ${a.contact ? `<div class="section"><h4>문의처</h4><div class="contact-lines">${String(a.contact).split(/\n|\s+\/\s+/)
+      .map((c) => c.trim()).filter(Boolean).map((c) => `<div>${esc(c)}</div>`).join("")}</div></div>` : ""}
     <div class="section"><h4 class="row tight">붙임 파일 · ${esc(baseName(n.folder))}<span class="spacer"></span>
       <button class="btn sm" data-upload-notice="${n.id}">${svg("download")} 붙임 올리기</button></h4>${files}</div>
     ${a.llm_error ? `<div class="section muted small">로컬 AI를 쓰지 못해 규칙 기반 분석 결과를 보여 줍니다. (원인: ${esc(a.llm_error)})</div>` : ""}

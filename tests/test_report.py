@@ -153,10 +153,13 @@ def test_api_make_report_rule_based(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- 속도 최적화
 def test_ai_schema_skips_fields_rules_already_found():
-    assert set(ai_schema({})["properties"]) == set(SCHEMA["properties"])
-    s = ai_schema({"contact": "감사관", "event": {"name": "교육", "date": "11. 20."}})
-    assert "contact" not in s["properties"] and "event" not in s["properties"]
-    assert set(s["required"]) <= set(s["properties"])
+    """AI에게는 꼭 필요한 항목만 쓰게 한다 (생성 글자 수 = CPU 시간). 문의처·할 일은 규칙으로 만든다."""
+    full = ai_schema({}, "11월 20일 청렴 교육을 개최합니다", "[감사관] 2026년 청렴 교육 실시 계획 알림 및 참석자 명단 제출 요청")
+    assert set(full["properties"]) == {"folder_name", "summary", "event", "deadlines", "submissions"}
+    s = ai_schema({"contact": "감사관", "event": {"name": "교육", "date": "11. 20."}}, "교육 개최", "청렴 교육 알림")
+    assert set(s["properties"]) == {"summary", "deadlines", "submissions"}       # 행사 정보는 규칙이 찾았고 제목은 짧다
+    assert "event" not in ai_schema({}, "현황을 제출하여 주시기 바랍니다", "현황 제출")["properties"]
+    assert set(s["required"]) <= set(s["properties"]) and set(SCHEMA["properties"]) >= set(full["properties"])
 
 
 def test_analyze_prompt_is_cache_friendly():
@@ -255,3 +258,28 @@ def test_works_without_lxml(tmp_path):
     first = lambda b: rp._ROOT_TAG.search(b, rp._XML_DECL.match(b).end()).group(0)  # noqa: E731
     assert first(raw) == first(orig)                               # 이름공간 선언·접두어 그대로
     assert b"<hp:p " in raw and b"ns0:" not in raw
+
+
+def test_ai_deadline_must_be_a_date_in_body_and_prompt_is_short():
+    """AI가 본문에 없는 날짜(오늘 등)를 기한으로 지어내면 버리고, 입력·출력 길이를 줄여 빠르게 분석한다."""
+    from datetime import date
+    from seomu.analyzer import analyze
+    calls = []
+
+    class C:
+        def pick_chat_model(self, c=""):
+            return "m"
+
+        def chat(self, messages, model, **kw):
+            calls.append((messages, kw))
+            return json.dumps({"summary": "원데이클래스를 안내합니다.",
+                               "deadlines": [{"date": "2026-11-09", "what": "원데이클래스 안내 확인"}],
+                               "submissions": []})
+    body = ("한밭문화체육센터 2026년 11월 원데이클래스 안내\n자세한 사항은 첨부파일을 참고하시기 바랍니다.\n"
+            "담당 : 생활체육팀 홍길동  연락처042-724-3213\n" + "프로그램 소개 문장입니다. " * 300)
+    a = analyze("한밭문화체육센터 원데이클래스 안내", body, [], C(), ref=date(2026, 11, 9))
+    assert a["mode"] == "llm" and a["deadlines"] == []                     # 지어낸 '11월 9일' 기한은 버린다
+    prompt = calls[0][0][1]["content"]
+    assert len(prompt) < 2300 and calls[0][1]["max_tokens"] <= 400       # 본문 1,800자 안, 생성 400토큰 안
+    assert "actions" not in calls[0][1]["fmt"]["properties"] and "contact" not in calls[0][1]["fmt"]["properties"]
+    assert a["contact"] == "담당: 생활체육팀 홍길동 연락처 042-724-3213"

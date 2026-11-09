@@ -426,3 +426,56 @@ def test_open_path_explains_missing_program(api, tmp_path, monkeypatch):
     t.write_text("x", encoding="utf-8")
     assert api.open_path(str(t)) and opened
     assert api.open_path(str(tmp_path / "없는 파일.txt")) is False
+
+
+def test_capture_window_matches_viewer_saved_files_by_content(api, tmp_path, monkeypatch):
+    """뷰어의 'PC저장'이 관리용 번호 이름으로 공문 폴더에 바로 저장한 붙임을 내용으로 알아보고 붙임 이름으로 바꾼다.
+    프로그램이 쓰는 화면 캡처(seomu_*.png)와 임시 폴더의 다른 프로그램 파일은 붙임으로 모으지 않는다."""
+    from seomu import winwindow
+    temp = tmp_path / "Temp"
+    temp.mkdir()
+    monkeypatch.setenv("TEMP", str(temp))
+    body = ("2026년 하반기 중대시민재해 점검계획 알림\n자체점검표를 2026. 11. 11.(수)까지 제출하여 주시기 바랍니다.\n"
+            "붙임  1. 중대재해 예방을 위한 2026년 하반기 안전보건 확보의무 이행사항 점검계획 1부.\n"
+            "      2. 2026년 하반기 안전보건 확보의무 이행사항 자체점검표(공중이용시설) 1부.  끝.")
+    _fake_window(monkeypatch, tmp_path, body, {"hwnd": 14, "title": "중대시민재해 점검계획 알림", "process": "XSAppr.exe",
+                                                "cls": "X", "pid": 1})
+    monkeypatch.setattr(winwindow, "watch_dirs", lambda extra=None: [temp])
+
+    def save(hwnd, folder, log=None, trace=None):
+        # 뷰어가 저장 창 두 개를 띄워 공문 폴더에 관리용 이름으로 저장한다 + 그 사이 임시 폴더에 다른 파일이 생긴다
+        (folder / "15684_AT_db6840f3cbd3435fb84962add454f41c.txt").write_text(
+            "중대재해 예방을 위한 2026년 하반기 안전보건 확보의무 이행사항 점검계획\n1. 목적 ...", encoding="utf-8")
+        (folder / "15685_AT_aa11bb22cc33dd44ee55ff6600112233.txt").write_text(
+            "2026년 하반기 안전보건 확보의무 이행사항 자체점검표(공중이용시설)\n시설명 | 점검일 ...", encoding="utf-8")
+        (temp / "seomu_toolbar.png").write_bytes(b"png")
+        (temp / "other_app_cache.png").write_bytes(b"png")
+        return "saved"
+    monkeypatch.setattr(winwindow, "try_save_attachments", save)
+    job = api.capture_window(14, "", False, 20)
+    for _ in range(200):
+        st = api.job_status(job["job_id"])
+        if st["status"] != "running":
+            break
+        time.sleep(0.1)
+    if st["status"] == "running":
+        api.job_signal(job["job_id"], "done")
+    n = wait(api, job)
+    files = sorted(p.name for p in (Path(n["folder"]) / "붙임").iterdir())
+    assert files == ["2026년 하반기 안전보건 확보의무 이행사항 자체점검표(공중이용시설).txt",
+                     "중대재해 예방을 위한 2026년 하반기 안전보건 확보의무 이행사항 점검계획.txt"]
+    assert n["attach_summary"] == {"expected": 2, "found": 2, "extra": 0} and n["need_upload"] == []
+
+
+def test_old_bogus_body_attachments_are_cleaned_when_opened(api, tmp_path):
+    """예전 규칙으로 붙임 문서 자체의 본문을 붙임 목록으로 읽어 저장한 '받지 못함' 항목은 공문을 열 때 정리된다."""
+    doc = tmp_path / "붙임1_안내서.txt"
+    doc.write_text("붙임1. 2026년 공공 AI 대전환 챌린지(AI경진) 참가 안내서\n< 한눈에 보기 >\n구분\n세션 1\n"
+                   + "제출 기한은 2026. 11. 11.(수)까지입니다. 참가 신청서를 메일로 제출하여 주시기 바랍니다.\n" * 8,
+                   encoding="utf-8")
+    n = wait(api, api.collect_files([str(doc)], "", 0, False))
+    assert [f for f in n["attachments"] if not f["ok"]] == []           # 새 규칙: 처음부터 생기지 않는다
+    bogus = [{"name": x, "path": "", "ok": False, "error": "본문에 적힌 붙임입니다 — 파일을 공문 폴더의 '붙임'에 넣으면 자동으로 연결됩니다"}
+             for x in ("< 한눈에 보기 >", "구분", "세션 1")]
+    api._store.update_notice_attachments(n["id"], bogus)                # 예전 버전이 저장한 상태를 흉내
+    assert [f for f in api.get_notice(n["id"])["attachments"] if not f["ok"]] == []

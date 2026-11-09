@@ -432,6 +432,10 @@ details.raw pre { white-space: pre-wrap; font-family: var(--font); font-size: 12
 .input.sm { padding: 4px 8px; font-size: 12.5px; height: auto; width: auto; }
 .nowrap { white-space: nowrap; }
 
+.contact-lines > div { line-height: 1.7; }
+.summary-box .sum-head { font-weight: 600; }
+.summary-box .sum-sub { margin: 6px 0 0; padding-left: 18px; font-weight: 400; color: var(--text-2); line-height: 1.6; }
+
 /* ---------- 상황 안내 (서무비서) ---------- */
 .guide-form textarea { width: 100%; resize: vertical; min-height: 56px; font-size: 14.5px; }
 .switch-row.inline { gap: 8px; }

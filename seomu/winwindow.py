@@ -54,6 +54,22 @@ def foreground_allowed() -> bool:
     return _FOREGROUND_OK and not os.environ.get("SEOMU_NO_FOREGROUND")
 
 
+WORK_DIR_NAME = "seomu_work"
+
+
+def work_dir() -> Path:
+    """글자 인식용 화면 캡처 등 프로그램이 잠깐 쓰는 파일을 두는 곳 (붙임 감시·검색에서 항상 뺀다)."""
+    import tempfile
+    d = Path(tempfile.gettempdir()) / WORK_DIR_NAME
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def is_own_temp(path: str | Path) -> bool:
+    p = Path(path)
+    return p.name.lower().startswith("seomu_") or WORK_DIR_NAME in {x.lower() for x in p.parts}
+
+
 def copy_allowed() -> bool:
     """전체 선택·복사(Ctrl+A/C)는 창을 잠깐(1~2초) 앞으로 가져온 뒤 원래 보던 창으로 되돌린다.
     글자 인식(OCR)보다 정확하므로 OCR 전에 시도한다. 검증·테스트(SEOMU_NO_FOREGROUND)에서만 막는다."""
@@ -473,8 +489,7 @@ def save_window_image(hwnd: int, path: Path, crop: tuple[float, float] | None = 
 
 def capture_png(hwnd: int) -> bytes | None:
     """창 전체 그림(PNG 바이트). 공문 폴더를 만들기 전에 찍어 둘 때 쓴다."""
-    import tempfile
-    tmp = Path(tempfile.gettempdir()) / f"seomu_shot_{os.getpid()}.png"
+    tmp = work_dir() / f"seomu_shot_{os.getpid()}.png"
     try:
         if save_window_image(hwnd, tmp):
             return tmp.read_bytes()
@@ -681,8 +696,7 @@ def screen_attachment_names(hwnd: int, trace: list | None = None, use_ocr: bool 
         trace.append(f"화면 목록 항목 읽기 오류: {e}")
     if use_ocr:
         try:
-            import tempfile
-            img = Path(tempfile.gettempdir()) / "seomu_attach_list.png"
+            img = work_dir() / "seomu_attach_list.png"
             # 확대는 글자 인식 쪽(OCR 스크립트)에 맡긴다 (큰 창을 파이썬으로 키우면 느리다)
             lines = ocr_image(img, timeout=90, scale=2) if save_window_image(hwnd, img) else []
             found = attach.file_names_in("\n".join(l.get("text", "") for l in lines))
@@ -886,8 +900,7 @@ def render_pdf_pages(path: Path, out_dir: Path, max_pages: int = 8, timeout: flo
     if not IS_WIN:
         return []
     import subprocess
-    import tempfile
-    script = Path(tempfile.gettempdir()) / "seomu_pdf_render.ps1"
+    script = work_dir() / "seomu_pdf_render.ps1"
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
         script.write_text(_PDF_RENDER_PS, encoding="utf-8-sig")
@@ -906,8 +919,7 @@ def ocr_image(path: Path, timeout: float = 60, scale: float = 1) -> list[dict]:
         return []
     import json
     import subprocess
-    import tempfile
-    script = Path(tempfile.gettempdir()) / "seomu_ocr.ps1"
+    script = work_dir() / "seomu_ocr.ps1"
     try:
         script.write_text(_OCR_PS, encoding="utf-8-sig")
         out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -922,9 +934,8 @@ def ocr_image(path: Path, timeout: float = 60, scale: float = 1) -> list[dict]:
 
 def _ocr_find(hwnd: int, names: tuple[str, ...]) -> tuple[int, int] | None:
     """창 위쪽(도구모음)을 2배 확대해 OCR한 뒤 버튼 글자의 화면 좌표를 찾는다."""
-    import tempfile
     left, top, right, bottom = _rect(hwnd)
-    img = Path(tempfile.gettempdir()) / "seomu_toolbar.png"
+    img = work_dir() / "seomu_toolbar.png"
     if not save_window_image(hwnd, img, crop=(0.0, 0.18), scale=2):
         return None
     targets = [_norm(n) for n in names]
@@ -948,8 +959,7 @@ def _ocr_find(hwnd: int, names: tuple[str, ...]) -> tuple[int, int] | None:
 
 def ocr_body(hwnd: int, image: Path | None = None) -> str:
     """최후 수단: 창 화면을 OCR해 본문 글자를 읽는다 (화면에 보이는 부분만)."""
-    import tempfile
-    img = image or Path(tempfile.gettempdir()) / "seomu_body.png"
+    img = image or work_dir() / "seomu_body.png"
     if image is None and not _shot(hwnd, img):       # 제목줄 글자는 빼고, 다 그려진 그림으로
         return ""
     lines = ocr_image(img, scale=2)          # 업무 프로그램은 글자가 작은 경우가 많아 키워서 읽는다
@@ -1318,10 +1328,8 @@ def merge_pages(acc: list[str], new: list[str]) -> list[str]:
 def scroll_ocr_body(hwnd: int, log: Callable[[str], None] = lambda m: None, trace: list | None = None,
                     max_pages: int = 12, budget: float = 120) -> str:
     """화면에 다 안 보이는 긴 본문: 글자 인식 → 한 화면 넘기기를 반복해 끝까지 읽고, 맨 위로 되돌린다."""
-    import tempfile
     trace = trace if trace is not None else []
-    tmp = Path(tempfile.gettempdir())
-    img = tmp / "seomu_scroll.png"
+    img = work_dir() / "seomu_scroll.png"
 
     def settled(limit: float = 2.5) -> str:
         """프로그램이 다 그릴 때까지(연속 두 번 같은 그림) 기다렸다가 찍는다."""
@@ -1654,12 +1662,17 @@ def try_save_attachments(hwnd: int, folder: Path, log: Callable[[str], None] = l
     log("뷰어의 'PC저장' 버튼을 누르는 중…")       # 창을 앞으로 가져오지 않고 버튼 메시지·UI Automation으로
     if not click_any(hwnd, SAVE_NAMES, check=lambda: bool(set(_dialogs_of(pid)) - before), log=log, trace=trace):
         return ""
-    for _ in range(25):
+    # 붙임이 여러 개면 저장 창이 하나씩 이어서 뜬다 → 더 뜨지 않을 때까지 모두 공문 폴더로 저장한다
+    handled: set[int] = set()
+    saved, waited_for_user = 0, False
+    quiet_until = time.time() + 5.0                  # 첫 창은 5초까지 기다리고, 이후에는 마지막 창 뒤 4초
+    while time.time() < quiet_until:
         time.sleep(0.2)
-        new = [d for d in _dialogs_of(pid) if d not in before]
+        new = [d for d in _dialogs_of(pid) if d not in before and d not in handled]
         if not new:
             continue
         dlg = new[0]
+        handled.add(dlg)
         edit = _find_edit(dlg)
         if edit:
             cur = ctypes.create_unicode_buffer(1024)
@@ -1671,11 +1684,20 @@ def try_save_attachments(hwnd: int, folder: Path, log: Callable[[str], None] = l
             user32.SendMessageW(edit, WM_SETTEXT, 0, ctypes.cast(path, ctypes.c_void_p).value)
             time.sleep(0.2)
             user32.SendMessageW(dlg, WM_COMMAND, IDOK, 0)
-            log("저장 위치를 공문 폴더로 지정했습니다.")
-            return "saved"
-        log("저장 창이 열렸습니다. 저장 위치를 지정해 주세요.")
-        return "clicked"
-    return "clicked"
+            saved += 1
+            trace.append(f"저장 창 {saved}: {name or '(폴더 선택)'} → 공문 폴더") if trace is not None else None
+            log(f"붙임 {saved}개를 공문 폴더에 저장하는 중…")
+        else:
+            msg = " ".join(_text(c) for c in children(dlg))
+            if re.search(r"(바꾸시겠|덮어|이미 있|already exists|replace)", msg, re.I):
+                user32.SendMessageW(dlg, WM_COMMAND, 6, 0)          # IDYES: 같은 이름 덮어쓰기 (공문 폴더 안)
+            else:
+                waited_for_user = True
+                log("뷰어가 확인 창을 띄웠습니다. 그 창에서 확인해 주세요.")
+        quiet_until = time.time() + 4.0
+    if saved:
+        return "saved"
+    return "clicked" if handled or waited_for_user else "clicked"
 
 
 # ---------------------------------------------------------------- 새 파일 감시
@@ -1729,7 +1751,7 @@ class FileWatcher:
     def _wanted(self, path: str) -> bool:
         p = Path(path)
         ext = p.suffix.lower()
-        if ext in PARTIAL_EXT or ext not in DOC_EXT or p.name.startswith(("~$", ".")):
+        if ext in PARTIAL_EXT or ext not in DOC_EXT or p.name.startswith(("~$", ".")) or is_own_temp(p):
             return False
         norm = os.path.normcase(os.path.abspath(path))
         if norm in self.ignore or norm in self._seen:
@@ -1817,8 +1839,7 @@ def real_double_click(x: int, y: int) -> None:
 
 def ocr_window(hwnd: int, scale: int = 2) -> list[dict]:
     """창 전체를 확대해 OCR. 좌표는 창 기준(확대 전) 픽셀로 돌려준다."""
-    import tempfile
-    img = Path(tempfile.gettempdir()) / "seomu_window.png"
+    img = work_dir() / "seomu_window.png"
     if not save_window_image(hwnd, img, scale=scale):
         return []
     lines = ocr_image(img, timeout=90)
