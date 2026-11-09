@@ -305,3 +305,59 @@ def test_ai_summary_copying_prompt_example_or_inventing_dates_is_rejected():
     assert "OO" not in a["summary"] and "12월 15일" not in a["summary"] and a.get("ai_note")
     b = analyze("AI 역량강화 교육안내", body, [], C("11월 17일 14시 AI 역량강화 교육에 참석해야 합니다."), ref=date(2026, 11, 9))
     assert b["summary"].startswith("11월 17일 14시 AI 역량강화 교육")
+
+
+def test_ai_does_not_turn_event_into_deadline_or_replace_known_time():
+    from datetime import date
+    from seomu.analyzer import analyze
+
+    class C:
+        def pick_chat_model(self, c=""):
+            return "m"
+
+        def chat(self, messages, model, **kw):
+            return json.dumps({"summary": "교육 참석자 명단을 제출해 주세요.",
+                               "event": {"name": "허구의 행사", "place": "부산"},
+                               "deadlines": [{"date": "2026-11-17", "time": "14:00", "what": "명단 제출"},
+                                             {"date": "2026-11-13", "time": "09:00", "what": "명단 제출"}],
+                               "submissions": []}, ensure_ascii=False)
+
+    body = ("청렴 교육 안내\n행사명: 청렴 교육\n일시: 2026. 11. 17.(화) 14:00\n장소: 대전\n"
+            "참석자 명단을 2026. 11. 13.(금) 17:00까지 제출해 주세요.")
+    result = analyze("청렴 교육 안내", body, [], C(), ref=date(2026, 11, 9))
+    assert [(d["date"], d["time"]) for d in result["deadlines"]] == [("2026-11-13", "17:00")]
+    assert result["event"]["place"] == "대전" and "허구" not in str(result["event"])
+
+
+def test_ai_cannot_replace_extracted_submission_with_invented_document():
+    from datetime import date
+    from seomu.analyzer import analyze
+
+    class C:
+        def pick_chat_model(self, c=""):
+            return "m"
+
+        def chat(self, messages, model, **kw):
+            return json.dumps({"summary": "참석자 명단 제출을 요청합니다.", "deadlines": [],
+                               "submissions": [{"item": "계좌번호 확인서", "to": "허구팀"}]}, ensure_ascii=False)
+
+    body = "청렴 교육 안내\n제출서류: 참석자 명단\n제출기한: 2026. 11. 13.(금) 17:00까지"
+    result = analyze("청렴 교육 안내", body, [], C(), ref=date(2026, 11, 9))
+    assert [s["item"] for s in result["submissions"]] == ["참석자 명단"]
+
+
+def test_same_day_event_time_is_not_used_as_submission_time():
+    from datetime import date
+    from seomu.analyzer import analyze
+
+    class C:
+        def pick_chat_model(self, c=""):
+            return "m"
+
+        def chat(self, messages, model, **kw):
+            return json.dumps({"summary": "참석자 명단을 제출해 주세요.", "submissions": [],
+                               "deadlines": [{"date": "2026-11-13", "time": "14:00", "what": "명단 제출"}]})
+
+    body = "청렴 교육 안내\n교육 일시: 2026. 11. 13.(금) 14:00\n명단은 2026. 11. 13.(금)까지 제출해 주세요."
+    result = analyze("청렴 교육 안내", body, [], C(), ref=date(2026, 11, 9))
+    assert result["deadlines"][0]["time"] == ""

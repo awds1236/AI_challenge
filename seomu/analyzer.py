@@ -360,33 +360,62 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
         # 공문 제목과 겹치는 낱말이 없거나('테스트' 등 AI가 지어낸 이름), 무엇에 관한 공문인지(핵심어)가 빠진 이름은 쓰지 않는다
         result["folder_name"] = fn.strip()
     if isinstance(data.get("event"), dict):
-        result["event"] = {k: str(v) for k, v in data["event"].items() if v}
+        # 규칙으로 찾은 값은 덮어쓰지 않는다. AI가 채운 값은 본문·붙임 발췌에서 확인될 때만 사용한다.
+        event = dict(base.get("event") or {})
+        evidence = re.sub(r"\s+", "", clean + "\n" + attach_txt)
+        for k in ("name", "date", "place"):
+            v = data["event"].get(k)
+            if not event.get(k) and isinstance(v, str) and v.strip() and re.sub(r"\s+", "", v) in evidence:
+                event[k] = v.strip()
+        result["event"] = event
     llm_dl = []
     in_body = in_body_dates(body, ref)
+    date_mentions = find_dates(body, ref)
+    rule_by_date = {d["date"]: d for d in base["deadlines"]}
     for d in data.get("deadlines") or []:
         if not isinstance(d, dict):
             continue
         nd = _norm_date(str(d.get("date", "")))
         if not nd or nd not in in_body:          # 본문에 없는 날짜(오늘 날짜 등)를 기한으로 지어내지 않게
             continue
-        llm_dl.append({"date": nd, "time": str(d.get("time") or "")[:5], "what": str(d.get("what") or "")[:160],
+        mentions = [m for m in date_mentions if nd in (m["date"], m.get("end_date"))]
+        if nd not in rule_by_date and not any(m["is_deadline"] for m in mentions):
+            continue                         # 행사일·발행일을 제출 기한으로 바꾸지 않는다
+        ai_time = str(d.get("time") or "")[:5]
+        known_times = {m["time"] for m in mentions if m.get("time") and m["is_deadline"]}
+        if ai_time not in known_times:
+            ai_time = ""
+        llm_dl.append({"date": nd, "time": ai_time, "what": str(d.get("what") or "")[:160],
                        "source": "AI"})
-    # 같은 날짜면 AI가 비워 둔 시각·문구를 규칙 결과로 채운다 (AI는 '17:00' 같은 시각을 자주 빠뜨린다)
-    rule_by_date = {d["date"]: d for d in base["deadlines"]}
+    # 같은 날짜의 시각은 규칙 결과를 유지한다. 행사 시각을 제출 시각으로 오인할 수 있기 때문이다.
     for d in llm_dl:
         r = rule_by_date.get(d["date"])
         if r:
-            d["time"] = d["time"] or r.get("time", "")
+            d["time"] = r.get("time", "")
             d["what"] = d["what"] or r.get("what", "")
     # 규칙 기반으로 찾았지만 AI가 놓친 기한은 보존
     have = {d["date"] for d in llm_dl}
     llm_dl.extend(d for d in base["deadlines"] if d["date"] not in have)
     result["deadlines"] = sorted(llm_dl, key=lambda d: (d["date"], d["time"]))
-    subs = []
+    subs = [dict(s) for s in base.get("submissions", [])]
+    evidence = re.sub(r"\s+", "", clean + "\n" + attach_txt)
     for s in data.get("submissions") or []:
         if isinstance(s, dict) and s.get("item"):
-            subs.append({"item": tidy_ai_item(str(s["item"]))[:160], "how": str(s.get("how") or ""),
-                         "to": str(s.get("to") or "")})
+            item = tidy_ai_item(str(s["item"]))[:160]
+            if not item or re.sub(r"\s+", "", item) not in evidence:
+                continue
+            match = next((x for x in subs if _core(item) and _core(x["item"]) and
+                          (_core(item) in _core(x["item"]) or _core(x["item"]) in _core(item))), None)
+            if match is None:
+                # 규칙으로 찾은 서류가 있으면 AI가 다른 서류를 임의로 더하지 않는다.
+                if base.get("submissions"):
+                    continue
+                match = {"item": item, "how": "", "to": ""}
+                subs.append(match)
+            for key in ("how", "to"):
+                value = s.get(key)
+                if not match.get(key) and isinstance(value, str) and value.strip() and re.sub(r"\s+", "", value) in evidence:
+                    match[key] = value.strip()
     if subs:
         result["submissions"] = subs
     acts = [tidy_ai_action(str(a))[:160] for a in (data.get("actions") or []) if str(a).strip()]
