@@ -530,7 +530,9 @@ async function doCollect(name, args) {
     }
     if (a.ai_status === "running") watchAI(notice.id);
     await loadNotices();
-    openNotice(notice.id);
+    await openNotice(notice.id);
+    const need = notice.need_upload || [];
+    if (need.length || notice.maybe_attach) openUpload(notice.id, need, notice.maybe_attach);
   } catch (e) { hud(false); toast(e.message, "err", 6000); }
 }
 function renderPendingFiles() {
@@ -552,7 +554,7 @@ async function loadWindows() {
   }
   try { winAll = await api("list_windows"); } catch (e) { toast(e.message, "err"); winAll = []; }
   renderWindows();
-  $("#win-hint").textContent = state.info.uia_available ? "" : "※ uiautomation 패키지가 없어 '본문복사·PC저장 자동 누르기'는 생략됩니다 (Ctrl+A/C와 파일 감시는 동작).";
+  $("#win-hint").textContent = state.info.uia_available ? "" : "※ uiautomation 패키지가 없어 화면 글자 정보 읽기와 일부 버튼 누르기는 생략됩니다 (본문복사 버튼·전체 선택·복사·OCR·파일 감시는 동작). 설치: .venv\\Scripts\\pip install uiautomation";
 }
 function renderWindows() {
   const q = $("#win-filter").value.trim();
@@ -605,13 +607,38 @@ async function openNotice(id) {
     </div>
     ${evRows.length ? `<div class="section"><h4>행사 정보</h4><dl class="kv">${evRows.map((r) => `<dt>${r[0]}</dt><dd>${esc(r[1])}</dd>`).join("")}</dl></div>` : ""}
     ${a.contact ? `<div class="section"><h4>문의처</h4><div>${esc(a.contact)}</div></div>` : ""}
-    <div class="section"><h4>붙임 파일 · ${esc(baseName(n.folder))}</h4>${files}</div>
+    <div class="section"><h4 class="row tight">붙임 파일 · ${esc(baseName(n.folder))}<span class="spacer"></span>
+      <button class="btn sm" data-upload-notice="${n.id}">${svg("download")} 붙임 올리기</button></h4>${files}</div>
     ${a.llm_error ? `<div class="section muted small">로컬 AI를 쓰지 못해 규칙 기반 분석 결과를 보여 줍니다. (원인: ${esc(a.llm_error)})</div>` : ""}
     <details class="raw"><summary>본문 원문 보기</summary><pre>${esc(n.body || "")}</pre></details>`;
   $("#sheet").classList.remove("hidden");
   if (a.ai_status === "running") watchAI(n.id);
 }
 function closeSheet() { $("#sheet").classList.add("hidden"); }
+
+// 붙임 올리기 창
+let uploadNotice = null;
+function openUpload(id, missing, maybe) {
+  uploadNotice = id;
+  $("#up-why").textContent = missing && missing.length
+    ? "아래 붙임은 자동으로 받지 못했습니다 (로그인이 필요한 내려받기이거나 뷰어에 저장 버튼이 없음). 그 창에서 붙임을 PC에 저장한 뒤 올려 주세요."
+    : "본문에 붙임 표시가 있지만 붙임 이름을 알아내지 못했습니다. 붙임이 있으면 그 창에서 PC에 저장한 뒤 올려 주세요.";
+  $("#up-missing").innerHTML = (missing || []).map((m) => `<li>${esc(m)}</li>`).join("");
+  $("#up-sheet").classList.remove("hidden");
+}
+function closeUpload() { $("#up-sheet").classList.add("hidden"); }
+async function uploadAttachments(paths) {
+  if (!paths || !paths.length || !uploadNotice) return;
+  try {
+    const n = await api("add_notice_attachments", uploadNotice, paths);
+    const left = (n.attachments || []).filter((f) => !f.ok).map((f) => f.name);
+    toast(`붙임 ${n.added_files}개를 올렸습니다` + (left.length ? ` · 아직 남은 붙임: ${left.slice(0, 3).join(", ")}` : ""), "ok", 6000);
+    if (left.length) $("#up-missing").innerHTML = left.map((m) => `<li>${esc(m)}</li>`).join("");
+    else closeUpload();
+    await openNotice(uploadNotice);
+    loadNotices();
+  } catch (e) { toast(e.message, "err"); }
+}
 
 // 파일 미리보기
 let previewPath = "";
@@ -1078,6 +1105,19 @@ function bind() {
 
   // 시트
   $("#nd-close").addEventListener("click", closeSheet);
+  $("#nd-body").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-upload-notice]");
+    if (!b) return;
+    const n = currentNotice || {};
+    openUpload(Number(b.dataset.uploadNotice), (n.attachments || []).filter((f) => !f.ok).map((f) => f.name), false);
+  });
+  $("#up-close").addEventListener("click", closeUpload);
+  $("#up-later").addEventListener("click", closeUpload);
+  $("#up-pick").addEventListener("click", async () => {
+    if (!state.info.native) return toast("브라우저 모드에서는 파일을 끌어다 놓아 주세요", "info");
+    uploadAttachments(await pickFiles(true));
+  });
+  setupDrop($("#drop-upload"), uploadAttachments);
   $("#sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") closeSheet(); });
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
