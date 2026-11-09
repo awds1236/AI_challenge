@@ -40,6 +40,25 @@ _TITLE_END = re.compile(r"(요청|알림|안내|협조|통보|개최|계획|결�
 _SOLO = set("및등각약총위본그이한전후중시건부개명회차년월일것수바때곳분장원또더새옛순겸즉단곧")
 
 
+# 짧은 PDF 공문처럼 폭이 일정하지 않아도 확실히 문장 중간에서 끊긴 줄: 앞줄이 이음말로 끝나거나 다음 줄이 맺음말로 시작
+_CONT_END = re.compile(r"(?:같이|하여|하고|하며|하오니|하니|으로|에서|에게|및|또는|등의|[가-힣]의|,|-)$")
+_CONT_START = re.compile(r"^(?:주시기|주십시오|바랍니다|하시기|드립니다|합니다|됩니다|있습니다|실시하오니|하오니|하여\s)")
+
+
+def _join_sentence_wraps(lines: list[str]) -> list[str]:
+    out: list[str] = []
+    for l in lines:
+        prev = out[-1].rstrip() if out else ""
+        cur = l.strip()
+        if (len(prev) >= 30 and cur and not re.search(r"[.。!?:：」』)\]]$", prev) and not _ENUM_START.match(cur)
+                and not re.match(r"^[가-힣 ]{1,12}[:：]", cur) and re.match(r"^[가-힣0-9(「『]", cur)
+                and (_CONT_END.search(prev) or _CONT_START.match(cur))):
+            out[-1] = prev + ("" if prev.endswith("-") else " ") + cur
+            continue
+        out.append(l)
+    return out
+
+
 def _join_broken_words(lines: list[str]) -> list[str]:
     """단어 중간에서 끊긴 줄을 붙인다 (화면 글자 인식·좁은 뷰어 칸에서 흔하다).
     '…자체점검표를 작' + '성하여 제출…' → '…작성하여 제출…',  '…제출 요' + '청' → '…제출 요청'.
@@ -72,11 +91,12 @@ def _fix_label_spacing(line: str) -> str:
 def _is_hard_wrapped(lines: list[str]) -> int:
     """PDF·스캔 글자처럼 줄 길이가 일정하게 끊긴 본문이면 그 폭(글자 수)을, 아니면 0."""
     lens = sorted(len(l) for l in lines if len(l) >= 15)
-    if len(lens) < 6:
-        return 0
-    width = lens[int(len(lens) * 0.9) - 1]
-    full = sum(1 for n in lens if n >= width * 0.85)
-    return width if full >= max(4, len(lens) * 0.45) else 0
+    if len(lens) >= 6:
+        width = lens[int(len(lens) * 0.9) - 1]
+        full = sum(1 for n in lens if n >= width * 0.85)
+        if full >= max(4, len(lens) * 0.45):
+            return width
+    return 0
 
 
 def tidy_text(text: str) -> str:
@@ -143,7 +163,7 @@ def tidy_text(text: str) -> str:
                 joined.append(l)
         lines = joined
     else:                     # 폭이 일정하지 않은 본문(화면 글자 인식 등)에서도 확실히 끊긴 단어만 붙인다
-        lines = _join_broken_words(lines)
+        lines = _join_sentence_wraps(_join_broken_words(lines))
     out: list[str] = []
     for l in lines:
         if out and l.strip() and l == out[-1]:          # 같은 줄이 연달아 나오면 하나만
@@ -414,7 +434,17 @@ def rule_summary(title: str, clean: str, fields: dict, deadlines: list[dict] | N
         core = re.sub(r"\s*(?:안내|알림)$", "", re.sub(r"^\[[^\]]{1,20}\]\s*", "", title)).strip()
         if ov and core:
             first = f"{core} — {ov} 요청"
-    due = next((d for d in (deadlines or []) if d.get("date")), None)
+    # 요약 문장에 붙일 기한: 그 문장에 적힌 날짜가 있으면 그 기한 (기한이 여럿인 공문에서 다른 기한을 붙이지 않게)
+    src = " ".join(x for x in (para, req_line) if x)
+
+    def _in_src(d: dict) -> bool:
+        try:
+            mm, dd = int(d["date"][5:7]), int(d["date"][8:10])
+        except (KeyError, ValueError):
+            return False
+        return bool(re.search(rf"(?<!\d){mm}\s*[.월/]\s*{dd}(?!\d)", src))
+    dated = [d for d in (deadlines or []) if d.get("date")]
+    due = next((d for d in dated if _in_src(d)), dated[0] if dated else None)
     if due and "까지" not in first and re.search(r"(요청|제출|회신|신청|등록|보고|접수)", first):
         first += f" ({_due_phrase(due)})"
     extra = []
@@ -437,8 +467,18 @@ def _last_obj_verb(s: str) -> str:
         return ""
     v = verbs[-1]
     window = s[max(0, v.start() - 60):v.start()]
-    objs = re.findall(r"([가-힣A-Za-z0-9·]{2,20}?)(?:을|를|룰)\s", window)
-    return f"{objs[-1]} {v.group(1)}" if objs else ""
+    objs = list(re.finditer(r"([가-힣A-Za-z0-9·]{2,20}?)(?:을|를|룰)\s", window))
+    if not objs:
+        return ""
+    o = objs[-1]
+    # 앞의 꾸밈말 두 낱말까지 ('근무 가능 일자를' → '근무 가능 일자'). '부서에서는'·'각'처럼 조사가 붙은 말에서 멈춘다
+    lead: list[str] = []
+    for w in reversed(window[:o.start()].split()):
+        if len(lead) >= 2 or not re.fullmatch(r"[가-힣A-Za-z0-9·]{2,8}", w) or _STOP_WORD.search(w) \
+                or re.search(r"(?:이|가|을|를|의|에|로|와|과|도|만|께|며|고|면|니|한|된|할|던|인|운|된|는|은)$", w):
+            break
+        lead.insert(0, w)
+    return f"{' '.join(lead + [o.group(1)])} {v.group(1)}"
 
 
 _STOP_WORD = re.compile(r"(?:에서는|에서|께서는|께서|는|은|하여|하고|위해|위하여|따라|관련하여|대하여|및|^후|^뒤|이후|"

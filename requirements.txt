@@ -9,6 +9,7 @@ truststore>=0.9   # 공공기관 사이트 인증서를 Windows와 같은 방식
 pillow>=10.0      # 스캔 PDF 속 그림 꺼내기 (없으면 JPEG 그림만 직접 꺼내 글자 읽기)
 olefile>=0.47     # HWP(한글 5.0)
 openpyxl>=3.1     # XLSX
+xlrd>=2.0         # 엑셀 97-2003(.xls)
 
 # 열린 창에서 공문 수집 (Windows: 본문복사·PC저장 버튼 자동 누르기)
 uiautomation>=2.0; sys_platform == "win32"

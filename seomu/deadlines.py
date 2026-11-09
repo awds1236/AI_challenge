@@ -134,7 +134,7 @@ def find_dates(text: str, ref: date | None = None) -> list[dict]:
         a["is_deadline"] = a["score"] >= 3
         ln = text.count("\n", 0, b["pos"])
         around = " ".join(lines[max(0, ln - 8):ln + 1])        # 표의 머리글(예: '신청 기간')까지 본다
-        if re.search(r"(기간|기한|접수|신청|제출|마감|모집|공모|응모|의견)", around):
+        if re.search(r"(기한|접수|신청|제출|마감|모집|공모|응모|의견|등록\s*기간)", around):
             b["score"] = max(b["score"], 3) + 1
             b["is_deadline"] = True
             b["context"] = b["context"] or lines[ln][:200]

@@ -220,13 +220,13 @@
           <ol class="steps">
             <li><b>본문</b> — 공문 본문 파일(전자문서 뷰어에서 'PC저장'한 HWP·PDF 등)을 왼쪽에 올립니다.</li>
             <li><b>붙임</b> — 붙임 파일들을 오른쪽에 올립니다 (없으면 비워 둡니다).</li>
-            <li><b>정리 및 분석</b> — 공문 폴더로 정리하고 기한·제출물·할 일을 분석합니다.</li>
+            <li><b>정리 및 분석</b> — 공문 폴더로 정리하고 기한·제출물·할 일을 분석합니다. 붙임 서식은 결과 화면의 [서식 채우기]로 채울 수 있습니다.</li>
           </ol>
           <div class="upload-grid">
             <div class="dropzone" id="drop-body">
               <i data-icon="doc"></i>
               <div><b>본문 파일 (1개)</b></div>
-              <div class="muted small">HWP·HWPX·PDF·DOCX·ODT·HTML·MHT·EML·TXT·사진/스캔</div>
+              <div class="muted small" title="한글(HWP·배포용 HWP·HWPX·HWT·HML) · 워드(DOC·DOCX) · 엑셀(XLS·XLSX) · 파워포인트(PPT·PPTX) · ODT·ODS·ODP · PDF · RTF · TXT·CSV · HTML·MHT · 메일(EML·MSG) · 사진/스캔">HWP·HWPX·PDF·DOC(X)·XLS(X)·PPT(X)·ODT·RTF·HTML·MHT·EML·MSG·TXT·사진/스캔</div>
               <div class="body-file" id="body-file"></div>
               <button class="btn sm" id="pick-body">본문 파일 선택</button>
             </div>
@@ -440,7 +440,7 @@
           <div class="dropzone tall" id="drop-lib">
             <i data-icon="books"></i>
             <div><b>조례·법령·내규 파일을 끌어다 놓으세요</b></div>
-            <div class="muted small">첫 번째 저장소 폴더로 복사 후 자동 색인 · HWP·HWPX·PDF·DOCX·XLSX·ODT·PPTX·RTF·HTML·MHT·TXT</div>
+            <div class="muted small">첫 번째 저장소 폴더로 복사 후 자동 색인 · HWP·HWPX·PDF·DOC(X)·XLS(X)·PPT(X)·ODT·ODS·RTF·HTML·MHT·TXT</div>
             <button class="btn sm" id="lib-pick-files">파일 선택</button>
           </div>
         </div>

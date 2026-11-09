@@ -1,4 +1,4 @@
-"""기관 서식 채우기: 기관이 쓰는 서식 파일(HWPX·DOCX·TXT)을 올려 두면 그 서식 그대로 내용을 채운다.
+"""기관 서식 채우기: 기관이 쓰는 서식 파일(HWPX·DOCX·XLSX·TXT)을 올려 두면 그 서식 그대로 내용을 채운다.
 
 채우는 곳 (서식을 따로 고칠 필요 없음)
   1) 표의 항목 칸: '출장기간'·'성명' 같은 항목 이름 칸의 오른쪽(또는 아래) 빈칸
@@ -18,7 +18,7 @@ import zipfile
 from datetime import date
 from pathlib import Path
 
-FORM_EXT = {".hwpx", ".docx", ".txt"}
+FORM_EXT = {".hwpx", ".docx", ".xlsx", ".txt"}
 
 # 항목 이름 → 표준 항목 (서식마다 같은 뜻을 다르게 적는다)
 SYNONYMS: dict[str, tuple[str, ...]] = {
@@ -28,7 +28,8 @@ SYNONYMS: dict[str, tuple[str, ...]] = {
     "장소": ("출장지", "장소", "행선지", "목적지", "출장장소", "개최장소", "행사장소", "회의장소", "방문지", "방문처", "출장처"),
     "목적": ("목적", "출장목적", "용무", "방문목적", "사유", "신청사유", "구매사유", "근무사유", "출장사유", "휴가사유",
            "개최목적"),
-    "성명": ("성명", "이름", "출장자", "신청자", "신청인", "보고자", "작성자", "요구자", "근무자", "출장자성명", "신청자성명"),
+    "성명": ("성명", "이름", "출장자", "신청자", "신청인", "보고자", "작성자", "요구자", "근무자", "출장자성명", "신청자성명",
+           "점검자", "담당자", "작성자성명", "서약자", "응답자"),
     "소속": ("소속", "부서", "소속부서", "부서명", "요구부서", "신청부서", "소속팀"),
     "직급": ("직급", "직위", "직책", "직급직위"),
     "연락처": ("연락처", "전화", "전화번호", "휴대폰", "휴대전화", "비상연락처", "연락처전화"),
@@ -100,6 +101,22 @@ def situation_values(sit: dict, profile: dict | None = None) -> dict[str, str]:
         if profile.get(src):
             v[key] = str(profile[src])
     return v
+
+
+def notice_values(notice: dict, profile: dict | None = None, today: date | None = None) -> dict[str, str]:
+    """공문 분석 결과 + 내 정보 → 표준 항목 값 (공문에 붙은 서식을 채울 때). 모르는 값은 넣지 않는다."""
+    profile = profile or {}
+    a = notice.get("analysis") or {}
+    v: dict[str, str] = {"제목": notice.get("title", ""), "작성일": _d((today or date.today()).isoformat())}
+    ev = a.get("event") or {}
+    if ev.get("date"):
+        v["기간"] = ev["date"]
+    if ev.get("place"):
+        v["장소"] = ev["place"]
+    for key, src in (("성명", "user_name"), ("소속", "user_dept"), ("연락처", "user_phone")):
+        if profile.get(src):
+            v[key] = str(profile[src])
+    return {k: val for k, val in v.items() if val}
 
 
 class Values:
@@ -303,9 +320,87 @@ def fill_file(template: Path, values: Values, out: Path) -> dict:
         with zipfile.ZipFile(out) as z:                 # 다시 열어 손상이 없는지 확인
             if z.testzip() is not None:
                 raise ValueError("채운 서식 파일을 저장하지 못했습니다")
+    elif ext == ".xlsx":
+        _fill_xlsx(template, values, out, filled, missing)
     else:
-        raise ValueError("HWPX·DOCX·TXT 서식만 채울 수 있습니다 (HWP는 한글에서 'HWPX로 저장' 후 올려 주세요)")
+        raise ValueError("HWPX·DOCX·XLSX·TXT 서식만 채울 수 있습니다 (HWP는 한글에서 'HWPX로 저장', "
+                         "XLS는 엑셀에서 'XLSX로 저장' 후 올려 주세요)")
     return {"filled": list(dict.fromkeys(filled)), "missing": [m for m in dict.fromkeys(missing) if m not in filled]}
+
+
+def xls_to_xlsx(src: Path, dst: Path) -> None:
+    """옛 엑셀(.xls) 서식을 XLSX로 옮긴다 (값·병합·열 너비. 글꼴·테두리 같은 꾸밈은 옮기지 않는다)."""
+    try:
+        import openpyxl  # type: ignore
+        import xlrd  # type: ignore
+    except ImportError as e:
+        raise ValueError("XLS 서식을 채우려면 xlrd·openpyxl 패키지가 필요합니다 (또는 엑셀에서 XLSX로 저장해 올려 주세요)") from e
+    book = xlrd.open_workbook(str(src), formatting_info=False)
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for sh in book.sheets():
+        ws = wb.create_sheet(sh.name[:31] or "Sheet")
+        for r in range(sh.nrows):
+            for c in range(sh.ncols):
+                v = sh.cell_value(r, c)
+                if v not in ("", None):
+                    ws.cell(r + 1, c + 1, int(v) if isinstance(v, float) and v == int(v) else v)
+        for r0, r1, c0, c1 in getattr(sh, "merged_cells", []) or []:
+            ws.merge_cells(start_row=r0 + 1, end_row=r1, start_column=c0 + 1, end_column=c1)
+        for c in range(sh.ncols):
+            width = max((len(str(sh.cell_value(r, c))) for r in range(sh.nrows)), default=8)
+            ws.column_dimensions[openpyxl.utils.get_column_letter(c + 1)].width = min(40, max(8, width * 1.6))
+    wb.save(str(dst))
+
+
+def _fill_xlsx(template: Path, values: Values, out: Path, filled: list, missing: list) -> None:
+    """엑셀 서식: ① {{항목}} ② '부 서 명 :'처럼 쌍점 뒤가 빈 칸 ③ 항목 칸 오른쪽의 빈칸."""
+    try:
+        import openpyxl  # type: ignore
+        from openpyxl.cell.cell import MergedCell  # type: ignore
+    except ImportError as e:
+        raise ValueError("엑셀 서식을 채우려면 openpyxl 패키지가 필요합니다") from e
+    wb = openpyxl.load_workbook(str(template))
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell, MergedCell) or not isinstance(cell.value, str):
+                    continue
+                txt = cell.value.strip()
+                if "{{" in txt and _PLACEHOLDER.search(txt):
+                    def rep(m):
+                        v = values.get(m.group(1))
+                        (filled if v else missing).append(m.group(1))
+                        return v
+                    cell.value = _PLACEHOLDER.sub(rep, cell.value)
+                    continue
+                m = _LINE_LABEL.match(txt)
+                if m and _EMPTYISH.match(m.group("rest")) and len(m.group("label")) <= 15:
+                    label = m.group("label")
+                    if canon(label) or norm_label(label) in values.exact:
+                        v = values.get(label)
+                        if v:
+                            cell.value = f"{m.group('head')}{label}{m.group('colon')} {v}"
+                            filled.append(label)
+                        else:
+                            missing.append(label)
+                    continue
+                if len(txt) > 20 or not (canon(txt) or norm_label(txt) in values.exact):
+                    continue
+                right = ws.cell(row=cell.row, column=cell.column + 1)
+                if isinstance(right, MergedCell) or (right.value not in (None, "") and
+                                                     not (isinstance(right.value, str) and _EMPTYISH.match(right.value))):
+                    continue                        # 오른쪽이 다른 항목 이름이면 표의 머리글이다
+                below = ws.cell(row=cell.row + 1, column=cell.column)
+                if below.value in (None, "") and right.value in (None, "") and ws.cell(row=cell.row, column=cell.column + 2).value:
+                    continue                        # 머리글 줄(성명|직급|…)의 가운데가 빈 경우는 건드리지 않는다
+                v = values.get(txt)
+                if v:
+                    right.value = v
+                    filled.append(txt)
+                else:
+                    missing.append(txt)
+    wb.save(str(out))
 
 
 def form_fields(template: Path) -> list[str]:

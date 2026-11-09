@@ -1,4 +1,7 @@
-"""문서 텍스트 추출기 (HWP/HWPX/PDF/DOCX/XLSX/ODT/PPTX/RTF/HTML/MHT/EML/TXT, 이미지·스캔 PDF는 Windows OCR).
+"""문서 텍스트 추출기 — 공공기관에서 주고받는 문서 형식.
+
+  한글: HWP(배포용 포함)·HWPX·HWT·HML / MS 오피스: DOCX·XLSX·PPTX(매크로·서식 파일 포함)와 옛 DOC·XLS·PPT /
+  ODF: ODT·ODS·ODP / PDF(스캔은 Windows OCR) / 메일: EML·MSG / 웹: HTML·MHT / RTF·TXT·CSV / 그림(Windows OCR)
 
 외부 서비스 없이 PC 안에서만 동작한다. 선택 의존성(pypdf, olefile, openpyxl)이
 없으면 해당 형식만 건너뛴다.
@@ -15,8 +18,16 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff"}
-SUPPORTED = {".txt", ".md", ".csv", ".hwp", ".hwpx", ".pdf", ".docx", ".xlsx", ".html", ".htm", ".xhtml",
-             ".mht", ".mhtml", ".eml", ".odt", ".pptx", ".rtf", ".xml", ".hwx"} | IMAGE_EXT
+# 공공기관에서 주고받는 문서 형식 (한글·MS 오피스 옛 형식·ODF·한셀/한쇼·메일·웹 문서·그림)
+DOCX_LIKE = {".docx", ".docm", ".dotx", ".dotm"}
+XLSX_LIKE = {".xlsx", ".xlsm", ".xltx", ".xltm"}
+PPTX_LIKE = {".pptx", ".pptm", ".ppsx", ".potx", ".potm"}
+ODF_EXT = {".odt", ".ods", ".odp", ".odg", ".ott"}
+OLE_EXT = {".doc", ".dot", ".xls", ".xlt", ".ppt", ".pps", ".pot", ".msg", ".hwt", ".cell", ".nxl", ".show"}
+ARCHIVE_EXT = {".zip", ".alz", ".egg", ".7z", ".rar"}
+SUPPORTED = {".txt", ".md", ".csv", ".tsv", ".hwp", ".hwpx", ".hml", ".pdf", ".html", ".htm", ".xhtml",
+             ".mht", ".mhtml", ".eml", ".rtf", ".xml", ".hwx"} | DOCX_LIKE | XLSX_LIKE | PPTX_LIKE | ODF_EXT | OLE_EXT \
+    | IMAGE_EXT
 # 규정 색인·붙임 미리 읽기용 (이미지 OCR은 느리므로 공문 본문으로 직접 가져올 때만 쓴다)
 READABLE_EXT = SUPPORTED - IMAGE_EXT - {".xml"}
 
@@ -227,10 +238,10 @@ def parse_odt(path: Path) -> str:
         with zipfile.ZipFile(path) as z:
             root = ET.fromstring(z.read("content.xml"))
     except (zipfile.BadZipFile, KeyError) as e:
-        raise ParseError(f"ODT 파일을 읽을 수 없습니다: {e}") from e
+        raise ParseError(f"ODF 문서({path.suffix})를 읽을 수 없습니다: {e}") from e
     out: list[str] = []
 
-    def walk(el):
+    def walk(el, in_cell: bool = False):
         name = _local(el.tag)
         if name == "tab":
             out.append("\t")
@@ -241,15 +252,19 @@ def parse_odt(path: Path) -> str:
         if el.text and name not in ("tab", "line-break", "s"):
             out.append(el.text)
         for ch in el:
-            walk(ch)
+            walk(ch, in_cell or name == "table-cell")
             if ch.tail:
                 out.append(ch.tail)
         if name in ("p", "h"):
-            out.append("\n")
+            out.append(" " if in_cell else "\n")
         elif name == "table-cell":
             out.append("\t")
+        elif name == "table-row":
+            out.append("\n")
+        elif name == "page":                     # ODP 슬라이드
+            out.append("\n")
     walk(root)
-    return normalize("".join(out))
+    return normalize(re.sub(r"[ \t]+\n", "\n", re.sub(r" \t", "\t", "".join(out))))
 
 
 def parse_pptx(path: Path) -> str:
@@ -266,59 +281,103 @@ def parse_pptx(path: Path) -> str:
     return normalize("".join(out))
 
 
+_RTF_SKIP = {"fonttbl", "colortbl", "stylesheet", "info", "pict", "listtable", "listoverridetable", "rsidtbl",
+             "generator", "xmlnstbl", "themedata", "colorschememapping", "latentstyles", "datastore", "mmathPr",
+             "pgdsctbl", "filetbl", "revtbl", "object", "fldinst", "nonshppict", "shppict", "bkmkstart", "bkmkend",
+             "header", "headerl", "headerr", "headerf", "footer", "footerl", "footerr", "footerf", "listtext", "pntext"}
+
+
 def parse_rtf(path: Path) -> str:
-    """RTF의 글자만 (서식·그림 제외). \\'XX(코드페이지)와 \\uN(유니코드) 문자를 복원한다."""
+    """RTF의 글자만 (서식·그림·글꼴표 등은 묶음째 건너뛴다). \\'XX(코드페이지)와 \\uN(유니코드) 문자를 복원한다."""
     raw = path.read_bytes().decode("latin-1")
     m = re.search(r"\\ansicpg(\d+)", raw)
     cp = f"cp{m.group(1)}" if m else "cp949"
-    raw = re.sub(r"\{\\\*[^{}]*\}|\{\\(?:fonttbl|colortbl|stylesheet|info|pict)[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", "", raw)
-    out, buf = [], bytearray()
+    out: list[str] = []
+    buf = bytearray()
+    stack: list[tuple[bool, int]] = []
+    skip, uc, pending = False, 1, 0          # 건너뛰는 묶음인지, \uN 뒤 대체 글자 수, 남은 대체 글자 수
+    group_start = False
 
     def flush():
         if buf:
-            try:
-                out.append(bytes(buf).decode(cp))
-            except (UnicodeDecodeError, LookupError):
-                out.append(bytes(buf).decode("cp949", "ignore"))
+            if not skip:
+                try:
+                    out.append(bytes(buf).decode(cp))
+                except (UnicodeDecodeError, LookupError):
+                    out.append(bytes(buf).decode("cp949", "ignore"))
             buf.clear()
-    i, skip_next = 0, 0
-    while i < len(raw):
+    i, n = 0, len(raw)
+    ctrl = re.compile(r"\\([a-zA-Z]+)(-?\d+)? ?")
+    while i < n:
         c = raw[i]
+        if c == "{":
+            flush()
+            stack.append((skip, uc))
+            group_start = True
+            i += 1
+            continue
+        if c == "}":
+            flush()
+            skip, uc = stack.pop() if stack else (False, 1)
+            group_start = False
+            i += 1
+            continue
         if c == "\\":
             if raw.startswith("\\'", i):
-                buf.append(int(raw[i + 2:i + 4], 16))
+                if pending:
+                    pending -= 1
+                elif not skip:
+                    try:
+                        buf.append(int(raw[i + 2:i + 4], 16))
+                    except ValueError:
+                        pass
                 i += 4
                 continue
-            flush()
-            mm = re.match(r"\\([a-z]+)(-?\d+)? ?|\\(.)", raw[i:])
-            if not mm:
-                i += 1
+            if raw.startswith("\\*", i):
+                skip = True
+                i += 2
                 continue
-            word, num, sym = mm.group(1), mm.group(2), mm.group(3)
-            if word in ("par", "line", "row"):
-                out.append("\n")
-            elif word in ("tab", "cell"):
-                out.append("\t")
-            elif word == "u" and num:
-                out.append(chr(int(num) % 65536))
-                skip_next = 1
-            elif sym in ("\\", "{", "}"):
-                out.append(sym)
-            i += mm.end()
-            continue
-        if c in "{}\r\n":
+            mm = ctrl.match(raw, i)
+            if not mm:
+                sym = raw[i + 1:i + 2]
+                flush()
+                if sym in ("\\", "{", "}") and not skip:
+                    out.append(sym)
+                elif sym == "~" and not skip:
+                    out.append(" ")
+                i += 2
+                continue
             flush()
+            word, num = mm.group(1), mm.group(2)
+            if group_start and word in _RTF_SKIP:
+                skip = True
+            group_start = False
+            if not skip:
+                if word in ("par", "line", "row", "sect", "page"):
+                    out.append("\n")
+                elif word in ("tab", "cell"):
+                    out.append("\t")
+                elif word == "u" and num:
+                    out.append(chr(int(num) % 65536))
+                    pending = uc
+            if word == "uc" and num:
+                uc = int(num)
+            i = mm.end()
+            continue
+        group_start = False
+        if c in "\r\n":
             i += 1
             continue
-        if skip_next:                      # \uN 뒤의 대체 문자 한 개는 건너뛴다
-            skip_next = 0
+        if pending:                          # \uN 뒤의 대체 문자는 건너뛴다
+            pending -= 1
             i += 1
             continue
-        if ord(c) < 256:
-            buf.append(ord(c))
-        else:
-            flush()
-            out.append(c)
+        if not skip:
+            if ord(c) < 256:
+                buf.append(ord(c))
+            else:
+                flush()
+                out.append(c)
         i += 1
     flush()
     return normalize("".join(out))
@@ -702,7 +761,12 @@ def parse_xlsx(path: Path) -> str:
         import openpyxl  # type: ignore
     except ImportError as e:
         raise ParseError("XLSX를 읽으려면 openpyxl 패키지가 필요합니다") from e
-    wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    import io
+    # 파일 객체로 연다: openpyxl은 확장자(.xlsx 등)만 보고 막으므로 한셀(.cell)·이름이 다른 파일도 읽게
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(path.read_bytes()), read_only=True, data_only=True)
+    except Exception as e:  # 손상·암호 등
+        raise ParseError(f"엑셀 파일을 읽을 수 없습니다: {e}") from e
     lines: list[str] = []
     for ws in wb.worksheets:
         lines.append(f"[시트: {ws.title}]")
@@ -714,11 +778,263 @@ def parse_xlsx(path: Path) -> str:
     return normalize("\n".join(lines))
 
 
+
+# ---------------------------------------------------------------- MS 오피스 옛 형식(OLE)·Outlook 메일·HWPML
+def _ole():
+    try:
+        import olefile  # type: ignore
+        return olefile
+    except ImportError as e:
+        raise ParseError("옛 오피스 문서(.doc·.xls·.ppt)를 읽으려면 olefile 패키지가 필요합니다 (pip install olefile)") from e
+
+
+def _doc_text(raw: str) -> str:
+    """Word 본문의 특수 문자 정리: 필드 코드(\x13 코드 \x14 결과 \x15)는 결과만, 표 칸 표시(\x07)는 탭."""
+    out, depth, skip = [], 0, []
+    for ch in raw:
+        o = ord(ch)
+        if o == 0x13:
+            depth += 1
+            skip.append(True)
+            continue
+        if o == 0x14:
+            if skip:
+                skip[-1] = False
+            continue
+        if o == 0x15:
+            if skip:
+                skip.pop()
+            depth = max(0, depth - 1)
+            continue
+        if skip and skip[-1]:
+            continue
+        if ch == "\r":
+            out.append("\n")
+        elif o == 0x07:
+            out.append("\t")
+        elif o in (0x0B, 0x0C, 0x0E):
+            out.append("\n")
+        elif o in (0x01, 0x08, 0x02, 0x05, 0x1E, 0x1F) or o < 0x09:
+            continue
+        else:
+            out.append(ch)
+    text = "".join(out)
+    text = re.sub(r"\t\n", "\n", text)
+    return text
+
+
+def parse_doc(path: Path) -> str:
+    """Word 97-2003(.doc): 조각 표(piece table)로 본문 글자를 이어 붙인다."""
+    olefile = _ole()
+    if not olefile.isOleFile(str(path)):
+        raise ParseError("올바른 Word 97-2003(.doc) 파일이 아닙니다")
+    with olefile.OleFileIO(str(path)) as ole:
+        if not ole.exists("WordDocument"):
+            raise ParseError("Word 문서가 아닙니다")
+        wd = ole.openstream("WordDocument").read()
+        if struct.unpack_from("<H", wd, 0)[0] != 0xA5EC:
+            raise ParseError("Word 문서 머리를 알 수 없습니다")
+        flags = struct.unpack_from("<H", wd, 0x0A)[0]
+        if flags & 0x0100:
+            raise ParseError("암호가 걸린 Word 문서는 읽을 수 없습니다")
+        table = "1Table" if flags & 0x0200 else "0Table"
+        if not ole.exists(table):
+            raise ParseError("Word 문서의 표 스트림이 없습니다")
+        tbl = ole.openstream(table).read()
+    pos = 32
+    csw = struct.unpack_from("<H", wd, pos)[0]
+    pos += 2 + csw * 2
+    cslw = struct.unpack_from("<H", wd, pos)[0]
+    pos += 2 + cslw * 4 + 2                       # cbRgFcLcb 다음이 FibRgFcLcb
+    fc_clx, lcb_clx = struct.unpack_from("<II", wd, pos + 33 * 8)     # FibRgFcLcb97의 34번째 쌍 = fcClx
+    clx = tbl[fc_clx:fc_clx + lcb_clx]
+    i = 0
+    while i < len(clx) and clx[i] == 0x01:        # Prc(서식 변경 묶음)는 건너뛴다
+        i += 3 + struct.unpack_from("<H", clx, i + 1)[0]
+    if i >= len(clx) or clx[i] != 0x02:
+        raise ParseError("Word 문서의 본문 위치를 찾지 못했습니다")
+    lcb = struct.unpack_from("<I", clx, i + 1)[0]
+    plc = clx[i + 5:i + 5 + lcb]
+    n = (lcb - 4) // 12
+    cps = struct.unpack_from(f"<{n + 1}I", plc, 0)
+    parts = []
+    for k in range(n):
+        pcd = plc[(n + 1) * 4 + k * 8:(n + 1) * 4 + k * 8 + 8]
+        fc = struct.unpack_from("<I", pcd, 2)[0]
+        count = cps[k + 1] - cps[k]
+        if fc & 0x40000000:
+            off = (fc & 0x3FFFFFFF) // 2
+            parts.append(wd[off:off + count].decode("cp1252", "replace"))
+        else:
+            parts.append(wd[fc:fc + count * 2].decode("utf-16-le", "replace"))
+    return normalize(_doc_text("".join(parts)))
+
+
+def parse_xls(path: Path) -> str:
+    """엑셀 97-2003(.xls) — xlrd로 읽는다."""
+    try:
+        import xlrd  # type: ignore
+    except ImportError as e:
+        raise ParseError("엑셀 97-2003(.xls)을 읽으려면 xlrd 패키지가 필요합니다 (pip install xlrd)") from e
+    try:
+        wb = xlrd.open_workbook(str(path), on_demand=True)
+    except Exception as e:  # xlrd 내부 예외 다양
+        raise ParseError(f"엑셀(.xls) 파일을 읽을 수 없습니다: {e}") from e
+    lines: list[str] = []
+    for sh in wb.sheets():
+        lines.append(f"[시트: {sh.name}]")
+        for r in range(sh.nrows):
+            cells = []
+            for c in range(sh.ncols):
+                v = sh.cell_value(r, c)
+                if isinstance(v, float):
+                    if sh.cell_type(r, c) == xlrd.XL_CELL_DATE:
+                        try:
+                            d = xlrd.xldate_as_datetime(v, wb.datemode)
+                            v = d.strftime("%Y-%m-%d") if not (d.hour or d.minute) else d.strftime("%Y-%m-%d %H:%M")
+                        except Exception:
+                            v = str(v)
+                    else:
+                        v = str(int(v)) if v == int(v) else str(v)
+                cells.append(str(v))
+            if any(x.strip() for x in cells):
+                lines.append("\t".join(cells).rstrip())
+    return normalize("\n".join(lines))
+
+
+_PPT_SKIP = re.compile(r"^(?:마스터 (?:제목|텍스트) 스타일 편집|둘째 수준|셋째 수준|넷째 수준|다섯째 수준|"
+                       r"Click to edit Master .*|Second level|Third level|Fourth level|Fifth level|\*)$")
+
+
+def parse_ppt(path: Path) -> str:
+    """파워포인트 97-2003(.ppt): 글자 레코드(TextCharsAtom·TextBytesAtom)를 차례로 읽는다."""
+    olefile = _ole()
+    with olefile.OleFileIO(str(path)) as ole:
+        if not ole.exists("PowerPoint Document"):
+            raise ParseError("파워포인트 문서가 아닙니다")
+        data = ole.openstream("PowerPoint Document").read()
+    out: list[str] = []
+
+    def walk(i: int, end: int) -> None:
+        while i + 8 <= end:
+            ver_inst, rtype, rlen = struct.unpack_from("<HHI", data, i)
+            stop = min(end, i + 8 + rlen)
+            inst = ver_inst >> 4
+            if ver_inst & 0x0F == 0x0F:                # 묶음(container)
+                # 마스터 슬라이드(0x03F8)·메모(0x03F0)·마스터용 글 목록(SlideListWithText instance 1)은 뺀다
+                if rtype not in (0x03F8, 0x03F0, 0x0FC9) and not (rtype == 0x0FF0 and inst != 0):
+                    walk(i + 8, stop)
+            elif rtype in (0x0FA0, 0x0FA8):
+                body = data[i + 8:stop]
+                t = body.decode("utf-16-le", "replace") if rtype == 0x0FA0 else body.decode("cp1252", "replace")
+                t = t.replace("\r", "\n").replace("\x0b", "\n").strip()
+                if t and not all(_PPT_SKIP.match(x.strip()) for x in t.splitlines() if x.strip()):
+                    out.append(t)
+            i = stop
+    walk(0, len(data))
+    seen: set[str] = set()
+    out = [t for t in out if not (t in seen or seen.add(t))]      # 개요 글과 도형 글이 겹치면 한 번만
+    if not out:
+        raise ParseError("파워포인트 문서에서 글자를 찾지 못했습니다")
+    return normalize("\n\n".join(out))
+
+
+def read_msg(path: Path) -> dict:
+    """Outlook 메일(.msg): 제목·보낸이·본문·첨부 [(이름, 바이트)] (read_eml과 같은 모양)."""
+    olefile = _ole()
+    with olefile.OleFileIO(str(path)) as ole:
+        def s(name: str, root: str = "") -> str:
+            for suffix, enc in (("001F", "utf-16-le"), ("001E", "cp949")):
+                p = f"{root}__substg1.0_{name}{suffix}"
+                if ole.exists(p):
+                    return ole.openstream(p).read().decode(enc, "replace").rstrip("\x00")
+            return ""
+        if not any(e[0].startswith("__substg1.0_") for e in ole.listdir()):
+            raise ParseError("Outlook 메일(.msg)이 아닙니다")
+        body = s("1000")
+        if not body.strip() and ole.exists("__substg1.0_10130102"):
+            body = main_text(ole.openstream("__substg1.0_10130102").read().decode("utf-8", "replace"))
+        files = []
+        for st in sorted({e[0] for e in ole.listdir() if e[0].startswith("__attach_version1.0_")}):
+            name = s("3707", st + "/") or s("3704", st + "/") or "첨부파일"
+            dp = f"{st}/__substg1.0_37010102"
+            if ole.exists(dp):
+                files.append((name, ole.openstream(dp).read()))
+        return {"subject": s("0037"), "from": s("0C1A") or s("0065"), "date": "", "body": normalize(body), "files": files}
+
+
+def parse_msg(path: Path) -> str:
+    m = read_msg(path)
+    head = [f"제목: {m['subject']}"] if m["subject"] else []
+    head += [f"보낸 사람: {m['from']}"] if m["from"] else []
+    names = [n for n, _ in m["files"]]
+    return normalize("\n".join(head + ["", m["body"]] + (["", "첨부: " + ", ".join(names)] if names else [])))
+
+
+def parse_hml(path: Path) -> str:
+    """HWPML(.hml, 한글 XML 문서): 문단(P) 안의 글자(CHAR)를 잇는다."""
+    try:
+        root = ET.fromstring(path.read_bytes())
+    except ET.ParseError as e:
+        raise ParseError(f"HML 문서를 읽을 수 없습니다: {e}") from e
+    out: list[str] = []
+
+    def walk(el):
+        for ch in el:
+            name = _local(ch.tag)
+            if name == "P":
+                parts = []
+                for t in ch:
+                    if _local(t.tag) == "TEXT":
+                        for c in t:
+                            cn = _local(c.tag)
+                            if cn == "CHAR":
+                                parts.append(c.text or "")
+                            elif cn == "TAB":
+                                parts.append("\t")
+                            if c.tail:
+                                parts.append(c.tail)
+                        walk(t)                      # 문단 안의 표 등
+                out.append("".join(parts))
+            elif name == "CELL":
+                walk(ch)
+                out.append("\t")
+            else:
+                walk(ch)
+    walk(root)
+    return normalize("\n".join(out))
+
+
+def parse_ole(path: Path) -> str:
+    """OLE 복합 문서는 안의 스트림 이름으로 형식을 가린다 (확장자가 달라도: .hwt·.cell·.show·.dot …)."""
+    olefile = _ole()
+    kind = {".cell": "한셀", ".nxl": "한셀", ".show": "한쇼"}.get(path.suffix.lower())
+    hint = (f"{kind} 고유 형식은 읽을 수 없습니다. {kind}에서 {'XLSX' if kind == '한셀' else 'PPTX'}로 저장해 올려 주세요"
+            if kind else "")
+    if not olefile.isOleFile(str(path)):
+        if path.read_bytes()[:2] == b"PK":            # 한셀·한쇼가 OOXML 짜임으로 저장한 파일 등
+            return parse_sniffed(path)
+        raise ParseError(hint or f"지원하지 않는 형식입니다: {path.suffix}")
+    with olefile.OleFileIO(str(path)) as ole:
+        names = {"/".join(e) for e in ole.listdir()}
+    if "FileHeader" in names and any(n.startswith(("BodyText/", "ViewText/")) for n in names):
+        return parse_hwp(path)
+    if "WordDocument" in names:
+        return parse_doc(path)
+    if "Workbook" in names or "Book" in names:
+        return parse_xls(path)
+    if "PowerPoint Document" in names:
+        return parse_ppt(path)
+    if any(n.startswith("__substg1.0_") for n in names):
+        return parse_msg(path)
+    raise ParseError(hint or "알 수 없는 OLE 문서입니다")
+
+
 # ---------------------------------------------------------------- 진입점
 def parse_file(path: str | Path) -> str:
     path = Path(path)
     ext = path.suffix.lower()
-    if ext in (".txt", ".md", ".csv"):
+    if ext in (".txt", ".md", ".csv", ".tsv"):
         return normalize(read_text_file(path))
     if ext in (".html", ".htm", ".xhtml"):
         return main_text(read_text_file(path))
@@ -726,10 +1042,18 @@ def parse_file(path: str | Path) -> str:
         return parse_mht(path)
     if ext == ".eml":
         return parse_eml(path)
-    if ext == ".odt":
+    if ext in ODF_EXT:
         return parse_odt(path)
-    if ext == ".pptx":
+    if ext in PPTX_LIKE:
         return parse_pptx(path)
+    if ext == ".hml":
+        return parse_hml(path)
+    if ext in OLE_EXT:
+        return parse_ole(path)
+    if ext in (".alz", ".egg", ".7z", ".rar"):
+        raise ParseError(f"{ext[1:].upper()} 압축 파일은 풀어서 안의 파일을 올려 주세요 (ZIP은 자동으로 풉니다)")
+    if ext == ".gul":
+        raise ParseError("훈민정음(.gul) 문서는 읽을 수 없습니다. 한글이나 워드에서 열어 다른 형식으로 저장해 주세요")
     if ext == ".rtf":
         return parse_rtf(path)
     if ext == ".xml":
@@ -743,9 +1067,9 @@ def parse_file(path: str | Path) -> str:
         return parse_hwp(path)
     if ext == ".pdf":
         return parse_pdf(path)
-    if ext == ".docx":
+    if ext in DOCX_LIKE:
         return parse_docx(path)
-    if ext == ".xlsx":
+    if ext in XLSX_LIKE:
         return parse_xlsx(path)
     return parse_sniffed(path)          # .hwx·확장자 없음 등은 내용으로 판별
 
@@ -758,8 +1082,8 @@ def parse_sniffed(path: Path) -> str:
         raise ParseError(f"파일을 읽을 수 없습니다: {e}") from e
     if head[:4] == b"%PDF":
         return parse_pdf(path)
-    if head[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":          # OLE: 한글 5.0(HWP)
-        return parse_hwp(path)
+    if head[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":          # OLE: 한글 5.0·옛 오피스·Outlook 메일
+        return parse_ole(path)
     if head[:2] == b"PK":
         try:
             with zipfile.ZipFile(path) as z:
@@ -772,6 +1096,8 @@ def parse_sniffed(path: Path) -> str:
             return parse_docx(path)
         if "content.xml" in names:
             return parse_odt(path)
+        if "xl/workbook.xml" in names:
+            return parse_xlsx(path)
         if any(n.startswith("ppt/slides/") for n in names):
             return parse_pptx(path)
         if any(n.startswith("xl/") for n in names):
