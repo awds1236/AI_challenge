@@ -88,6 +88,9 @@ def test_ai_polish_rejects_changed_numbers():
     bad = good.replace("11월 14일", "11월 15일")                         # 날짜를 바꿈
     with pytest.raises(polish.LLMError, match="14"):
         polish.ai_polish(FakeAI(bad), "m", DRAFT, "mail", rule)
+    with pytest.raises(polish.LLMError, match="새 숫자"):
+        polish.ai_polish(FakeAI(good + "\n참가비는 999999원입니다."), "m", DRAFT, "mail", rule)
+    assert polish.facts_kept("1명 참석", "10명 참석") == ["1"]
 
 
 def _closed_port():

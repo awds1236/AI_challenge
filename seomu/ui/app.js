@@ -269,7 +269,7 @@ function renderGuide(r) {
     </div>`).join("");
   const tasks = (r.tasks || []).map((t, i) => `
     <label class="guide-task"><input type="checkbox" data-tk="${i}" checked>
-      <span class="t">${esc(t.title)}</span><span class="spacer"></span>${t.due ? `<span class="badge blue">${esc(fmtDate(t.due))}</span>` : '<span class="badge">기한 없음</span>'}</label>`).join("");
+      <span class="t">${esc(t.title)}</span><span class="spacer"></span>${t.due ? `<span class="badge blue">${esc(fmtDate(t.due))}</span>` : '<span class="badge">기한 확인 필요</span>'}</label>`).join("");
   const src = (r.sources || []).map((h) => `<li><b>「${esc(h.title)}」 ${esc(h.heading || "")}</b>
     <div class="muted small">${esc((h.text || "").slice(0, 260))}${(h.text || "").length > 260 ? "…" : ""}</div></li>`).join("");
   $("#guide-result").innerHTML = `
@@ -278,6 +278,7 @@ function renderGuide(r) {
       <p class="guide-summary">${esc(r.summary)}</p>
       <div class="row wrap tight">${facts}</div>
       ${r.notice ? `<div class="engine-notice warn-notice" style="margin-top:10px">${esc(r.notice)}</div>` : ""}
+      ${r.mode === "llm" ? `<div class="muted small">AI가 보완한 요약과 초안은 근거 원문과 대조해 확인하세요.</div>` : ""}
       ${(r.tips || []).length ? `<ul class="guide-tips">${r.tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
     </div>
     <div class="card">

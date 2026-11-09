@@ -112,11 +112,23 @@ def _guide(api, text, monkeypatch):
     return wait(api, api.guide(text))
 
 
+@pytest.mark.parametrize("case", json.loads((ROOT / "sample_data" / "상황안내" / "시나리오.json").read_text(encoding="utf-8")),
+                         ids=lambda case: case["이름"])
+def test_demo_scenarios(api, monkeypatch, case):
+    result = _guide(api, case["입력"], monkeypatch)
+    assert result["situation"]["kind"] == case["업무"]
+    assert [s["due"] for s in result["steps"] if not s["skip"] and s["due"]] == case["기한"]
+    assert case["서식"] in [f["name"] for f in result["forms"]]
+    if case["이름"] == "규정 없는 회의":
+        assert not result["sources"] and not result["steps"]
+
+
 def test_trip_guide_end_to_end(api, monkeypatch):
     r = _guide(api, "다음 주 수요일부터 목요일까지 대전으로 관외 출장 가요, 시설 안전 워크숍 참석", monkeypatch)
     assert r["mode"] == "rule" and r["situation"]["kind"] == "출장"
-    # 수(11/18)~목(11/19): 출발 전날 11/17, 마친 날+3일=일요일 → 월요일 11/23, 복명서 제출 후 7일 → 11/30
-    assert [s["due"] for s in r["steps"]] == ["2026-11-17", "", "2026-11-23", "2026-11-30"]
+    # 제출 기한과 실제 제출일은 다르므로 정산 기한은 계산하지 않는다.
+    assert [s["due"] for s in r["steps"]] == ["2026-11-17", "", "2026-11-23", ""]
+    assert "실제 제출·신청일" in r["notice"] and "공휴일" in r["notice"]
     assert all("제7조" in s["basis"] or "제8조" in s["basis"] for s in r["steps"])       # 연가·물품 조문이 섞이지 않는다
     assert {"영수증", "교통비 내역"} <= set(r["prep"])
     names = [f["name"] for f in r["forms"]]
@@ -125,7 +137,8 @@ def test_trip_guide_end_to_end(api, monkeypatch):
     assert "제7조(출장 신청)" in apply_form["body"]                     # 근거 조문이 초안에 들어간다
     # 준비 서류는 출발 전이 아니라 여비 정산 때
     prep_task = next(t for t in r["tasks"] if t["title"].startswith("준비 서류"))
-    assert prep_task["due"] == "2026-11-30"
+    assert prep_task["due"] == ""
+    assert next(t for t in r["tasks"] if "정산을 신청" in t["title"])["due"] == ""
     # 관외 출장 결재(기한 없음)는 같은 조문의 기한(출장명령 전날)을 이어받는다
     assert next(t for t in r["tasks"] if "관외" in t["title"])["due"] == "2026-11-17"
     # 기록 → 다시 열기 → 할 일 등록(중복 방지) → 삭제
@@ -165,7 +178,9 @@ def test_purchase_and_overtime(api, monkeypatch):
     r = _guide(api, "오늘 시간외근무 3시간 해야 해요", monkeypatch)
     assert [s["due"] for s in r["steps"]] == ["2026-11-09", "2026-11-10"]
     assert any("57시간" in c["text"] for c in r["checks"])
-    assert "18:00 ~ 21:00 (3시간)" in r["forms"][0]["body"]
+    assert "○○:○○ ~ ○○:○○ (3시간)" in r["forms"][0]["body"]
+    r = _guide(api, "오늘 시간외근무 해야 해요", monkeypatch)
+    assert "○○시간" in r["forms"][0]["body"]
 
 
 def test_no_regulation_for_situation(api, monkeypatch):
@@ -235,18 +250,33 @@ def test_ai_failure_falls_back_to_rule():
         guide.make_guide("", _search_sample())
 
 
+def test_ai_cannot_replace_blanks_or_add_numeric_facts():
+    def reply(messages):
+        rule = json.loads(messages[-1]["content"].split("[규칙 분석]\n", 1)[1])
+        first = rule["forms"][0]
+        return json.dumps({"summary": "출장비는 999999원입니다.",
+                           "forms": [{"name": first["name"],
+                                      "body": first["body"].replace("○○", "서울") + "\n추가 비용 999999원"}, "잘못된 항목"],
+                           "tips": ["999999원을 지급합니다"]}, ensure_ascii=False)
+    result = guide.make_guide("다음 주 수요일 대전 출장", _search_sample(), FakeClient(reply), "m", ref=REF)
+    assert "999999" not in result["summary"]
+    assert "999999" not in result["forms"][0]["body"] and "○○" in result["forms"][0]["body"]
+    assert result["tips"] == [] and "규칙 결과를 유지" in result["notice"]
+
+
 def test_after_trip_settlement_like_contest_example(api, monkeypatch):
-    """공고문 예시 '출장 다녀와서 정산해야 해요': 출발 전 절차는 지난 단계로, 복명서·정산 기한은 날짜로."""
+    """종료일과 선행 제출일을 모를 때 임의의 날짜를 만들어 내지 않는다."""
     r = _guide(api, "출장 다녀와서 정산해야 해요", monkeypatch)
     sit = r["situation"]
-    assert sit["phase"] == "after" and sit["end"] == "2026-11-09" and "오늘 마친 것으로" in r["notice"]
+    assert sit["phase"] == "after" and sit["end"] == "" and "종료일" in r["notice"]
     assert r["summary"].startswith("출장 후속 처리")
     live = [s for s in r["steps"] if not s["skip"]]
-    assert [s["due"] for s in live] == ["2026-11-12", "2026-11-19"]          # 복명서 3일, 정산 7일
+    assert [s["due"] for s in live] == ["", ""]
     assert all("이미 지난 단계" in s["skip"] for s in r["steps"] if "제7조" in s["basis"])
     assert [f["name"] for f in r["forms"]] == ["출장 복명서"]                 # 출장 신청서는 내지 않는다
     assert not any("출장명령" in t["title"] for t in r["tasks"])
     r = _guide(api, "어제까지 대전 출장 다녀왔는데 정산해야 해요", monkeypatch)
-    assert r["situation"]["end"] == "2026-11-08" and not r.get("notice", "").startswith("오늘")
+    assert r["situation"]["end"] == "2026-11-08"
+    assert [s["due"] for s in r["steps"] if not s["skip"]] == ["2026-11-11", ""]
     assert guide.parse_situation("지난주 목요일에 출장 다녀왔어요", REF)["start"] == "2026-11-05"
     assert guide.parse_situation("그저께 행사 끝났어요", REF)["start"] == "2026-11-07"

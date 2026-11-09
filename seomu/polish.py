@@ -269,7 +269,12 @@ _FACT = re.compile(r"\d[\d,.:\-/~]*\d|\d+")
 def facts_kept(draft: str, out: str) -> list[str]:
     """원문에 있는데 다듬은 글에서 빠진 숫자들 (비어 있으면 모두 그대로)."""
     flat = re.sub(r"\s", "", out or "")
-    return [f for f in dict.fromkeys(_FACT.findall(draft or "")) if re.sub(r"\s", "", f) not in flat]
+    return [f for f in dict.fromkeys(_FACT.findall(draft or ""))
+            if not re.search(r"(?<!\d)" + re.escape(re.sub(r"\s", "", f)) + r"(?!\d)", flat)]
+
+
+def _number_parts(text: str) -> set[int]:
+    return {int(n.replace(",", "")) for n in re.findall(r"\d[\d,]*", text or "")}
 
 
 AI_SYSTEM = """당신은 공공기관 직원의 글을 다듬는 비서입니다. 사용자가 대충 쓴 메모를 요청한 형식의 글로 다듬어 JSON으로만 답하세요.
@@ -306,10 +311,14 @@ def ai_polish(client, model: str, draft: str, kind: str, rule: dict, example: st
         raise LLMError("AI 응답을 해석하지 못했습니다") from e
     body = clean_polished(str(data.get("body") or ""), draft)
     subject = "" if kind == "message" else (re.sub(r"\s+", " ", str(data.get("subject") or "")).strip()[:60] or rule["subject"])
-    lost = facts_kept(draft, subject + "\n" + body)
-    if len(body) < 10 or lost:
+    output = subject + "\n" + body
+    lost = facts_kept(draft, output)
+    # 규칙 초안에는 날짜·프로필과 공문 항목 번호가 포함될 수 있다. 예시 양식의 값은 허용하지 않는다.
+    added = _number_parts(output) - _number_parts(draft + "\n" + rule["subject"] + "\n" + rule["body"])
+    if len(body) < 10 or lost or added:
         raise LLMError("AI가 원문의 숫자·날짜를 바꾸거나 빠뜨려 규칙으로 다듬은 결과를 보여 줍니다"
-                       + (f" (빠진 값: {', '.join(lost[:3])})" if lost else ""))
+                       + (f" (빠진 값: {', '.join(lost[:3])})" if lost else "")
+                       + (f" (새 숫자: {', '.join(map(str, sorted(added)[:3]))})" if added else ""))
     return {"subject": subject, "body": body}
 
 
