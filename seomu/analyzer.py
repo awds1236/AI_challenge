@@ -160,6 +160,14 @@ def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | N
         prev = clean.splitlines()[ln - 1] if ln > 0 else ""
         deadlines.append({"date": d["date"], "time": d["time"] or "",
                           "what": clean_what(d["context"], d["raw"], fields, title, heading, tv, prev), "source": "규칙"})
+    # '관리기관 제출'처럼 받는 곳만 남은 할 일: 본문의 '○○를 … 제출하여 주시기 바랍니다'에서 무엇을 내는지 채운다
+    for d in deadlines:
+        m = re.fullmatch(r"(?:\S+\s+)?\S*(?:기관|과|팀|처|실|청|부서|센터|학교)\s*(?:으로|로|에)?\s*(제출|회신|송부|보고)", d["what"])
+        if m:
+            obj = next((o for line in clean.splitlines() if m.group(1) in line
+                        for o in [object_phrase(line)] if o), "")
+            if obj:
+                d["what"] = f"{obj} {m.group(1)}"
     deadlines = _merge_deadlines(deadlines)
     _ml, method = _get(fields, "회신방법", "제출방법", "신청방법", "접수방법")
     _tl, to = _get(fields, "제출처", "회신처", "접수처", "신청처")
@@ -196,7 +204,7 @@ def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | N
             # 요청 문장은 그대로 제출물 이름이 아니다 → '무엇을 제출'의 '무엇'만 ('부서별 폐기 물품 목록').
             # 붙임 목록·서류 항목을 다 본 뒤에 겹치지 않을 때만 더한다 (붙임의 정식 이름·서식 표시를 살린다)
             obj = object_phrase(s)
-            if obj and re.search(r"(서|목록|명단|계획|결과|현황|자료|양식|서식|사본|증빙|파일|표)$", obj):
+            if obj and re.search(r"(서|목록|명단|계획|결과|현황|자료|양식|서식|사본|증빙|파일|표)(?:\([^)]{1,30}\))?$", obj):
                 late.append(obj)
             continue
         cores.add(core)

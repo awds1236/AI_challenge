@@ -550,3 +550,35 @@ def test_checked_download_fixes_wrong_extension_and_rejects_web_pages(tmp_path):
     c = tmp_path / "진짜.pdf"
     c.write_bytes(b"%PDF-1.4\n%")
     assert checked_download(c)["name"] == "진짜.pdf"
+
+
+def test_ocr_body_broken_words_and_bullets():
+    """화면 글자 인식(OCR)으로 읽은 본문: 좁은 칸에서 단어 중간에 끊긴 줄('작'/'성하여', '요'/'청'),
+    '○'를 '0'으로 읽은 줄 머리, 날짜를 빼고 남은 '( 까지)' 때문에 할 일·제출물이 깨지지 않아야 한다."""
+    from datetime import date
+    from seomu.analyzer import rule_analysis
+    from seomu.notice_text import tidy_text
+    title = "2026년 하반기 중대시민재해 점검계획 알림 및 자체점검표 제출 요청"
+    body = ("2026년 하반기 중대시민재해 점검계획 알림 및 자체점검표 제출 요\n청\n"
+            "중대재해처벌법에 따라 2026년도 하반기 안전 • 보건 의무 이행사항에 대하여 점검 실시\n"
+            "해당 관리기관에서는 자체점검 후 자체점검표(공중이용시설)를 작\n"
+            "성하여 제출하여 주시기 바랍니다.\n□ 점검개요\n"
+            "0 기간: 2026. 11. 9.(월) ~ 11. 20.(금)\n0 대상: 공중이용시설(11개소)\n"
+            "0 방법. 관리기관 제출 (11월 11일(수)까지)\n")
+    t = tidy_text(body)
+    lines = t.splitlines()
+    assert lines[0] == title                                   # 제목 줄은 본문 문장과 잇지 않는다
+    assert "자체점검표(공중이용시설)를 작성하여 제출하여" in t
+    assert "○ 기간: 2026. 11. 9.(월)" in t and "○ 방법: 관리기관 제출" in t
+    a = rule_analysis(title, t, [], date(2026, 11, 9))
+    assert [(d["date"], d["what"]) for d in a["deadlines"]] == [("2026-11-11", "자체점검표(공중이용시설) 제출")]
+    assert [s["item"] for s in a["submissions"]] == ["자체점검표(공중이용시설)"]
+    # 글자마다 띄운 기관명·홀로 쓰는 한 글자 낱말 뒤에서는 줄을 잇지 않는다
+    assert tidy_text("○ ○ 도 교 육 청\n수신자 수신자 참조") == "○ ○ 도 교 육 청\n수신자 수신자 참조"
+    assert tidy_text("가. 대상: 초등학교 및\n중학교 교원") == "가. 대상: 초등학교 및\n중학교 교원"
+
+
+def test_submission_line_keeps_year():
+    from seomu.deadlines import find_submissions
+    subs = find_submissions("2026년 상반기 실적 결과를 제출\n1. 사업 계획서 제출")
+    assert subs[0].startswith("2026년") and subs[1] == "사업 계획서 제출"
