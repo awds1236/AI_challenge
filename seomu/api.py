@@ -24,7 +24,7 @@ from . import APP_NAME, __version__
 from .analyzer import analyze, summary_markdown
 from .collector import (BrowserWorker, Captured, analyze_html, checked_download, clean_title, collect_from_files,
                         collect_from_text, collect_from_url, download_url, expand_archives, make_notice_folder,
-                        safe_name, save_body, unique_path)
+                        safe_name, save_body, unique_path, body_from_attachments, body_text_unreadable)
 from .config import Config
 from .deadlines import dday
 from .notice_text import short_task, tidy_text
@@ -927,8 +927,15 @@ class Api:
         if dup:
             return self._merge_into(job, dup, cap)
         cap.files = expand_archives(cap.files)          # zip 붙임은 풀어서 함께 읽는다
-        unreadable = (cap.text or "").lstrip().startswith("(본문을 읽지 못했습니다") or \
-            len(re.sub(r"\s", "", cap.text or "")) < 20
+        unreadable = body_text_unreadable(cap.text)
+        if unreadable:
+            # 배포용(암호화) HWP 등: 붙임에 같은 본문의 PDF('[본문] 제목.pdf')가 있으면 그것을 본문으로 읽는다
+            alt = body_from_attachments(cap.files, Path(cap.url or "").name)
+            if alt:
+                cap.text = tidy_text(alt[0]) or alt[0]
+                alt[1]["role"] = "본문"
+                save_body(cap.folder, cap.title, cap.text, "", cap.url)
+                unreadable = False
         if unreadable:
             use_ai = False                              # 읽은 본문이 없으면 AI가 내용을 지어낸다 → 분석하지 않는다
         if not cap.files:
@@ -1465,6 +1472,15 @@ class Api:
         def work(job: Job):
             job.message = "다시 분석하는 중…"
             s = self._cfg.settings
+            if body_text_unreadable(n["body"]):          # 본문을 못 읽은 공문: 붙임의 '[본문] ….pdf' 등으로 다시 시도
+                alt = body_from_attachments(n["attachments"], Path(n.get("source") or "").name)
+                if not alt:
+                    raise ValueError("본문을 읽지 못한 공문입니다. 본문을 PDF로 저장해 [붙임 올리기]로 올린 뒤 다시 분석하세요 "
+                                     "(파일 이름에 '본문'을 넣으면 본문으로 읽습니다).")
+                n["body"] = tidy_text(alt[0]) or alt[0]
+                self._store.update_notice_body(n["id"], n["body"])
+                if Path(n["folder"]).exists():
+                    save_body(Path(n["folder"]), n["title"], n["body"], "", n.get("source") or "")
             a = analyze(n["title"], n["body"], n["attachments"], self._client(), s.chat_model, s.num_ctx)
             a["folder_name"] = (n.get("analysis") or {}).get("folder_name") or a.get("folder_name")
             a["ai_status"] = "done" if a.get("mode") == "llm" else "error"
