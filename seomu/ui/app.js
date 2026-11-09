@@ -554,7 +554,18 @@ async function loadWindows() {
   }
   try { winAll = await api("list_windows"); } catch (e) { toast(e.message, "err"); winAll = []; }
   renderWindows();
-  $("#win-hint").textContent = state.info.uia_available ? "" : "※ uiautomation 패키지가 없어 화면 글자 정보 읽기와 일부 버튼 누르기는 생략됩니다 (본문복사 버튼·전체 선택·복사·OCR·파일 감시는 동작). 설치: .venv\\Scripts\\pip install uiautomation";
+  $("#win-hint").innerHTML = state.info.uia_available ? "" :
+    `※ uiautomation 패키지가 없어 <b>뒤에서 화면 글자를 그대로 읽는 방법</b>을 쓰지 못하고 글자 인식(OCR)으로 읽습니다.
+     <button class="btn sm" id="uia-install">지금 설치</button>`;
+  const ib = $("#uia-install");
+  if (ib) ib.onclick = async () => {
+    ib.disabled = true; ib.textContent = "설치 중…";
+    try {
+      const r = await runJob("install_uia", []);
+      if (r.ok) { state.info.uia_available = true; toast("설치했습니다. 이제 뒤에서 화면 글자를 그대로 읽습니다.", "ok", 6000); $("#win-hint").innerHTML = ""; }
+      else toast("설치는 했지만 불러오지 못했습니다. 프로그램을 다시 실행해 주세요.", "info", 8000);
+    } catch (e) { toast(e.message, "err", 10000); ib.disabled = false; ib.textContent = "다시 시도"; }
+  };
 }
 function renderWindows() {
   const q = $("#win-filter").value.trim();
