@@ -311,16 +311,17 @@
           <div class="card">
             <label class="field"><span>만들 형식</span>
               <div class="segmented" id="pl-kind"><button class="on" data-v="mail">메일</button><button data-v="official">공문</button><button data-v="report">보고</button><button data-v="message">메시지</button></div></label>
+            <div class="muted small" id="pl-kind-hint" style="margin:-4px 0 10px"></div>
             <label class="field"><span>내 양식 (선택)</span><select class="input" id="pl-template"></select></label>
             <label class="field"><span>관련 공문 (선택)</span><select class="input" id="pl-notice"></select></label>
             <label class="field grow"><span>대충 쓴 내용</span><textarea class="input" id="pl-draft" rows="10"
               placeholder="메모처럼 써도 됩니다.&#10;예)&#10;11월 체육관 대관 일정 공유&#10;다음주 화요일(11/18) 오전 10시 점검 있음&#10;대관 신청은 11월 14일까지 회신해줘"></textarea></label>
             <label class="switch-row"><span>로컬 AI로 문장 다듬기</span><input type="checkbox" class="switch" id="pl-ai" checked></label>
             <button class="btn primary full" id="pl-go"><i data-icon="sparkle"></i>다듬기</button>
-            <div class="muted small" style="margin-top:8px">숫자·날짜·연락처는 그대로 둡니다. AI가 바꾸면 규칙으로 다듬은 결과를 보여 줍니다. 내 양식을 고르면 그 짜임과 문체를 따릅니다.</div>
+            <div class="muted small" style="margin-top:8px">숫자·날짜·연락처는 그대로 둡니다. AI가 바꾸면 규칙으로 다듬은 결과를 보여 줍니다. 내 양식을 고르면 그 짜임과 문체를 따릅니다. 내용 없이 [다듬기]를 누르면 고른 형식의 기본 양식(빈 초안)을 보여 줍니다.</div>
           </div>
           <div class="card mail-preview">
-            <label class="field"><span>제목</span><input class="input" id="pl-subject"></label>
+            <label class="field" id="pl-subject-field"><span id="pl-subject-label">메일 제목</span><input class="input" id="pl-subject"></label>
             <label class="field grow"><span>다듬은 글</span><textarea class="input" id="pl-body" rows="16"></textarea></label>
             <div class="row wrap"><span class="muted small grow" id="pl-meta"></span>
               <button class="btn" id="pl-save"><i data-icon="download"></i>초안 저장</button>
@@ -567,8 +568,6 @@
       <div class="spacer"></div>
       <button class="btn" id="nd-reanalyze"><i data-icon="sparkle"></i>다시 분석</button>
       <button class="btn" id="nd-folder"><i data-icon="folder"></i>폴더 열기</button>
-      <button class="btn" id="nd-report"><i data-icon="doc"></i>보고서 작성</button>
-      <button class="btn primary" id="nd-mail"><i data-icon="mail"></i>메일 작성</button>
     </div>
   </div>
 </div>

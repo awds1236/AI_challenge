@@ -779,7 +779,7 @@ async function loadMail() {
   if (curN) $("#mc-notice").value = curN;
   $("#tpl-vars").innerHTML = ["본문", ...r.variables].map((v) => `<button class="chip" data-var="${esc(v)}">{{${esc(v)}}}</button>`).join("");
   const curP = $("#pl-template").value, curPN = $("#pl-notice").value;
-  $("#pl-template").innerHTML = `<option value="">(양식 없이 형식에 맞춰)</option>` + r.templates.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join("");
+  $("#pl-template").innerHTML = `<option value="">기본 양식 (고른 형식에 맞춰)</option>` + r.templates.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join("");
   if (curP) $("#pl-template").value = curP;
   $("#pl-notice").innerHTML = `<option value="">(공문 없이)</option>` + state.notices.map((n) => `<option value="${n.id}">${esc((n.analysis || {}).folder_name || n.title)}</option>`).join("");
   if (curPN) $("#pl-notice").value = curPN;
@@ -1185,16 +1185,6 @@ function bind() {
   $("#pv-open").addEventListener("click", async () => { if (previewPath) await openPath(previewPath); });
   $("#pv-copy").addEventListener("click", async () => { await copyText($("#pv-body").textContent); toast("글자를 복사했습니다", "ok"); });
   $("#nd-folder").addEventListener("click", () => currentNotice && openPath(currentNotice.folder, "공문 폴더가 없습니다 (옮겨졌거나 지워졌을 수 있습니다)"));
-  $("#nd-mail").addEventListener("click", async () => {
-    if (!currentNotice) return;
-    const id = currentNotice.id, ev = (currentNotice.analysis || {}).event || {};
-    closeSheet(); go("mail"); await loadMail(); $("#mc-notice").value = String(id);
-    // 공문 종류에 맞는 양식: 행사·교육 안내면 '행사 참석 안내', 아니면 '부서 제출 요청'
-    const want = ev.name ? "행사" : "제출 요청";
-    const t = state.templates.find((x) => x.name.includes(want));
-    if (t) $("#mc-template").value = String(t.id);
-    makeMail();
-  });
   $("#nd-reanalyze").addEventListener("click", async () => {
     if (!currentNotice) return;
     hud("다시 분석하는 중…");
@@ -1246,22 +1236,52 @@ function bind() {
   $("#rp-open").addEventListener("click", () => state.report && openPath(state.report.path));
   $("#rp-folder").addEventListener("click", () => state.report && openPath(state.report.folder));
   setupDrop($("#drop-report"), addReportTemplates);
-  $("#nd-report").addEventListener("click", async () => { if (!currentNotice) return; const id = currentNotice.id; closeSheet(); go("report"); await loadReport(); $("#rp-notice").value = String(id); });
   segmented($("#mail-mode"), (v) => $$(".mail-pane").forEach((p) => p.classList.toggle("on", p.dataset.mode === v)));
   // 문서 다듬기
-  let plKind = "mail";
-  segmented($("#pl-kind"), (v) => { plKind = v; $("#pl-mailto").disabled = v !== "mail"; });
+  let plKind = "mail", plSkeleton = false;
+  const PL_KIND = {
+    mail: { label: "메일 제목", hint: "인사 → 목적 → ■ 주요 내용 · ■ 요청 사항 · ■ 문의 → 맺음말 → 서명 (존댓말)",
+      ph: "메모처럼 써도 됩니다.\n예)\n11월 체육관 대관 일정 공유\n다음주 화요일(11/18) 오전 10시 점검 있음\n대관 신청은 11월 14일까지 회신해줘\n문의는 내선 1234" },
+    official: { label: "공문 제목", hint: "수신·(경유)·제목 → 1. 관련 → 2. 목적 문장 + 가. 나. 다. 개조식 → 요청·문의 → 붙임 … 끝.",
+      ph: "예)\n동절기 시설물 안전점검 안내\n점검 기간 12월 1일부터 12월 12일까지\n대상 전 사업장 전기·가스·소방 설비\n점검 결과 12월 15일까지 제출해줘\n붙임: 안전점검 계획, 점검 결과 보고서 서식" },
+    report: { label: "보고서 제목", hint: "제목 · 날짜/부서 → □ 개요 → □ 주요 내용 → □ 요청 사항 및 향후 계획 (~함 · ~임)",
+      ph: "예)\n체육관 냉난방기 고장 조치 결과 보고\n11월 5일 냉난방기 2대 고장 접수\n11월 7일 업체 수리 완료 했습니다\n수리비 450,000원 집행\n12월 중 전체 설비 점검 예정" },
+    message: { label: "", hint: "[부서 이름] 한 줄 머리 + ▶ 핵심 2~4줄 (인사·맺음말 없이 짧게, 제목 없음)",
+      ph: "예)\n내일 오전 소방훈련 안내\n11월 20일(목) 10시 사이렌 울리면 1층 주차장으로 대피\n참석 인원 오늘까지 알려줘" },
+  };
+  async function plShowSkeleton() {
+    const r = await runJob("polish_draft", ["", plKind, null, null, false]);
+    $("#pl-subject").value = r.subject || ""; $("#pl-body").value = r.body || "";
+    $("#pl-meta").textContent = "기본 양식 — ○○○ 자리를 채우거나, 왼쪽에 메모를 쓰고 [다듬기]를 누르세요";
+    plSkeleton = true;
+  }
+  function plApply() {
+    const k = PL_KIND[plKind];
+    $("#pl-kind-hint").textContent = "짜임: " + k.hint;
+    $("#pl-draft").placeholder = k.ph;
+    $("#pl-subject-field").classList.toggle("hidden", !k.label);
+    $("#pl-subject-label").textContent = k.label || "제목";
+    $("#pl-mailto").classList.toggle("hidden", plKind !== "mail");
+    if (plSkeleton || !$("#pl-body").value.trim()) plShowSkeleton().catch(() => {});
+  }
+  segmented($("#pl-kind"), (v) => { plKind = v; plApply(); });
+  plApply();
+  $("#pl-body").addEventListener("input", () => { plSkeleton = false; if (plKind === "message") $("#pl-meta").textContent = `${$("#pl-body").value.length}자`; });
   $("#pl-go").addEventListener("click", async () => {
     const draft = $("#pl-draft").value;
-    if (!draft.trim()) return toast("다듬을 내용을 입력하세요", "info");
+    if (!draft.trim()) {
+      if ($("#pl-template").value) return toast("다듬을 내용을 입력하세요", "info");
+      return plShowSkeleton().catch((e) => toast(e.message, "err"));
+    }
     const btn = $("#pl-go"); btn.disabled = true;
     $("#pl-meta").textContent = "다듬는 중…";
     try {
       const tid = $("#pl-template").value, nid = $("#pl-notice").value;
       const r = await runJob("polish_draft", [draft, plKind, tid ? Number(tid) : null, nid ? Number(nid) : null, $("#pl-ai").checked],
         (st) => { if (st.message) $("#pl-meta").textContent = st.message; });
-      $("#pl-subject").value = r.subject || ""; $("#pl-body").value = r.body || "";
-      $("#pl-meta").textContent = r.mode === "llm" ? `로컬 AI로 다듬음 (${r.model || ""})` : (r.warning ? `규칙으로 다듬음 · ${r.warning}` : "규칙으로 다듬음");
+      $("#pl-subject").value = r.subject || ""; $("#pl-body").value = r.body || ""; plSkeleton = false;
+      const how = r.mode === "llm" ? `로컬 AI로 다듬음 (${r.model || ""})` : (r.warning ? `규칙으로 다듬음 · ${r.warning}` : "규칙으로 다듬음");
+      $("#pl-meta").textContent = how + (plKind === "message" ? ` · ${(r.body || "").length}자` : "");
     } catch (e) { toast(e.message, "err"); $("#pl-meta").textContent = ""; }
     finally { btn.disabled = false; }
   });

@@ -1580,9 +1580,13 @@ class Api:
         """메모를 고른 형식(또는 내 양식)으로 다듬는다. AI가 없거나 숫자·날짜를 바꾸면 규칙 결과."""
         if kind not in polish_mod.KINDS:
             raise ValueError("형식을 고르세요")
-        if not (draft or "").strip():
-            raise ValueError("다듬을 내용을 입력하세요 (메모처럼 대충 써도 됩니다)")
         template = self._store.get_template(int(template_id)) if template_id else None
+        if not (draft or "").strip():
+            if template:
+                raise ValueError("다듬을 내용을 입력하세요 (메모처럼 대충 써도 됩니다)")
+            # 내용 없이 누르면 고른 형식의 기본 양식(빈 초안)을 보여 준다
+            sk = polish_mod.skeleton(kind, self._profile())
+            return self._run_job("polish_draft", lambda job: dict(sk, mode="skeleton", warning=""))
         notice = self._store.get_notice(int(notice_id)) if notice_id else None
         variables = build_variables(notice, self._cfg.settings)
         rule = polish_mod.rule_polish(draft, kind, self._profile(), template, variables)
