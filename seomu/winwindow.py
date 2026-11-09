@@ -12,6 +12,7 @@ Windows 전용 기능이다. 다른 OS에서는 available()이 False를 돌려�
 """
 from __future__ import annotations
 
+import ntpath
 import os
 import re
 import shutil
@@ -178,6 +179,8 @@ def _pid(hwnd) -> int:
 
 
 def _process_name(pid: int) -> str:
+    if not IS_WIN:
+        return ""
     h = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
     if not h:
         return ""
@@ -1048,7 +1051,8 @@ def _stem_key(s: str) -> str:
 
 def _title_mentions(title: str, path: str) -> bool:
     """창 제목에 파일 이름(확장자 없이도)이 들어 있는지. 예: '공문 - Word', '공문.hwpx - 한글'."""
-    stem = _stem_key(Path(path).stem)
+    # 창에 열린 문서 경로는 Windows 경로다: 어느 OS에서 실행해도(테스트 포함) Windows 규칙으로 나눈다
+    stem = _stem_key(ntpath.splitext(ntpath.basename(path or ""))[0])
     return len(stem) >= 2 and stem in _stem_key(title)
 
 
@@ -1090,7 +1094,7 @@ def _path_from_url(url: str) -> str:
         u = u.lstrip("/") if re.match(r"^/[A-Za-z]:", u) else u
     elif not re.match(r"^[A-Za-z]:[\\/]", u):
         return ""
-    return os.path.normpath(u.split("#")[0].split("?")[0])
+    return ntpath.normpath(u.split("#")[0].split("?")[0])
 
 
 def window_document(hwnd: int, title: str | None = None, trace: list | None = None,

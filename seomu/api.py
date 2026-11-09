@@ -30,7 +30,7 @@ from .notice_text import short_task, tidy_text
 from .engine import ENGINE_MISSING, LocalClient, LocalEngine, add_model_file, ollama_model_blob
 from .llm import LLMError, OllamaClient
 from . import models as model_catalog
-from . import attach, downloader, winwindow
+from . import attach, downloader, guide as guide_mod, winwindow
 from .mail import DEFAULT_TEMPLATES, POLISH_PROMPT, VARIABLES, build_variables, clean_polished, render, tasks_to_ics
 from .parsers import READABLE_EXT
 from .rag import RAGEngine
@@ -554,6 +554,82 @@ class Api:
     def clear_chat(self) -> bool:
         self._store.clear_chat()
         return True
+
+    # ------------------------------------------------------------ 상황 안내 (서무비서)
+    def guide(self, situation: str, use_ai: bool = True) -> dict:
+        """상황을 말하면 규정으로 절차·서식 초안·다음 할 일을 안내한다 (AI가 없어도 규칙으로 동작)."""
+        situation = (situation or "").strip()
+        if len(situation) < 2:
+            raise ValueError("상황을 입력하세요 (예: 다음 주 수요일 대전으로 출장 가요)")
+
+        def work(job: Job):
+            job.message = "관련 규정을 찾는 중…"
+            client, model = None, ""
+            if use_ai:
+                try:
+                    c = self._client()
+                    if c.status().get("ok"):
+                        client, model = c, c.pick_chat_model(self._cfg.settings.chat_model)
+                except LLMError:
+                    client = None
+            if client is not None:
+                job.message = "절차를 정리하고 로컬 AI가 서식 초안을 다듬는 중…"
+            res = guide_mod.make_guide(situation, lambda q: self._rag.search(q), client, model,
+                                       num_ctx=self._cfg.settings.num_ctx)
+            res["id"] = self._store.add_guide(situation, res)
+            return res
+        return self._run_job("guide", work)
+
+    def guide_history(self) -> list[dict]:
+        return [{"id": g["id"], "situation": g["situation"], "created_at": g["created_at"],
+                 "kind": (g["result"].get("situation") or {}).get("kind", "")} for g in self._store.list_guides(20)]
+
+    def get_guide(self, guide_id: int) -> dict | None:
+        g = self._store.get_guide(int(guide_id))
+        if not g:
+            return None
+        return dict(g["result"], id=g["id"])
+
+    def delete_guide(self, guide_id: int) -> bool:
+        self._store.delete_guide(int(guide_id))
+        return True
+
+    def guide_add_tasks(self, tasks: list[dict]) -> dict:
+        """안내의 '다음 할 일'을 할 일 목록에 넣는다 (같은 제목·기한이 이미 있으면 건너뛴다)."""
+        have = {(t["title"], t.get("due") or "") for t in self._store.list_tasks(True)}
+        added = 0
+        for t in tasks or []:
+            title = (t.get("title") or "").strip()
+            due = (t.get("due") or "").strip()
+            if not title or (title, due) in have:
+                continue
+            if due and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", due):
+                due = ""
+            self._store.add_task(title, t.get("detail") or "", due or None)
+            have.add((title, due))
+            added += 1
+        return {"added": added}
+
+    def save_guide_form(self, name: str, body: str, fmt: str = "txt") -> dict:
+        """서식 초안을 파일로 저장한다 (txt 또는 한글 hwpx). 저장한 경로를 돌려준다."""
+        body = (body or "").strip()
+        if not body:
+            raise ValueError("저장할 초안 내용이 없습니다")
+        folder = self._cfg.settings.resolved_download_root() / "서식 초안"
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = safe_name((name or "서식 초안").strip(), 60) + "_" + datetime.now().strftime("%Y%m%d")
+        if fmt == "hwpx":
+            tpath = report_mod.builtin_template()
+            if not tpath:
+                raise ValueError("한글 양식 파일이 없어 hwpx로 저장할 수 없습니다. txt로 저장해 주세요.")
+            tpl = report_mod.load_template(tpath)
+            outline = report_mod.outline_from_text(body, name or "")
+            out = unique_path(folder / f"{stem}.hwpx")
+            out.write_bytes(report_mod.fill(tpl, outline, dept=self._cfg.settings.user_dept))
+        else:
+            out = unique_path(folder / f"{stem}.txt")
+            out.write_text(body + "\n", encoding="utf-8")
+        return {"path": str(out), "folder": str(folder)}
 
     # ------------------------------------------------------------ 공문 수집
     def _browser_worker(self) -> BrowserWorker:

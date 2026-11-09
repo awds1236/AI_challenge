@@ -327,8 +327,10 @@ def test_recollecting_same_notice_does_not_duplicate(api, tmp_path):
 def test_open_mail_uses_shell_and_drops_long_body(api, monkeypatch):
     """[메일 앱으로]: 앱 안에서 mailto:로 연다. 한글 본문이 길면 주소 길이 제한 때문에 제목만 넘긴다. (실제 창은 열지 않음)"""
     import os
+    import seomu.api as api_mod
     opened = []
     monkeypatch.setattr(os, "startfile", lambda u: opened.append(u), raising=False)
+    monkeypatch.setattr(api_mod.sys, "platform", "win32")        # Windows 방식(ShellExecute)을 흉내 낸다
     assert api.open_mail("[회신] 점검", "짧은 본문")["with_body"]
     assert opened[-1].startswith("mailto:?subject=") and "&body=" in opened[-1]
     assert not api.open_mail("[회신] 점검", "가" * 500)["with_body"]

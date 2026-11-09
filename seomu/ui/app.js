@@ -178,8 +178,141 @@ const state = { settings: {}, info: {}, notices: [], templates: [], tasks: [], c
 function go(page) {
   $$(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
   $$(".page").forEach((p) => p.classList.toggle("active", p.id === "page-" + page));
-  const loaders = { home: loadHome, ask: loadChat, collect: loadNotices, tasks: loadTasks, mail: loadMail, report: loadReport, library: loadLibrary, settings: loadSettings };
+  const loaders = { home: loadHome, ask: loadChat, guide: loadGuide, collect: loadNotices, tasks: loadTasks, mail: loadMail, report: loadReport, library: loadLibrary, settings: loadSettings };
   return loaders[page] ? loaders[page]() : Promise.resolve();
+}
+
+// ------------------------------------------------------------------ 상황 안내 (서무비서)
+let guideCur = null;
+async function loadGuide() {
+  try {
+    const h = await api("guide_history");
+    $("#guide-hist").innerHTML = h.length ? h.map((g) => `<li data-gid="${g.id}" class="${guideCur && guideCur.id === g.id ? "on" : ""}">
+      <div class="t">${esc(g.situation)}</div>
+      <div class="muted small row tight">${g.kind ? `<span class="badge">${esc(g.kind)}</span>` : ""}<span>${esc(relTime(g.created_at))}</span>
+        <span class="spacer"></span><button class="btn ghost sm danger" data-gdel="${g.id}" title="삭제">${svg("trash")}</button></div></li>`).join("")
+      : `<li class="muted small">아직 받은 안내가 없습니다.</li>`;
+  } catch (e) { $("#guide-hist").innerHTML = `<li class="muted small">${esc(e.message)}</li>`; }
+}
+async function askGuide(text) {
+  text = (text || $("#guide-input").value).trim();
+  if (!text) return toast("상황을 입력하세요", "info");
+  $("#guide-input").value = text;
+  const btn = $("#guide-go");
+  btn.disabled = true;
+  $("#guide-result").innerHTML = `<div class="card muted" id="guide-wait">관련 규정을 찾는 중…</div>`;
+  try {
+    const r = await runJob("guide", [text, $("#guide-ai").checked], (st) => {
+      const w = $("#guide-wait");
+      if (w) w.textContent = st.message || "안내를 만드는 중…";
+    });
+    guideCur = r;
+    renderGuide(r);
+    loadGuide();
+  } catch (e) {
+    $("#guide-result").innerHTML = `<div class="card muted">${esc(e.message)}</div>`;
+    toast(e.message, "err");
+  } finally { btn.disabled = false; }
+}
+function guideDate(sit) {
+  if (!sit.start) return "";
+  return sit.end && sit.end !== sit.start ? `${fmtDate(sit.start)} ~ ${fmtDate(sit.end)}` : fmtDate(sit.start);
+}
+function renderGuide(r) {
+  const sit = r.situation || {};
+  const facts = [["업무", sit.kind || "일반"], ["날짜", guideDate(sit)], ["장소", sit.place], ["목적", sit.purpose],
+    ["품목", sit.item], ["금액", sit.amount ? sit.amount.toLocaleString() + "원" : ""]]
+    .filter((f) => f[1]).map((f) => `<span class="badge">${esc(f[0])}: ${esc(f[1])}</span>`).join(" ");
+  const steps = (r.steps || []).map((st, i) => `
+    <li class="${st.skip ? "skip" : ""}">
+      <div class="num">${i + 1}</div>
+      <div class="body"><div class="t">${esc(st.title)}</div>
+        <div class="muted small">${esc(st.basis)}${st.due_text ? ` · 규정: ${esc(st.due_text)}` : ""}</div>
+        ${st.skip ? `<div class="small skip-note">${esc(st.skip)}</div>` : ""}</div>
+      <div class="due">${st.due ? `<b>${esc(fmtDate(st.due))}</b>${st.late ? '<span class="badge red">기한 지남</span>' : ""}` : ""}</div>
+    </li>`).join("");
+  const checks = (r.checks || []).map((c) => `<li>${esc(c.text)} <span class="muted small">— ${esc(c.basis)}</span></li>`).join("");
+  const forms = (r.forms || []).map((f, i) => `
+    <div class="guide-draft">
+      <div class="row tight wrap"><b>${esc(f.name)}</b>${f.blanks ? `<span class="badge orange">채울 칸 ${f.blanks}곳(○○)</span>` : ""}<span class="spacer"></span>
+        <button class="btn sm" data-fcopy="${i}">${svg("copy")} 복사</button>
+        <button class="btn sm" data-fsave="${i}" data-fmt="txt">${svg("download")} txt 저장</button>
+        <button class="btn sm" data-fsave="${i}" data-fmt="hwpx">${svg("doc")} 한글(hwpx) 저장</button></div>
+      <textarea class="input mono" rows="${Math.min(24, f.body.split("\n").length + 1)}" data-fbody="${i}">${esc(f.body)}</textarea>
+    </div>`).join("");
+  const tasks = (r.tasks || []).map((t, i) => `
+    <label class="guide-task"><input type="checkbox" data-tk="${i}" checked>
+      <span class="t">${esc(t.title)}</span><span class="spacer"></span>${t.due ? `<span class="badge blue">${esc(fmtDate(t.due))}</span>` : '<span class="badge">기한 없음</span>'}</label>`).join("");
+  const src = (r.sources || []).map((h) => `<li><b>「${esc(h.title)}」 ${esc(h.heading || "")}</b>
+    <div class="muted small">${esc((h.text || "").slice(0, 260))}${(h.text || "").length > 260 ? "…" : ""}</div></li>`).join("");
+  $("#guide-result").innerHTML = `
+    <div class="card">
+      <div class="card-head"><h3>상황 정리</h3><span class="muted small">${r.mode === "llm" ? `로컬 AI 보완 · ${esc(r.model || "")}` : "규칙 기반"}</span></div>
+      <p class="guide-summary">${esc(r.summary)}</p>
+      <div class="row wrap tight">${facts}</div>
+      ${r.notice ? `<div class="engine-notice warn-notice" style="margin-top:10px">${esc(r.notice)}</div>` : ""}
+      ${(r.tips || []).length ? `<ul class="guide-tips">${r.tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>① 절차 확인</h3><span class="muted small">규정의 의무 조항 · 기한은 상황 날짜로 계산</span></div>
+      ${steps ? `<ol class="guide-steps">${steps}</ol>` : `<div class="muted small">규정에서 이 상황의 절차 조항을 찾지 못했습니다. 규정 저장소에 해당 규정·지침을 추가해 보세요.</div>`}
+      ${checks ? `<div class="guide-sub">확인할 제한·기준</div><ul class="guide-checks">${checks}</ul>` : ""}
+      ${(r.prep || []).length ? `<div class="guide-sub">준비·첨부 서류</div><div class="row wrap tight">${r.prep.map((p) => `<span class="badge green">${esc(p)}</span>`).join(" ")}</div>` : ""}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>② 서식 초안</h3><span class="muted small">○○ 칸을 채워 쓰세요 · 고친 내용 그대로 복사·저장</span></div>
+      ${forms || '<div class="muted small">만들 서식이 없습니다.</div>'}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>③ 다음 할 일</h3><button class="btn primary sm" id="guide-addtasks">${svg("plus")} 선택한 일을 할 일로 등록</button></div>
+      ${tasks || '<div class="muted small">등록할 할 일이 없습니다.</div>'}
+    </div>
+    ${src ? `<div class="card"><div class="card-head"><h3>근거 조문</h3></div><ul class="guide-src">${src}</ul></div>` : ""}`;
+}
+function bindGuide() {
+  $("#guide-form").addEventListener("submit", (e) => { e.preventDefault(); askGuide(); });
+  $("#guide-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); askGuide(); }
+  });
+  $("#guide-suggest").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (c) askGuide(c.textContent); });
+  $("#guide-hist").addEventListener("click", async (e) => {
+    const del = e.target.closest("[data-gdel]");
+    if (del) {
+      e.stopPropagation();
+      const id = Number(del.dataset.gdel);
+      try { await api("delete_guide", id); } catch (er) { return toast(er.message, "err"); }
+      if (guideCur && guideCur.id === id) { guideCur = null; $("#guide-result").innerHTML = ""; }
+      return loadGuide();
+    }
+    const li = e.target.closest("[data-gid]");
+    if (!li) return;
+    try {
+      const g = await api("get_guide", Number(li.dataset.gid));
+      if (g) { guideCur = g; $("#guide-input").value = (g.situation || {}).text || ""; renderGuide(g); loadGuide(); }
+    } catch (er) { toast(er.message, "err"); }
+  });
+  $("#guide-result").addEventListener("click", async (e) => {
+    const cp = e.target.closest("[data-fcopy]"), sv = e.target.closest("[data-fsave]");
+    if (cp) { await copyText($(`[data-fbody="${cp.dataset.fcopy}"]`).value); return toast("초안을 복사했습니다", "ok"); }
+    if (sv) {
+      const f = guideCur.forms[Number(sv.dataset.fsave)];
+      try {
+        const r = await api("save_guide_form", f.name, $(`[data-fbody="${sv.dataset.fsave}"]`).value, sv.dataset.fmt);
+        toast(`저장했습니다: ${baseName(r.path)}`, "ok", 5000);
+        openPath(r.folder);
+      } catch (er) { toast(er.message, "err"); }
+      return;
+    }
+    if (e.target.closest("#guide-addtasks")) {
+      const picked = $$("[data-tk]").filter((c) => c.checked).map((c) => guideCur.tasks[Number(c.dataset.tk)]);
+      if (!picked.length) return toast("등록할 일을 고르세요", "info");
+      try {
+        const r = await api("guide_add_tasks", picked);
+        toast(r.added ? `할 일 ${r.added}개를 등록했습니다` : "이미 등록된 할 일입니다", r.added ? "ok" : "info");
+        loadTasks().catch(() => {});          // 할 일 목록·메뉴 배지 갱신
+      } catch (er) { toast(er.message, "err"); }
+    }
+  });
 }
 
 // ------------------------------------------------------------------ AI 상태
@@ -1004,6 +1137,8 @@ function bind() {
   $("#lib-dirs").addEventListener("click", async (e) => { const b = e.target.closest("[data-rmdir]"); if (b && confirm("저장소 목록에서 제거할까요? (파일은 삭제되지 않습니다)")) { await api("remove_regulation_dir", b.dataset.rmdir); reindex(false); } });
   setupDrop($("#drop-lib"), importLibFiles);
   $("#lib-pick-files").addEventListener("click", async () => importLibFiles(await pickFiles(true)));
+
+  bindGuide();
 
   // 설정
   // 테마는 누르면 바로 바뀌어 보이므로 바로 저장한다 (저장 버튼을 안 누르고 나가면 다음 실행 때 되돌아가던 문제)

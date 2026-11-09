@@ -26,6 +26,7 @@
       <div class="nav-label">업무</div>
       <button class="nav-item active" data-page="home"><i data-icon="sun"></i><span>오늘</span></button>
       <button class="nav-item" data-page="ask"><i data-icon="chat"></i><span>규정 Q&amp;A</span></button>
+      <button class="nav-item" data-page="guide"><i data-icon="sparkle"></i><span>상황 안내</span></button>
       <button class="nav-item" data-page="collect"><i data-icon="tray"></i><span>공문 수집</span><em class="nav-badge" id="badge-notices"></em></button>
       <button class="nav-item" data-page="tasks"><i data-icon="check"></i><span>할 일·일정</span><em class="nav-badge red" id="badge-tasks"></em></button>
       <button class="nav-item" data-page="mail"><i data-icon="mail"></i><span>메일 양식</span></button>
@@ -109,6 +110,40 @@
         <textarea id="ask-input" rows="1" placeholder="질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
         <button class="send" id="ask-send" title="전송"><i data-icon="up"></i></button>
       </form>
+    </section>
+
+    <!-- 상황 안내 (서무비서) -->
+    <section class="page" id="page-guide">
+      <header class="page-head">
+        <div><div class="eyebrow">상황을 말하면 규정으로 절차 확인 → 서식 초안 → 다음 할 일</div><h1>상황 안내</h1></div>
+      </header>
+      <div class="card">
+        <form id="guide-form" class="guide-form">
+          <textarea class="input" id="guide-input" rows="2" placeholder="지금 상황을 말해 주세요. 예) 다음 주 수요일부터 목요일까지 대전으로 관외 출장 가요"></textarea>
+          <div class="row wrap">
+            <div class="chips" id="guide-suggest">
+              <button type="button" class="chip">다음 주 수요일 대전으로 관외 출장 가요</button>
+              <button type="button" class="chip">11월 27일 금요일에 연가 쓰려고 해요</button>
+              <button type="button" class="chip">프린터 토너 5개 구매해야 해요, 약 30만원</button>
+              <button type="button" class="chip">오늘 시간외근무 3시간 해야 해요</button>
+            </div>
+            <span class="spacer"></span>
+            <label class="switch-row inline"><span>로컬 AI로 다듬기</span><input type="checkbox" class="switch" id="guide-ai" checked></label>
+            <button class="btn primary" id="guide-go"><i data-icon="sparkle"></i>안내 받기</button>
+          </div>
+        </form>
+        <div class="muted small">규정 저장소의 조례·내규·지침에서 근거를 찾아 기한을 날짜로 계산합니다. 규정에 없는 절차는 만들어 내지 않습니다.</div>
+      </div>
+      <div class="grid-guide">
+        <div id="guide-result">
+          <div class="card empty-note muted" id="guide-empty">상황을 입력하고 [안내 받기]를 누르세요.<br>
+            예: 출장·연가·병가·물품 구매·시간외근무·회의 개최 등. 날짜를 함께 말하면 기한을 날짜로 계산합니다.</div>
+        </div>
+        <div class="card guide-history">
+          <div class="card-head"><h3>최근 안내</h3></div>
+          <ul class="guide-hist" id="guide-hist"></ul>
+        </div>
+      </div>
     </section>
 
     <!-- 공문 수집 -->

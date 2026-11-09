@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS mail_templates (
     body TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS guides (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    situation TEXT NOT NULL,
+    result TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS chat_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     question TEXT NOT NULL,
@@ -232,6 +238,28 @@ class Store:
         for r in rows:
             r["sources"] = json.loads(r["sources"] or "[]")
         return list(reversed(rows))
+
+    # ---------- 상황 안내 기록
+    def add_guide(self, situation: str, result: dict) -> int:
+        cur = self.execute("INSERT INTO guides(situation,result,created_at) VALUES(?,?,?)",
+                           (situation, json.dumps(result, ensure_ascii=False), now_iso()))
+        return cur.lastrowid
+
+    def list_guides(self, limit: int = 20) -> list[dict]:
+        rows = self.query("SELECT id, situation, result, created_at FROM guides ORDER BY id DESC LIMIT ?", (limit,))
+        for r in rows:
+            r["result"] = json.loads(r["result"] or "{}")
+        return rows
+
+    def get_guide(self, guide_id: int) -> dict | None:
+        rows = self.query("SELECT * FROM guides WHERE id=?", (guide_id,))
+        if not rows:
+            return None
+        rows[0]["result"] = json.loads(rows[0]["result"] or "{}")
+        return rows[0]
+
+    def delete_guide(self, guide_id: int) -> None:
+        self.execute("DELETE FROM guides WHERE id=?", (guide_id,))
 
     def clear_chat(self) -> None:
         self.execute("DELETE FROM chat_history")
