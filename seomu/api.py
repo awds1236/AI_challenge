@@ -30,7 +30,7 @@ from .notice_text import short_task, tidy_text
 from .engine import ENGINE_MISSING, LocalClient, LocalEngine, add_model_file, ollama_model_blob
 from .llm import LLMError, OllamaClient
 from . import models as model_catalog
-from . import attach, downloader, guide as guide_mod, winwindow
+from . import attach, downloader, forms as forms_mod, guide as guide_mod, winwindow
 from .mail import DEFAULT_TEMPLATES, POLISH_PROMPT, VARIABLES, build_variables, clean_polished, render, tasks_to_ics
 from .parsers import READABLE_EXT
 from .rag import RAGEngine
@@ -491,9 +491,81 @@ class Api:
                 "hint": "" if not err else "이 형식은 내용을 미리 볼 수 없습니다. [파일 열기]로 PC의 프로그램에서 열어 보세요."}
 
     # ------------------------------------------------------------ 규정 저장소 (RAG)
+    REG_CATEGORIES = ("법령", "조례", "내규", "지침", "서식", "기타")
+
+    def _managed_reg_dir(self) -> Path:
+        """화면에서 추가한 규정의 사본을 두는 프로그램 전용 폴더 (여기 있는 사본만 삭제한다)."""
+        d = self._cfg.home / "regulations"
+        d.mkdir(parents=True, exist_ok=True)
+        if str(d) not in self._cfg.settings.regulation_dirs:
+            self.save_settings({"regulation_dirs": [str(d)] + list(self._cfg.settings.regulation_dirs)})
+        return d
+
+    def _is_managed(self, path: str | Path) -> bool:
+        try:
+            Path(path).resolve().relative_to((self._cfg.home / "regulations").resolve())
+            return True
+        except ValueError:
+            return False
+
     def list_documents(self) -> dict:
-        return {"documents": self._store.list_documents(), "dirs": self._cfg.settings.regulation_dirs,
-                "progress": self._rag.progress}
+        docs = self._store.list_documents()
+        for d in docs:
+            d["managed"] = self._is_managed(d["path"])
+        excluded = [{"path": p, "name": Path(p).name, "exists": Path(p).exists()}
+                    for p in self._cfg.settings.excluded_docs]
+        return {"documents": docs, "dirs": self._cfg.settings.regulation_dirs, "progress": self._rag.progress,
+                "excluded": excluded, "categories": list(self.REG_CATEGORIES),
+                "managed_dir": str(self._cfg.home / "regulations")}
+
+    def delete_regulation(self, path: str) -> dict:
+        """규정을 저장소에서 뺀다. 화면에서 추가한 사본은 지우고, 연결한 폴더의 원본 파일은 지우지 않고 제외 목록에 넣는다."""
+        p = Path(path or "")
+        key = str(p.resolve()) if str(path or "").strip() else ""
+        if not key or not self._store.get_document(key) and not p.exists():
+            raise ValueError("저장소에 없는 규정입니다")
+        if self._is_managed(p):
+            p.unlink(missing_ok=True)
+            mode = "deleted"
+        else:
+            ex = [x for x in self._cfg.settings.excluded_docs if x != key] + [key]
+            self.save_settings({"excluded_docs": ex})
+            mode = "excluded"
+        cats = dict(self._cfg.settings.doc_categories or {})
+        if mode == "deleted" and cats.pop(key, None) is not None:     # 제외만 한 규정은 다시 넣을 때 분류를 되살린다
+            self.save_settings({"doc_categories": cats})
+        self._store.delete_document(key)
+        self._rag.invalidate()
+        return {"mode": mode, "name": p.name}
+
+    def restore_regulation(self, path: str) -> dict:
+        """제외했던 규정을 다시 저장소에 넣는다 (다시 색인)."""
+        ex = [x for x in self._cfg.settings.excluded_docs if x != path]
+        self.save_settings({"excluded_docs": ex})
+        return self.reindex(False)
+
+    def set_regulation_category(self, path: str, category: str) -> bool:
+        if category not in self.REG_CATEGORIES:
+            raise ValueError("분류는 " + "·".join(self.REG_CATEGORIES) + " 중에서 고르세요")
+        key = str(Path(path).resolve())
+        cats = dict(self._cfg.settings.doc_categories or {})
+        cats[key] = category
+        self.save_settings({"doc_categories": cats})
+        self._store.set_document_category(key, category)
+        self._rag.invalidate()
+        return True
+
+    def replace_regulation(self, path: str, new_file: str) -> dict:
+        """개정된 규정으로 바꾼다: 새 파일을 추가하고 예전 규정은 저장소에서 뺀다."""
+        src = Path(new_file or "")
+        if not src.is_file() or src.suffix.lower() not in READABLE_EXT:
+            raise ValueError("규정 파일(HWP·HWPX·PDF·DOCX·XLSX·TXT 등)을 고르세요")
+        old = Path(path)
+        if old.resolve() != src.resolve():
+            same_place = self._is_managed(old) and old.name == src.name
+            if not same_place:                 # 같은 이름이면 사본을 덮어쓰므로 지우지 않는다
+                self.delete_regulation(path)
+        return self.import_regulations([str(src)])
 
     def add_regulation_dir(self, path: str) -> dict:
         if not path or not Path(path).exists():
@@ -508,10 +580,8 @@ class Api:
         return self.save_settings({"regulation_dirs": dirs})
 
     def import_regulations(self, paths: list[str]) -> dict:
-        """파일을 기본 규정 폴더로 복사한 뒤 색인."""
-        target = Path(self._cfg.settings.regulation_dirs[0]) if self._cfg.settings.regulation_dirs \
-            else self._cfg.home / "regulations"
-        target.mkdir(parents=True, exist_ok=True)
+        """파일을 프로그램 전용 규정 폴더로 복사한 뒤 색인 (원본은 그대로 둔다)."""
+        target = self._managed_reg_dir()
         copied = []
         for p in paths or []:
             src = Path(p)
@@ -520,6 +590,9 @@ class Api:
                 if src.resolve() != dest.resolve():
                     shutil.copy2(src, dest)
                 copied.append(dest.name)
+                key = str(dest.resolve())          # 예전에 뺐던 같은 규정을 다시 넣으면 제외 목록에서 푼다
+                if key in self._cfg.settings.excluded_docs:
+                    self.save_settings({"excluded_docs": [x for x in self._cfg.settings.excluded_docs if x != key]})
         return {"copied": copied, **self.reindex(False)}
 
     def reindex(self, force: bool = False) -> dict:
@@ -576,9 +649,53 @@ class Api:
                 job.message = "절차를 정리하고 로컬 AI가 서식 초안을 다듬는 중…"
             res = guide_mod.make_guide(situation, lambda q: self._rag.search(q), client, model,
                                        num_ctx=self._cfg.settings.num_ctx)
+            self._match_org_forms(res)
             res["id"] = self._store.add_guide(situation, res)
             return res
         return self._run_job("guide", work)
+
+    # ---- 기관 서식 (올려 둔 서식 그대로 채우기)
+    def _forms(self) -> forms_mod.FormStore:
+        return forms_mod.FormStore(self._cfg.home / "forms")
+
+    def _match_org_forms(self, res: dict) -> None:
+        store = self._forms()
+        for f in res.get("forms") or []:
+            f["template"] = store.match(f["name"])
+
+    def list_forms(self) -> dict:
+        return {"forms": self._forms().list(), "folder": str(self._cfg.home / "forms")}
+
+    def add_forms(self, paths: list[str]) -> dict:
+        """기관 서식(HWPX·DOCX·TXT)을 올린다. 원본은 그대로 두고 프로그램 폴더에 사본을 둔다."""
+        added = self._forms().add(paths)
+        return dict(self.list_forms(), added=added)
+
+    def delete_form(self, name: str) -> dict:
+        self._forms().delete(name)
+        return self.list_forms()
+
+    def fill_guide_form(self, guide_id: int, form_index: int, body: str = "", template: str = "") -> dict:
+        """상황 안내의 서식 초안을 올려 둔 기관 서식에 채워 새 파일로 저장한다."""
+        g = self._store.get_guide(int(guide_id))
+        if not g:
+            raise ValueError("안내 기록을 찾을 수 없습니다. 상황 안내를 다시 받아 주세요.")
+        res = g["result"]
+        drafts = res.get("forms") or []
+        draft = drafts[int(form_index)] if 0 <= int(form_index) < len(drafts) else {"name": "서식", "body": ""}
+        name = (template or draft.get("template") or "").strip()
+        path = self._forms().path(name) if name else None
+        if not path:
+            raise ValueError("채울 기관 서식을 고르세요 (상황 안내 화면의 '기관 서식'에서 서식 파일을 올릴 수 있습니다)")
+        s = self._cfg.settings
+        profile = {"user_name": s.user_name, "user_dept": s.user_dept, "user_phone": s.user_phone}
+        vals = forms_mod.Values(forms_mod.situation_values(res.get("situation") or {}, profile),
+                                forms_mod.body_values(body or draft.get("body", "")))
+        folder = s.resolved_download_root() / "서식 초안"
+        folder.mkdir(parents=True, exist_ok=True)
+        out = unique_path(folder / f"{safe_name(path.stem, 60)}_{datetime.now().strftime('%Y%m%d')}{path.suffix.lower()}")
+        r = forms_mod.fill_file(path, vals, out)
+        return {"path": str(out), "folder": str(folder), "template": path.stem, **r}
 
     def guide_history(self) -> list[dict]:
         return [{"id": g["id"], "situation": g["situation"], "created_at": g["created_at"],

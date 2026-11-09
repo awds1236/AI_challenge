@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import threading
 from collections import Counter
@@ -233,6 +234,7 @@ class RAGEngine:
 
     # ---------- 색인 ----------
     def scan_files(self) -> list[Path]:
+        excluded = {os.path.normcase(str(Path(x).resolve())) for x in (self.settings().excluded_docs or [])}
         files: list[Path] = []
         for d in self.settings().regulation_dirs:
             p = Path(d).expanduser()
@@ -241,7 +243,7 @@ class RAGEngine:
             elif p.is_dir():
                 files.extend(f for f in p.rglob("*") if f.is_file() and f.suffix.lower() in READABLE_EXT
                              and not f.name.startswith(("~$", ".")))
-        return sorted(set(files))
+        return sorted(f for f in set(files) if os.path.normcase(str(f.resolve())) not in excluded)
 
     def reindex(self, force: bool = False) -> dict:
         if self.progress["running"]:
@@ -281,7 +283,8 @@ class RAGEngine:
                                 c["embedding"] = pack_vec(v) if v else None
                     except LLMError as e:
                         self.progress["errors"].append(f"{f.name}: 임베딩 생략 ({e})")
-                self.store.replace_document(key, title, guess_category(f, text), st.st_mtime, st.st_size, chunks)
+                cat = (s.doc_categories or {}).get(key) or guess_category(f, text)
+                self.store.replace_document(key, title, cat, st.st_mtime, st.st_size, chunks)
                 added += 1
                 self.progress["done"] += 1
             for doc in self.store.list_documents():

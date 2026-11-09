@@ -16,7 +16,7 @@ CATALOG: list[dict] = [
         "id": "gemma4:e2b-it-qat",
         "dl": {"repo": "google/gemma-4-E2B-it-qat-q4_0-gguf", "file": "gemma-4-E2B_q4_0-it.gguf", "as": "gemma-4-E2B-it-QAT-Q4_0", "gb": 3.3}, "quant": "Q4_0", "name": "Gemma 4 E2B", "vendor": "Google", "kind": "chat",
         "install": "pull", "download_gb": 4.5, "min_ram_gb": 8, "license": "Apache 2.0",
-        "badge": "기본 · 추천", "korean": "다국어", "variant": "QAT 경량판",
+        "badge": "기본 · 추천", "korean": "다국어", "variant": "QAT 경량판", "gov": True,
         "alt": ["gemma4:e2b", "gemma4:e2b-it-q4_K_M"],
         "gguf": ["gemma-4-e2b", "gemma4-e2b", "gemma-4-2b"],
         "hf": "https://huggingface.co/models?search=gemma-4-E2B-it%20gguf",
@@ -28,7 +28,7 @@ CATALOG: list[dict] = [
         "id": "gemma4:e4b-it-qat",
         "dl": {"repo": "google/gemma-4-E4B-it-qat-q4_0-gguf", "file": "gemma-4-E4B_q4_0-it.gguf", "as": "gemma-4-E4B-it-QAT-Q4_0", "gb": 5.2}, "quant": "Q4_0", "name": "Gemma 4 E4B", "vendor": "Google", "kind": "chat",
         "install": "pull", "download_gb": 6.1, "min_ram_gb": 16, "license": "Apache 2.0",
-        "badge": "고성능", "korean": "다국어", "variant": "QAT 경량판",
+        "badge": "고성능", "korean": "다국어", "variant": "QAT 경량판", "gov": True,
         "alt": ["gemma4:e4b", "gemma4:latest", "gemma4:e4b-it-q4_K_M"],
         "gguf": ["gemma-4-e4b", "gemma4-e4b", "gemma-4-4b"],
         "hf": "https://huggingface.co/models?search=gemma-4-E4B-it%20gguf",
@@ -53,6 +53,18 @@ CATALOG: list[dict] = [
         "hf": "https://huggingface.co/models?search=kanana-2-1.3b-instruct%20gguf",
         "gguf": ["kanana-2-1.3b", "kanana-2-1_3b"],
         "desc": "가장 가벼운 한국어 모델. 저사양 PC에서 빠르게 동작합니다.",
+    },
+    {
+        "id": "exaone3.5:2.4b",
+        "dl": {"repo": "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct-GGUF", "file": "EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf", "as": "EXAONE-3.5-2.4B-Instruct-Q4_K_M", "gb": 1.6}, "quant": "Q4_K_M", "name": "EXAONE 3.5 2.4B", "vendor": "LG AI연구원", "kind": "chat",
+        "install": "pull", "download_gb": 1.6, "min_ram_gb": 6, "license": "EXAONE 1.1-NC",
+        "badge": "공통기반 · 국산", "korean": "한국어 특화", "gov": True,
+        "alt": ["exaone3.5:2.4b-instruct-q4_K_M"],
+        "gguf": ["exaone-3.5-2.4b"],
+        "hf": "https://huggingface.co/LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct-GGUF",
+        "desc": "행정안전부 AI 공통기반이 지원하는 엑사원(EXAONE) 계열의 경량 모델. 한국어에 강하고 가벼워 일반 사무용 PC에서 "
+                "동작합니다. LG 공식 GGUF 파일을 받습니다. 비상업 라이선스(EXAONE AI Model License 1.1-NC)이므로 "
+                "기관 업무에 정식으로 쓰기 전 라이선스를 확인하세요.",
     },
     {
         "id": "embeddinggemma",

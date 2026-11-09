@@ -125,6 +125,9 @@ class Store:
             c.commit()
             return doc_id
 
+    def set_document_category(self, path: str, category: str) -> None:
+        self.execute("UPDATE documents SET category=? WHERE path=?", (category, path))
+
     def delete_document(self, path: str) -> None:
         self.execute("DELETE FROM documents WHERE path=?", (path,))
 

@@ -139,9 +139,19 @@
           <div class="card empty-note muted" id="guide-empty">상황을 입력하고 [안내 받기]를 누르세요.<br>
             예: 출장·연가·병가·물품 구매·시간외근무·회의 개최 등. 날짜를 함께 말하면 기한을 날짜로 계산합니다.</div>
         </div>
-        <div class="card guide-history">
-          <div class="card-head"><h3>최근 안내</h3></div>
-          <ul class="guide-hist" id="guide-hist"></ul>
+        <div class="guide-side">
+          <div class="card guide-history">
+            <div class="card-head"><h3>최근 안내</h3></div>
+            <ul class="guide-hist" id="guide-hist"></ul>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>기관 서식</h3><button class="btn sm" id="form-add">올리기</button></div>
+            <div class="dropzone" id="drop-forms">
+              <div class="muted small">우리 기관 서식(HWPX·DOCX·TXT)을 끌어다 놓으세요. 초안 내용을 <b>그 서식 그대로</b> 채워 새 파일로 만듭니다.
+                표의 항목 칸(출장기간·성명 등) 옆 빈칸, '항목 :' 줄, <code>{{성명}}</code> 같은 자리표시를 채웁니다. HWP는 한글에서 HWPX로 저장해 올려 주세요.</div>
+            </div>
+            <ul class="guide-hist" id="form-list"></ul>
+          </div>
         </div>
       </div>
     </section>
@@ -396,10 +406,13 @@
         <div class="card-head"><h3>색인된 문서</h3><span class="muted small" id="lib-count"></span></div>
         <div class="table-wrap">
           <table class="table">
-            <thead><tr><th>문서</th><th>분류</th><th>조문/단락</th><th>색인 일시</th><th></th></tr></thead>
+            <thead><tr><th>문서</th><th>분류</th><th>조문/단락</th><th>색인 일시</th><th>관리</th></tr></thead>
             <tbody id="lib-docs"></tbody>
           </table>
         </div>
+        <div class="muted small" style="margin-top:8px">[교체]는 개정된 규정 파일로 바꾸고, [삭제]는 저장소에서 뺍니다.
+          화면에서 추가한 규정은 프로그램 폴더의 사본만 지우고, 연결한 폴더의 원본 파일은 지우지 않고 목록에서만 뺍니다.</div>
+        <div id="lib-excluded"></div>
       </div>
     </section>
 

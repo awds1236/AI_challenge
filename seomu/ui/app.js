@@ -183,8 +183,30 @@ function go(page) {
 }
 
 // ------------------------------------------------------------------ 상황 안내 (서무비서)
-let guideCur = null;
+let guideCur = null, orgForms = [];
+async function loadForms() {
+  try {
+    const r = await api("list_forms");
+    orgForms = r.forms || [];
+    $("#form-list").innerHTML = orgForms.length ? orgForms.map((f) => `<li>
+      <div class="t">${esc(f.name)} <span class="badge">${esc(f.ext.toUpperCase())}</span></div>
+      <div class="muted small row tight"><span>${f.fields.length ? `채울 칸: ${esc(f.fields.slice(0, 5).join(", "))}${f.fields.length > 5 ? " 등" : ""}` : "채울 칸을 찾지 못함"}</span>
+        <span class="spacer"></span><button class="btn ghost sm" data-open="${esc(f.path)}">열기</button>
+        <button class="btn ghost sm danger" data-fdel="${esc(f.name)}" title="서식 삭제">${svg("trash")}</button></div></li>`).join("")
+      : `<li class="muted small">올린 기관 서식이 없습니다.</li>`;
+  } catch (e) { $("#form-list").innerHTML = `<li class="muted small">${esc(e.message)}</li>`; }
+}
+async function addForms(paths) {
+  if (!paths || !paths.length) return;
+  try {
+    const r = await api("add_forms", paths);
+    toast(`기관 서식 ${r.added.length}개를 올렸습니다`, "ok");
+    await loadForms();
+    if (guideCur) renderGuide(guideCur);
+  } catch (e) { toast(e.message, "err", 8000); }
+}
 async function loadGuide() {
+  loadForms();
   try {
     const h = await api("guide_history");
     $("#guide-hist").innerHTML = h.length ? h.map((g) => `<li data-gid="${g.id}" class="${guideCur && guideCur.id === g.id ? "on" : ""}">
@@ -238,6 +260,11 @@ function renderGuide(r) {
         <button class="btn sm" data-fcopy="${i}">${svg("copy")} 복사</button>
         <button class="btn sm" data-fsave="${i}" data-fmt="txt">${svg("download")} txt 저장</button>
         <button class="btn sm" data-fsave="${i}" data-fmt="hwpx">${svg("doc")} 한글(hwpx) 저장</button></div>
+      ${orgForms.length ? `<div class="row tight wrap org-form-row"><span class="muted small">기관 서식</span>
+        <select class="input sm" data-ftpl="${i}"><option value="">고르세요</option>${orgForms.map((o) =>
+          `<option ${o.name === f.template ? "selected" : ""}>${esc(o.name)}</option>`).join("")}</select>
+        <button class="btn primary sm" data-ffill="${i}">${svg("doc")} 기관 서식으로 작성</button>
+        ${f.template ? '<span class="badge green">이름이 맞는 서식을 골라 두었습니다</span>' : ""}</div>` : ""}
       <textarea class="input mono" rows="${Math.min(24, f.body.split("\n").length + 1)}" data-fbody="${i}">${esc(f.body)}</textarea>
     </div>`).join("");
   const tasks = (r.tasks || []).map((t, i) => `
@@ -269,7 +296,22 @@ function renderGuide(r) {
     </div>
     ${src ? `<div class="card"><div class="card-head"><h3>근거 조문</h3></div><ul class="guide-src">${src}</ul></div>` : ""}`;
 }
+function bindForms() {
+  $("#form-add").addEventListener("click", async () => {
+    if (!state.info.native) return toast("브라우저 모드에서는 서식 파일을 끌어다 놓아 주세요", "info");
+    addForms(await pickFiles(true));
+  });
+  setupDrop($("#drop-forms"), addForms);
+  $("#form-list").addEventListener("click", async (e) => {
+    const d = e.target.closest("[data-fdel]");
+    if (!d || !confirm(`'${d.dataset.fdel}' 서식을 지울까요? (처음 올린 원본 파일은 그대로 있습니다)`)) return;
+    try { await api("delete_form", d.dataset.fdel); } catch (er) { toast(er.message, "err"); }
+    await loadForms();
+    if (guideCur) renderGuide(guideCur);
+  });
+}
 function bindGuide() {
+  bindForms();
   $("#guide-form").addEventListener("submit", (e) => { e.preventDefault(); askGuide(); });
   $("#guide-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); askGuide(); }
@@ -292,7 +334,17 @@ function bindGuide() {
     } catch (er) { toast(er.message, "err"); }
   });
   $("#guide-result").addEventListener("click", async (e) => {
-    const cp = e.target.closest("[data-fcopy]"), sv = e.target.closest("[data-fsave]");
+    const cp = e.target.closest("[data-fcopy]"), sv = e.target.closest("[data-fsave]"), fl = e.target.closest("[data-ffill]");
+    if (fl) {
+      const i = fl.dataset.ffill, tpl = $(`[data-ftpl="${i}"]`).value;
+      if (!tpl) return toast("채울 기관 서식을 고르세요", "info");
+      try {
+        const r = await api("fill_guide_form", guideCur.id, Number(i), $(`[data-fbody="${i}"]`).value, tpl);
+        toast(`'${r.template}' 서식에 ${r.filled.length}칸을 채웠습니다` + (r.missing.length ? ` · 비워 둔 칸: ${r.missing.slice(0, 4).join(", ")}` : ""), "ok", 7000);
+        openPath(r.folder);
+      } catch (er) { toast(er.message, "err", 8000); }
+      return;
+    }
     if (cp) { await copyText($(`[data-fbody="${cp.dataset.fcopy}"]`).value); return toast("초안을 복사했습니다", "ok"); }
     if (sv) {
       const f = guideCur.forms[Number(sv.dataset.fsave)];
@@ -739,10 +791,20 @@ async function loadLibrary() {
     <button class="btn ghost sm" data-open="${esc(d)}">열기</button>${r.dirs.length > 1 ? `<button class="btn ghost sm danger" data-rmdir="${esc(d)}">${svg("trash")}</button>` : ""}</li>`).join("");
   $("#lib-count").textContent = `${r.documents.length}건`;
   const catBadge = (c) => `<span class="badge ${c === "법령" ? "purple" : c === "조례" ? "blue" : c === "내규" ? "green" : ""}">${esc(c)}</span>`;
-  $("#lib-docs").innerHTML = r.documents.length ? r.documents.map((d) => `<tr><td><b>${esc(d.title)}</b></td><td>${catBadge(d.category)}</td>
+  const cats = r.categories || [];
+  $("#lib-docs").innerHTML = r.documents.length ? r.documents.map((d) => `<tr><td><b>${esc(d.title)}</b>
+      <div class="muted small">${d.managed ? "화면에서 추가한 규정" : "연결한 폴더의 원본"}</div></td>
+    <td><select class="input sm lib-cat" data-cat="${esc(d.path)}" title="분류 바꾸기">${(cats.includes(d.category) ? cats : [d.category, ...cats])
+      .map((c) => `<option ${c === d.category ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></td>
     <td>${d.n_chunks}</td><td class="muted">${esc(d.indexed_at.replace("T", " ").slice(0, 16))}</td>
-    <td><button class="btn ghost sm" data-open="${esc(d.path)}">열기</button></td></tr>`).join("")
+    <td class="nowrap"><button class="btn ghost sm" data-open="${esc(d.path)}">열기</button>
+      <button class="btn ghost sm" data-replace="${esc(d.path)}" title="개정된 규정 파일로 바꾸기">교체</button>
+      <button class="btn ghost sm danger" data-rmdoc="${esc(d.path)}" data-managed="${d.managed ? 1 : 0}" title="저장소에서 빼기">${svg("trash")}</button></td></tr>`).join("")
     : `<tr><td colspan="5" class="empty-state">아직 색인된 문서가 없습니다. 파일을 추가하고 '색인 갱신'을 누르세요.</td></tr>`;
+  const ex = r.excluded || [];
+  $("#lib-excluded").innerHTML = ex.length ? `<div class="guide-sub">저장소에서 뺀 규정 (원본 파일은 그대로 있음)</div>
+    <ul class="list">${ex.map((x) => `<li><div class="main-col"><div class="t">${esc(x.name)}</div><div class="s">${esc(x.path)}${x.exists ? "" : " · 파일 없음"}</div></div>
+      <button class="btn ghost sm" data-restore="${esc(x.path)}">다시 포함</button></li>`).join("")}</ul>` : "";
   showProgress(r.progress);
 }
 function showProgress(p) {
@@ -854,7 +916,7 @@ async function loadModels() {
         ${m.id === rec.model ? '<span class="badge green">내 PC 추천</span>' : ""}<span class="badge ${m.kind === "embed" ? "purple" : "blue"}">${esc(m.badge)}</span></div>
       <div class="desc">${esc(m.desc)}</div>
       <div class="meta"><span class="badge">약 ${gb}GB</span><span class="badge">RAM ${m.min_ram_gb}GB+</span>
-        <span class="badge">${esc(m.license)}</span><span class="badge">${esc(m.korean)}</span>${m.variant ? `<span class="badge green">${esc(m.variant)}</span>` : ""}
+        <span class="badge">${esc(m.license)}</span><span class="badge">${esc(m.korean)}</span>${m.variant ? `<span class="badge green">${esc(m.variant)}</span>` : ""}${m.gov ? '<span class="badge blue" title="행정안전부 AI 공통기반 지원(또는 지원 예정) 모델 계열">공통기반 지원</span>' : ""}
         ${m.installed && m.installed_id !== m.id && m.installed_id !== m.id + ":latest" ? `<span class="badge">설치됨: ${esc(m.installed_id)}</span>` : ""}</div>
       ${m.fits ? "" : '<div class="warn">⚠ 이 PC 메모리로는 느리거나 실행되지 않을 수 있습니다</div>'}
       <div class="actions">
@@ -1134,6 +1196,45 @@ function bind() {
   $("#lib-reindex-force").addEventListener("click", () => reindex(true));
   $("#lib-dir-add").addEventListener("click", async () => { try { await api("add_regulation_dir", $("#lib-dir-input").value.trim()); $("#lib-dir-input").value = ""; loadLibrary(); toast("폴더를 추가했습니다. '색인 갱신'을 눌러 주세요.", "ok"); } catch (e) { toast(e.message, "err"); } });
   $("#lib-dir-pick").addEventListener("click", async () => { if (!state.info.native) return toast("브라우저 모드에서는 경로를 직접 입력해 주세요", "info"); const p = await api("pick_folder"); if (p) $("#lib-dir-input").value = p; });
+  $("#lib-docs").addEventListener("change", async (e) => {
+    const sel = e.target.closest("[data-cat]");
+    if (!sel) return;
+    try { await api("set_regulation_category", sel.dataset.cat, sel.value); toast(`분류를 '${sel.value}'(으)로 바꿨습니다`, "ok"); }
+    catch (er) { toast(er.message, "err"); loadLibrary(); }
+  });
+  $("#lib-docs").addEventListener("click", async (e) => {
+    const rm = e.target.closest("[data-rmdoc]"), rp = e.target.closest("[data-replace]");
+    if (rm) {
+      const managed = rm.dataset.managed === "1";
+      const name = baseName(rm.dataset.rmdoc);
+      if (!confirm(managed ? `'${name}' 규정을 저장소에서 삭제할까요?\n(프로그램 폴더의 사본만 지우며 처음 추가한 원본 파일은 그대로 있습니다)`
+        : `'${name}' 규정을 저장소에서 뺄까요?\n(연결한 폴더의 원본 파일은 지우지 않고 검색·안내에서만 제외합니다. 아래 목록에서 다시 포함할 수 있습니다)`)) return;
+      try {
+        const r = await api("delete_regulation", rm.dataset.rmdoc);
+        toast(r.mode === "deleted" ? `'${r.name}'을(를) 삭제했습니다` : `'${r.name}'을(를) 저장소에서 뺐습니다`, "ok");
+      } catch (er) { toast(er.message, "err"); }
+      return loadLibrary();
+    }
+    if (rp) {
+      let p = "";
+      if (state.info.native) { const r = await api("pick_files", false); p = r && r[0]; }
+      else p = prompt("개정된 규정 파일의 경로를 입력하세요", "") || "";
+      if (!p) return;
+      try {
+        await runJob("replace_regulation", [rp.dataset.replace, p], async () => { const r = await api("list_documents"); showProgress(r.progress); });
+        showProgress(null);
+        toast(`'${baseName(p)}'(으)로 바꿨습니다`, "ok");
+      } catch (er) { toast(er.message, "err"); showProgress(null); }
+      return loadLibrary();
+    }
+  });
+  $("#lib-excluded").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-restore]");
+    if (!b) return;
+    try { await runJob("restore_regulation", [b.dataset.restore]); toast("다시 저장소에 넣었습니다", "ok"); }
+    catch (er) { toast(er.message, "err"); }
+    loadLibrary();
+  });
   $("#lib-dirs").addEventListener("click", async (e) => { const b = e.target.closest("[data-rmdir]"); if (b && confirm("저장소 목록에서 제거할까요? (파일은 삭제되지 않습니다)")) { await api("remove_regulation_dir", b.dataset.rmdir); reindex(false); } });
   setupDrop($("#drop-lib"), importLibFiles);
   $("#lib-pick-files").addEventListener("click", async () => importLibFiles(await pickFiles(true)));

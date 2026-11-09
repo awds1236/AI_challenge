@@ -47,6 +47,8 @@ class Settings:
 
     # 저장소
     regulation_dirs: list[str] = field(default_factory=list)
+    excluded_docs: list[str] = field(default_factory=list)      # 저장소에서 뺀 규정 (외부 폴더 원본은 지우지 않는다)
+    doc_categories: dict = field(default_factory=dict)          # 규정별로 직접 정한 분류 {경로: 조례/법령/내규/지침/서식/기타}
     download_root: str = ""       # 비워두면 <다운로드>/서무비서
     top_k: int = 6
 
@@ -128,6 +130,8 @@ class Config:
                     raise ValueError(f"'{NUMBER_LABELS.get(k, k)}' 칸에는 숫자를 입력하세요 (입력한 값: {v})") from None
             elif isinstance(cur, list):
                 v = [str(x) for x in (v or []) if str(x).strip()]
+            elif isinstance(cur, dict):
+                v = {str(a): str(b) for a, b in dict(v or {}).items() if str(a).strip() and str(b).strip()}
             else:
                 v = "" if v is None else str(v)
             new[k] = v
