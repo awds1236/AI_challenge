@@ -114,6 +114,11 @@ def setup_logging() -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for _s in (sys.stdout, sys.stderr):      # 한글 출력이 cp1252 같은 콘솔에서 멈추지 않게
+        try:
+            _s.reconfigure(errors="replace")
+        except Exception:
+            pass
     ap = argparse.ArgumentParser(prog="seomu", description=f"{APP_NAME} - 로컬 경량 AI 서무 보조 프로그램")
     ap.add_argument("--browser", action="store_true", help="프로그램 창 대신 기본 브라우저로 실행")
     ap.add_argument("--app-window", action="store_true", help="pywebview 대신 Edge/Chrome 앱 모드 창 사용")
