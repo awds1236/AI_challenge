@@ -29,7 +29,9 @@ IS_WIN = sys.platform.startswith("win")
 DOC_EXT = {".hwp", ".hwpx", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".txt",
            ".csv", ".jpg", ".jpeg", ".png", ".odt", ".ods", ".show", ".cell", ".egg", ".7z", ".gul"}
 PARTIAL_EXT = {".crdownload", ".part", ".tmp", ".download", ".partial"}
-BODY_COPY_NAMES = ("본문복사", "본문 복사")
+# 본문복사와 같은 일을 하는 버튼 (뷰어마다 이름이 다르다). '복사'만 있는 버튼은 문서 사본 만들기일 수 있어 넣지 않는다
+BODY_COPY_NAMES = ("본문복사", "본문 복사", "내용복사", "내용 복사", "본문텍스트복사", "본문 텍스트 복사", "텍스트복사",
+                   "텍스트 복사", "글자복사", "글자 복사", "전체복사", "전체 복사", "본문 클립보드", "Copy Text")
 SAVE_NAMES = ("PC저장", "PC 저장", "일괄저장", "일괄 저장", "모두 저장", "전체 저장", "붙임저장", "첨부저장",
               "전체 다운로드", "일괄 다운로드", "모두 다운로드", "다운로드", "Download")
 SELF_TITLES = ("서무비서 AI",)
@@ -68,6 +70,19 @@ def work_dir() -> Path:
 def is_own_temp(path: str | Path) -> bool:
     p = Path(path)
     return p.name.lower().startswith("seomu_") or WORK_DIR_NAME in {x.lower() for x in p.parts}
+
+
+_OCR_BODY_OK = False
+
+
+def set_ocr_body_allowed(value: bool) -> None:
+    global _OCR_BODY_OK
+    _OCR_BODY_OK = bool(value)
+
+
+def ocr_body_allowed() -> bool:
+    """본문을 화면 글자 인식(OCR)으로 읽을지 (설정 '글자 인식으로도 읽기'). 버튼 위치 찾기에는 상관없이 쓴다."""
+    return _OCR_BODY_OK
 
 
 def copy_allowed() -> bool:
@@ -1001,11 +1016,20 @@ class capturable:
 
     WS_EX_LAYERED, LWA_ALPHA = 0x00080000, 0x2
 
-    def __init__(self, hwnd: int, trace: list | None = None):
+    def __init__(self, hwnd: int, trace: list | None = None, visible: bool = False):
         self.hwnd, self.trace, self.orig, self.ex = hwnd, trace, None, None
+        self.visible, self.reminimize = visible, False
 
     def __enter__(self):
         if not IS_WIN or not user32.IsIconic(self.hwnd):
+            return self
+        if self.visible:
+            # 본문복사 버튼 누르기·전체 선택·복사를 하려면 사람이 보는 그대로 펼쳐야 한다 → 끝나면 다시 최소화
+            user32.ShowWindow(self.hwnd, 9)                    # SW_RESTORE
+            time.sleep(0.6)
+            self.reminimize = True
+            if self.trace is not None:
+                self.trace.append("최소화된 창: 잠깐 펼쳐 읽고 다시 최소화")
             return self
         try:
             wp = WINDOWPLACEMENT()
@@ -1031,6 +1055,12 @@ class capturable:
         return self
 
     def __exit__(self, *exc):
+        if self.reminimize:
+            try:
+                user32.ShowWindow(self.hwnd, 7)                # SW_SHOWMINNOACTIVE: 원래대로 최소화
+            except Exception:
+                pass
+            self.reminimize = False
         if self.orig is not None:
             try:
                 self.orig.showCmd = 7                          # SW_SHOWMINNOACTIVE: 원래 위치 기록 그대로 최소화
@@ -1460,9 +1490,10 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
                  trace: list | None = None, found: dict | None = None) -> tuple[str, str]:
     """(본문, 사용한 방법). trace에 단계별 기록을 남긴다.
 
-    모두 창을 앞으로 가져오지 않고 뒤에서 읽는다 (사용자 작업을 방해하지 않는다):
-    본문복사 버튼 → 창에 열린 문서 파일 → UI Automation 글자 정보 → 편집 칸 → 문서 파일 찾기 → 화면 넘김 글자 인식(OCR).
-    '창을 앞으로 가져오기'를 허용했을 때만 OCR 전에 전체 선택·복사(Ctrl+A/C)를 한다 (키보드 입력은 맨 앞 창에만 들어간다).
+    글자를 그대로 가져오는 방법만 쓴다:
+    본문복사(와 같은 일을 하는) 버튼 → 창에 열린 문서 파일 → UI Automation 글자 정보 → 편집 칸 → 문서 파일 찾기
+    → 전체 선택·복사(Ctrl+A/C, 창을 앞으로 가져오기 허용 시) → (설정에서 켰을 때만) 화면 글자 인식(OCR).
+    끝나면 원래 앞에 있던 창으로 되돌린다.
     found["html"]에는 복사한 HTML(붙임 링크 포함)을 넣어 준다 (있을 때).
     어느 방법도 충분하지 않으면 그중 가장 긴 결과라도 돌려준다 (빈손으로 끝내지 않는다).
     found["document"]에는 창에 열려 있던 문서 파일 경로를 넣어 준다 (찾았을 때)."""
@@ -1471,6 +1502,7 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
     if not IS_WIN:
         return "", ""
     previous = get_clipboard()
+    prev_front = int(user32.GetForegroundWindow() or 0)
     marker = f"__seomu_{time.time()}__"
     partial: list[tuple[str, str]] = []           # 기준에 못 미친 결과 (마지막에 가장 나은 것을 쓴다)
 
@@ -1539,7 +1571,10 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
             keep(t, "전체 선택·복사 (일부)")
         else:
             trace.append("전체 선택·복사 생략: 창을 앞으로 가져오지 않는 설정 (뒤에서 되는 방법만 사용)")
-        # ⑦ 마지막: 창 화면을 그려 받아(PrintWindow, 가려져 있어도 됨) 글자 인식 — 화면을 넘겨 가며 끝까지
+        # ⑦ 화면 글자 인식(OCR): 도구모음·메뉴 글자가 섞이고 틀린 글자가 생겨 설정에서 켰을 때만
+        if not ocr_body_allowed():
+            trace.append("화면 글자 인식(OCR) 생략: 설정에서 끔 — 그 창에서 직접 복사(Ctrl+A, Ctrl+C)하면 바로 받는다")
+            return _best(partial, trace)
         log("화면 글자 인식(OCR)으로 본문을 읽는 중…")
         t = scroll_ocr_body(hwnd, log, trace)
         trace.append(f"OCR 본문: {len(t)}자")
@@ -1550,6 +1585,8 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
     finally:
         if previous:
             set_clipboard(previous)
+        if prev_front and prev_front != int(user32.GetForegroundWindow() or 0) and user32.IsWindow(prev_front):
+            activate(prev_front)                          # 버튼을 누르느라 앞으로 가져온 창 → 보던 창으로
 
 
 def _parent_pid(pid: int) -> int:

@@ -1012,6 +1012,7 @@ class Api:
                        ((winwindow.window_info(picked) or {}).get("title") or win["title"]))
 
         winwindow.set_foreground_allowed(self._cfg.settings.capture_foreground)
+        winwindow.set_ocr_body_allowed(self._cfg.settings.capture_ocr_body)
 
         def work(job: Job):
             say = lambda m: setattr(job, "message", m)  # noqa: E731
@@ -1021,7 +1022,8 @@ class Api:
             hwnd_ = win["hwnd"]
             started = time.time()
             found: dict = {}
-            with winwindow.capturable(hwnd_, trace):            # 최소화된 창도 화면 밖에서 펼쳐 읽는다
+            # 최소화된 창: 앞으로 가져와도 되면 보이게 펼쳐 버튼·복사를 하고, 아니면 투명하게 펼쳐 뒤에서 읽는다
+            with winwindow.capturable(hwnd_, trace, visible=winwindow.foreground_allowed()):
                 text, how = winwindow.extract_text(hwnd_, say, trace, found)
                 shot = winwindow.capture_png(hwnd_)
                 # 뷰어의 '붙임목록'·'첨부파일' 칸 (본문 글자 인식은 본문 단만 읽어 옆·위 패널의 붙임 이름을 놓친다)

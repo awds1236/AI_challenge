@@ -116,3 +116,16 @@ def test_copied_text_from_our_own_screen_is_rejected():
             "모든 데이터는 이 PC에만 저장됩니다")
     assert ww.looks_like_our_ui(ours)
     assert not ww.looks_like_our_ui("2026년 하반기 중대시민재해 점검계획 알림\n자체점검표를 제출하여 주시기 바랍니다.")
+
+
+def test_ocr_body_reading_is_off_by_default(tmp_path):
+    """본문은 글자를 그대로 가져온다(본문복사 버튼 → 복사 붙여넣기). 화면 글자 인식은 설정에서 켰을 때만."""
+    from seomu.config import Config
+    s = Config(tmp_path).settings
+    assert s.capture_ocr_body is False and s.capture_foreground is True
+    ww.set_ocr_body_allowed(False)
+    assert not ww.ocr_body_allowed()
+    ww.set_ocr_body_allowed(True)
+    assert ww.ocr_body_allowed()
+    ww.set_ocr_body_allowed(False)
+    assert {"본문복사", "내용 복사", "전체 복사"} <= set(ww.BODY_COPY_NAMES) and "복사" not in ww.BODY_COPY_NAMES

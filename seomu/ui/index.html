@@ -175,7 +175,7 @@
           <ol class="steps">
             <li><b>공문 열기</b> — 업무 프로그램(전자문서 뷰어, 브라우저 등)에서 수집할 공문을 화면에 띄웁니다.</li>
             <li><b>창 선택</b> — 아래 목록에서 그 창을 고르고 <b>[이 창 수집]</b>을 누릅니다.</li>
-            <li><b>자동 정리</b> — 창을 앞으로 가져오지 않고 <b>뒤에서</b> 읽습니다(본문복사 버튼 → 열린 문서 파일 → 화면 글자 정보 → 화면 글자 인식). 보던 화면은 그대로입니다. 붙임은 본문의 붙임 링크·뷰어의 'PC저장' 버튼·PC에 받아진 파일로 모으고, 못 받은 붙임은 직접 올리도록 안내합니다.</li>
+            <li><b>자동 정리</b> — 본문은 글자를 그대로 가져옵니다: 뷰어의 <b>본문복사</b>(내용 복사 등) 버튼 → 없으면 <b>전체 선택·복사</b>. 이때 그 창이 1~2초 앞에 떴다가 보던 화면으로 돌아옵니다. 그래도 못 읽으면 그 창에서 Ctrl+A, Ctrl+C를 누르면 바로 받습니다. 붙임은 본문의 붙임 링크·뷰어의 'PC저장' 버튼·PC에 받아진 파일로 모으고, 못 받은 붙임은 직접 올리도록 안내합니다.</li>
           </ol>
           <div class="win-toolbar row">
             <input class="input grow" id="win-filter" placeholder="창 이름 검색 (예: 알림, 요청, 협조)">
@@ -185,7 +185,9 @@
           <div class="row end">
             <span class="muted small grow" id="win-hint"></span>
             <label class="switch-row" title="기본(끔): 창을 앞으로 가져오지 않고 뒤에서만 읽습니다 — 본문복사 버튼, 열린 문서 파일, 화면 글자 정보(UI Automation), 화면 글자 인식(OCR). 켜면 그 창을 잠깐 앞으로 가져와 전체 선택·복사(Ctrl+A/C)와 화면 클릭까지 시도합니다.">
-              <span>창을 앞으로 가져와 읽기 (복사·마우스)</span><input type="checkbox" class="switch" id="win-foreground"></label>
+              <span>본문복사·복사 붙여넣기 (창이 잠깐 앞에 뜸)</span><input type="checkbox" class="switch" id="win-foreground"></label>
+            <label class="switch-row" title="본문복사 버튼이나 복사 붙여넣기로 못 읽었을 때 화면 글자 인식(OCR)으로 읽습니다. 도구모음·메뉴 글자가 섞이거나 틀린 글자가 생길 수 있어 기본은 끔입니다.">
+              <span>글자 인식(OCR)으로도 읽기</span><input type="checkbox" class="switch" id="win-ocr"></label>
             <button class="btn primary" id="win-capture" disabled><i data-icon="download"></i>이 창 수집</button>
           </div>
         </div>
