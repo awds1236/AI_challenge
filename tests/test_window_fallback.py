@@ -108,3 +108,11 @@ def test_copy_needs_foreground_permission(monkeypatch):
     monkeypatch.setenv("SEOMU_NO_FOREGROUND", "1")
     assert not ww.copy_allowed()
     ww.set_foreground_allowed(False)
+
+
+def test_copied_text_from_our_own_screen_is_rejected():
+    """복사 결과에 서무비서 화면 글자가 들어 있으면 공문 본문으로 쓰지 않는다."""
+    ours = ("공문 수집\n열린 창에서 수집\n자동 정리 — 창을 앞으로 가져오지 않고 뒤에서 읽습니다\n규정 Q&A\n"
+            "모든 데이터는 이 PC에만 저장됩니다")
+    assert ww.looks_like_our_ui(ours)
+    assert not ww.looks_like_our_ui("2026년 하반기 중대시민재해 점검계획 알림\n자체점검표를 제출하여 주시기 바랍니다.")

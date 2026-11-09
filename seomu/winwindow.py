@@ -1430,6 +1430,9 @@ def click_any(hwnd: int, names: tuple[str, ...], check: Callable[[], bool] | Non
         trace.append(f"OCR 버튼 위치: {pos}")
         if pos:
             activate(hwnd)
+            if not (_really_on_screen(hwnd) and _is_front(hwnd)):
+                trace.append("화면 클릭 생략: 그 창이 맨 앞에 보이지 않음")
+                return ""
             real_click(*pos)
             if _wait(check, 3.0):
                 return "글자 인식 후 클릭"
@@ -1549,42 +1552,129 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
             set_clipboard(previous)
 
 
+def _parent_pid(pid: int) -> int:
+    """프로세스의 부모 프로세스 번호 (Toolhelp 스냅샷). 모르면 0."""
+    class PE32(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        snap = k32.CreateToolhelp32Snapshot(0x2, 0)          # TH32CS_SNAPPROCESS
+        if not snap or snap == wintypes.HANDLE(-1).value:
+            return 0
+        try:
+            e = PE32()
+            e.dwSize = ctypes.sizeof(PE32)
+            ok = k32.Process32FirstW(snap, ctypes.byref(e))
+            while ok:
+                if e.th32ProcessID == pid:
+                    return int(e.th32ParentProcessID)
+                ok = k32.Process32NextW(snap, ctypes.byref(e))
+        finally:
+            k32.CloseHandle(snap)
+    except Exception:
+        pass
+    return 0
+
+
+def is_our_process(pid: int) -> bool:
+    """서무비서 자신이거나 서무비서가 띄운 프로세스(화면 엔진 WebView2·앱 모드 Edge 등)인지."""
+    if not pid:
+        return False
+    me = os.getpid()
+    mine = {me}
+    parent = _parent_pid(me)
+    # 가상환경 실행기(.venv\Scripts\pythonw.exe)는 진짜 파이썬을 자식으로 띄운다 → 그 실행기까지만 우리 쪽.
+    # (부모가 탐색기·명령 창이면 포함하지 않는다: 탐색기에서 실행한 다른 프로그램까지 우리 쪽으로 보게 되므로)
+    if parent and _process_name(parent).lower() in ("python.exe", "pythonw.exe", "seomuai.exe"):
+        mine.add(parent)
+    cur, seen = pid, set()
+    for _ in range(6):
+        if cur in mine:
+            return True
+        if not cur or cur in seen:
+            return False
+        seen.add(cur)
+        cur = _parent_pid(cur)
+    return False
+
+
+# 서무비서 화면에만 있는 글자 — 복사 결과에 들어 있으면 공문이 아니라 서무비서 화면을 복사한 것이다
+_OWN_UI_MARKS = ("모든 데이터는 이 PC에만 저장됩니다", "창을 앞으로 가져오지 않고", "규정 Q&A", "열린 창에서 수집")
+
+
+def looks_like_our_ui(text: str) -> bool:
+    return sum(1 for m in _OWN_UI_MARKS if m in (text or "")) >= 2
+
+
 def _is_front(hwnd: int) -> bool:
-    """맨 앞(키보드 입력을 받는) 창이 그 창(또는 그 창과 같은 프로그램의 창)이고, 서무비서 자신이 아닌지."""
+    """맨 앞(키보드 입력을 받는) 창이 그 창(또는 그 창과 같은 프로그램의 창)이고, 서무비서 쪽 창이 아닌지."""
     fg = int(user32.GetForegroundWindow() or 0)
     if not fg:
         return False
-    if _pid(fg) == os.getpid() or _process_name(_pid(fg)).lower() in ("seomuai.exe", "python.exe", "pythonw.exe"):
+    if is_our_process(_pid(fg)) or _process_name(_pid(fg)).lower() in ("seomuai.exe",):
         return False
     root = int(user32.GetAncestor(fg, 2) or fg)        # GA_ROOT
     return fg == int(hwnd) or root == int(hwnd) or _pid(fg) == _pid(hwnd)
 
 
+def _really_on_screen(hwnd: int) -> bool:
+    """최소화·숨김·투명(글자 인식을 위해 투명하게 펼친 상태)이 아닌, 사람이 보는 창인지.
+    투명한 창에는 키·클릭이 그 아래 창(서무비서 등)으로 새어 들어갈 수 있다."""
+    if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+        return False
+    ex = user32.GetWindowLongW(hwnd, -20)                # GWL_EXSTYLE
+    if ex & 0x00080000:                                   # WS_EX_LAYERED: 투명도 확인
+        alpha = ctypes.c_ubyte(255)
+        flags = wintypes.DWORD(0)
+        try:
+            user32.GetLayeredWindowAttributes(hwnd, None, ctypes.byref(alpha), ctypes.byref(flags))
+            if flags.value & 0x2 and alpha.value < 30:    # LWA_ALPHA
+                return False
+        except Exception:
+            pass
+    l, t, r, b = _rect(hwnd)
+    vx, vy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)   # 여러 모니터를 합친 화면의 왼쪽 위
+    vw, vh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)
+    return r - l > 50 and b - t > 50 and l < vx + vw and t < vy + vh and r > vx and b > vy
+
+
+def _clipboard_owner_pid() -> int:
+    try:
+        user32.GetClipboardOwner.restype = wintypes.HWND
+        h = user32.GetClipboardOwner()
+        return _pid(h) if h else 0
+    except Exception:
+        return 0
+
+
 def copy_all(hwnd: int, trace: list, fresh: Callable[[], str], marker: str) -> tuple[str, str]:
-    """창을 잠깐 앞으로 가져와 전체 선택·복사하고, 원래 앞에 있던 창으로 되돌린다. (글자, HTML)"""
+    """창을 잠깐 앞으로 가져와 전체 선택·복사하고, 원래 앞에 있던 창으로 되돌린다. (글자, HTML)
+
+    키보드 입력은 맨 앞 창으로 가므로, 그 창이 사람이 보는 상태로 맨 앞에 있을 때만 키를 보내고
+    (마우스 클릭은 하지 않는다), 복사된 내용이 서무비서 쪽에서 온 것이면 버린다."""
+    if not _really_on_screen(hwnd):
+        trace.append("전체 선택·복사 생략: 창이 최소화·투명·화면 밖 상태 (키가 다른 창으로 갈 수 있음)")
+        return "", ""
     prev = int(user32.GetForegroundWindow() or 0)
     set_clipboard(marker)
     try:
         activate(hwnd)
-        if not _is_front(hwnd):
-            # Windows가 창 전환을 막았다 → 지금 맨 앞 창(서무비서 등)에 Ctrl+A/C가 들어가지 않게 키를 보내지 않는다
-            trace.append("전체 선택·복사 생략: 그 창을 앞으로 가져오지 못함 (Windows 창 전환 제한)")
-            return "", ""
-        trace.append("전체 선택·복사: 그 창이 맨 앞에 있음을 확인")
-        _hotkey(VK_CONTROL, 0x41)                     # 먼저 클릭 없이 (링크를 잘못 누르지 않게)
-        time.sleep(0.3)
-        _hotkey(VK_CONTROL, 0x43)
-        if not _wait(lambda: bool(fresh()), 1.5) and _is_front(hwnd):
-            doc = _largest_child(hwnd) or hwnd          # 글자 영역에 초점이 없으면 왼쪽 여백을 눌러 초점을 준다
-            l, t, r, b = _rect(doc)
-            if r - l > 50 and b - t > 50:
-                real_click(l + 6, t + (b - t) // 2)
-                time.sleep(0.2)
-                _hotkey(VK_CONTROL, 0x41)
-                time.sleep(0.3)
-                _hotkey(VK_CONTROL, 0x43)
-                _wait(lambda: bool(fresh()), 2.0)
+        for vk in (0x41, 0x43):                           # Ctrl+A, Ctrl+C — 키마다 맨 앞인지 다시 확인
+            if not _is_front(hwnd):
+                trace.append("전체 선택·복사 중단: 그 창이 맨 앞에 있지 않음 (Windows 창 전환 제한 또는 다른 창이 앞으로 옴)")
+                return "", ""
+            _hotkey(VK_CONTROL, vk)
+            time.sleep(0.3)
+        _wait(lambda: bool(fresh()), 1.5)
         text = fresh()
+        owner = _clipboard_owner_pid()
+        if text and (not _is_front(hwnd) or is_our_process(owner) or looks_like_our_ui(text)):
+            trace.append(f"전체 선택·복사 결과 버림: 서무비서 화면에서 복사된 내용 (클립보드 소유 프로세스 {owner})")
+            return "", ""
         html = get_clipboard_html() if text else ""
         trace.append(f"전체 선택·복사: 글자 {len(text)}자, HTML {'있음' if html else '없음'}")
         return text, html
@@ -1904,6 +1994,10 @@ def open_named_on_screen(hwnd: int, names: list[str], log: Callable[[str], None]
         before = {w["hwnd"] for w in list_windows()}
         x, y = left + best["x"] + min(best["w"] / 2, 60), top + best["y"] + best["h"] / 2
         activate(hwnd)
+        # 실제 마우스는 그 자리에 보이는 창을 누른다 → 그 창이 보이는 상태로 맨 앞에 있을 때만 (서무비서를 누르지 않게)
+        if not (_really_on_screen(hwnd) and _is_front(hwnd)):
+            trace.append(f"'{name}': 그 창이 맨 앞에 보이지 않아 화면 클릭 생략")
+            break
         real_double_click(int(x), int(y))
         trace.append(f"'{name}': 화면의 '{best['text']}' 더블클릭 ({score:.2f})")
         opened = None
