@@ -270,33 +270,99 @@ def test_capture_window_uses_screen_attachment_list(api, tmp_path, monkeypatch):
     assert (Path(n["folder"]) / "붙임" / "자체점검표(공중이용시설).hwpx").exists()
 
 
-def test_capture_window_takes_viewer_cache_when_no_names(api, tmp_path, monkeypatch):
-    """붙임 이름을 전혀 알 수 없으면, 뷰어 프로그램 이름이 든 캐시 폴더에 방금 생긴 문서를 붙임으로 모은다."""
+def _fake_window(monkeypatch, tmp_path, body, win, extra_windows=(), found_html="", names=()):
     from seomu import attach, winwindow
+
+    def extract(h, log=None, trace=None, found=None):
+        if found is not None and found_html:
+            found["html"] = found_html
+        return body, "전체 선택·복사"
+    monkeypatch.setattr(winwindow, "available", lambda: True)
+    monkeypatch.setattr(winwindow, "list_windows", lambda: [win, *extra_windows])
+    monkeypatch.setattr(winwindow, "extract_text", extract)
+    monkeypatch.setattr(winwindow, "save_window_image", lambda h, p, **k: False)
+    monkeypatch.setattr(winwindow, "screen_attachment_names", lambda h, trace=None, use_ocr=True: list(names))
+    monkeypatch.setattr(winwindow, "get_clipboard", lambda: "")
+    monkeypatch.setattr(winwindow, "watch_dirs", lambda extra=None: [tmp_path / "none"])
+    monkeypatch.setattr(winwindow, "open_named_on_screen", lambda *a, **k: [])
+    monkeypatch.setattr(winwindow, "try_save_attachments", lambda *a, **k: "")
+    monkeypatch.setattr(attach, "search_roots", lambda: [(tmp_path / "AppData", 4)])
+    monkeypatch.setattr(attach, "recent_documents", lambda *a, **k: [])
+
+
+def test_capture_window_does_not_collect_unrelated_files(api, tmp_path, monkeypatch):
+    """붙임 이름을 모르면 PC 안의 아무 파일이나 붙임으로 모으지 않는다 (뷰어 캐시·다운로드 폴더의 다른 문서)."""
     cache = tmp_path / "AppData" / "XSAppr" / "temp"
     cache.mkdir(parents=True)
     (cache / "점검표.hwp").write_bytes(b"form")
-    (cache / "viewer.log.txt").write_bytes(b"log")             # 설정·기록 파일은 빼야 한다
-    other = tmp_path / "AppData" / "Other"
-    other.mkdir()
-    (other / "상관없는 문서.hwp").write_bytes(b"x")
     body = "자체점검 후 결과를 제출하여 주시기 바랍니다. 기한: 2026. 11. 20.(금)까지 회신 바랍니다. 담당자 확인 요망."
-    win = {"hwnd": 10, "title": "점검 요청", "process": "XSAppr.exe", "cls": "X", "pid": 1}
-    monkeypatch.setattr(winwindow, "available", lambda: True)
-    monkeypatch.setattr(winwindow, "list_windows", lambda: [win])
-    monkeypatch.setattr(winwindow, "extract_text", lambda h, log=None, trace=None, found=None: (body, "화면 글자 인식(OCR)"))
-    monkeypatch.setattr(winwindow, "save_window_image", lambda h, p, **k: False)
-    monkeypatch.setattr(winwindow, "screen_attachment_names", lambda h, trace=None, use_ocr=True: [])
-    monkeypatch.setattr(winwindow, "get_clipboard", lambda: "")
-    monkeypatch.setattr(winwindow, "watch_dirs", lambda extra=None: [tmp_path / "none"])
-    monkeypatch.setattr(attach, "search_roots", lambda: [(tmp_path / "AppData", 4)])
-    monkeypatch.setattr(attach, "recent_documents", lambda *a, **k: [])
+    _fake_window(monkeypatch, tmp_path, body, {"hwnd": 10, "title": "점검 요청", "process": "XSAppr.exe", "cls": "X", "pid": 1})
     job = api.capture_window(10, "", False, 20)
-    time.sleep(1.0)
+    time.sleep(0.5)
     api.job_signal(job["job_id"], "done")
     n = wait(api, job)
-    names = sorted(p.name for p in (Path(n["folder"]) / "붙임").iterdir())
-    assert names == ["점검표.hwp"]
+    assert list((Path(n["folder"]) / "붙임").iterdir()) == []
+    assert n["need_upload"] == [] and n["maybe_attach"] is False
+
+
+def test_capture_window_skips_documents_open_in_other_windows(api, tmp_path, monkeypatch):
+    """지금 한글로 열어 둔 내 문서는 이름이 비슷해도 붙임으로 모으지 않고, 못 받은 붙임은 업로드를 요청한다."""
+    dl = tmp_path / "AppData" / "Downloads"
+    dl.mkdir(parents=True)
+    (dl / "2026년 공공 AI 대전환 챌린지 참가 안내서.hwpx").write_bytes(b"mine")       # 사용자가 열어 둔 문서
+    (dl / "2026년 하반기 점검 결과 보고.hwpx").write_bytes(b"other")                    # 앞부분만 비슷한 문서
+    body = ("2026년 하반기 시설 점검 계획 알림\n점검 결과를 2026. 11. 20.(금)까지 제출하여 주시기 바랍니다.\n"
+            "붙임  1. 2026년 공공 AI 대전환 챌린지 참가 안내 1부.\n 2. 2026년 하반기 점검 계획 1부.  끝.")
+    hwp = {"hwnd": 11, "title": "2026년 공공 AI 대전환 챌린지 참가 안내서.hwpx [C:\\x\\] - 한글", "process": "Hwp.exe",
+           "cls": "HwpFrame", "pid": 2}
+    _fake_window(monkeypatch, tmp_path, body, {"hwnd": 12, "title": "시설 점검 계획 알림", "process": "XSAppr.exe",
+                                                "cls": "X", "pid": 1}, extra_windows=[hwp])
+    job = api.capture_window(12, "", False, 20)
+    time.sleep(0.5)
+    api.job_signal(job["job_id"], "done")
+    n = wait(api, job)
+    assert list((Path(n["folder"]) / "붙임").iterdir()) == []
+    assert n["need_upload"] == ["2026년 공공 AI 대전환 챌린지 참가 안내", "2026년 하반기 점검 계획"]
+    # 사용자가 받아서 올리면 '받지 못함' 칸이 채워진다 (원본은 그대로)
+    up = tmp_path / "받은 붙임"
+    up.mkdir()
+    (up / "2026년 하반기 점검 계획.hwpx").write_bytes(b"plan")
+    m = api.add_notice_attachments(n["id"], [str(up / "2026년 하반기 점검 계획.hwpx")])
+    names = {f["name"]: f["ok"] for f in m["attachments"]}
+    assert names.get("2026년 하반기 점검 계획.hwpx") is True and (up / "2026년 하반기 점검 계획.hwpx").exists()
+    assert sum(1 for f in m["attachments"] if not f["ok"]) == 1
+    with pytest.raises(ValueError):
+        api.add_notice_attachments(n["id"], [])
+
+
+def test_capture_window_downloads_attachment_links_from_copied_html(api, tmp_path, monkeypatch):
+    """전체 선택·복사로 받은 HTML에 붙임 링크가 있으면 내려받는다."""
+    import http.server
+    import socketserver
+    import threading
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "form.hwpx").write_bytes(b"PK\x03\x04hwpx-data" + b"x" * 200)
+
+    class H(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=str(site), **k)
+
+        def log_message(self, *a):
+            pass
+    srv = socketserver.TCPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/form.hwpx"
+    html = f'<!--source:http://127.0.0.1/--><p>본문</p><a href="{url}">현황 조사표.hwpx</a>'
+    body = "현황 조사 협조\n현황을 2026. 11. 20.(금)까지 제출하여 주시기 바랍니다.\n붙임 현황 조사표 1부. 끝."
+    _fake_window(monkeypatch, tmp_path, body, {"hwnd": 13, "title": "현황 조사 협조", "process": "XSAppr.exe",
+                                                "cls": "X", "pid": 1}, found_html=html)
+    try:
+        n = wait(api, api.capture_window(13, "", False, 30))
+    finally:
+        srv.shutdown()
+    assert n["attach_summary"]["found"] == 1 and n["need_upload"] == []
+    assert [p.name for p in (Path(n["folder"]) / "붙임").iterdir()] == ["현황 조사표.hwpx"]
 
 
 def test_recollecting_same_notice_does_not_duplicate(api, tmp_path):

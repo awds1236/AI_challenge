@@ -210,18 +210,32 @@ def candidate_files(since: float, roots: list[tuple[Path, int]] | None = None, b
     return sorted(found.values(), key=lambda f: -f["mtime"])
 
 
-def viewer_files(process: str, since: float, budget: float = 6.0, exclude: Path | None = None) -> list[dict]:
-    """뷰어 프로그램이 공문을 열 때 붙임을 받아 두는 캐시·임시 폴더(경로에 프로그램 이름이 든 폴더)의 최근 문서.
-    본문에 붙임 표기가 없거나 이름을 못 읽었을 때 쓰는 마지막 방법이다."""
-    key = re.sub(r"\.exe$", "", (process or "").lower()).strip()
-    if len(key) < 3:
-        return []
-    files = candidate_files(since, budget=budget, exclude=exclude)
-    return [f for f in files if key in os.path.normcase(f["path"]).lower()]
+_GENERIC_WORDS = {"붙임", "첨부", "서식", "양식", "파일", "자료", "1부", "사본"}
 
 
-def match_files(expected: list[str], files: list[dict], threshold: float = 0.45) -> dict[str, dict]:
-    """붙임 이름 → 가장 비슷한(같으면 최신) 파일. 같은 파일을 두 번 쓰지 않는다."""
+def _words(s: str) -> set[str]:
+    s = os.path.splitext(s)[0] if re.search(r"\.[A-Za-z0-9]{2,5}$", s or "") else (s or "")
+    ws = set(re.findall(r"[가-힣A-Za-z]{2,}", s))
+    return {w for w in ws if w not in _GENERIC_WORDS}
+
+
+def same_document(expected: str, filename: str) -> bool:
+    """PC 안의 파일이 그 붙임이 맞는지 (이름 일부만 같은 다른 문서를 고르지 않게).
+    '2026년 하반기 점검 계획' ↔ '2026년 하반기 점검 결과 보고' → 아님 ('계획'이 없다)."""
+    if name_score(expected, filename) >= 0.9:
+        return True
+    want = _words(expected.replace("…", "").replace("...", ""))
+    have = _words(filename)
+    if len(want) < 2:
+        return name_score(expected, filename) >= 0.8
+    covered = sum(1 for w in want if w in have or any(w in h or h in w for h in have if len(h) >= 2))
+    return covered / len(want) >= 0.8
+
+
+def match_files(expected: list[str], files: list[dict], threshold: float = 0.45,
+                strict: bool = False) -> dict[str, dict]:
+    """붙임 이름 → 가장 비슷한(같으면 최신) 파일. 같은 파일을 두 번 쓰지 않는다.
+    strict=True면 붙임 이름의 낱말이 파일 이름에 거의 다 있어야 한다 (PC 안 파일을 찾을 때)."""
     out: dict[str, dict] = {}
     used: set[str] = set()
     names = [f["name"] for f in files]
@@ -229,7 +243,7 @@ def match_files(expected: list[str], files: list[dict], threshold: float = 0.45)
     for e in expected:
         for i, n in enumerate(names):
             sc = name_score(e, n)
-            if sc >= threshold:
+            if sc >= threshold and (not strict or same_document(e, n)):
                 pairs.append((sc, files[i]["mtime"], e, i))
     for sc, _mt, e, i in sorted(pairs, key=lambda x: (-x[0], -x[1])):
         if e in out or files[i]["path"] in used:

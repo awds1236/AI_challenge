@@ -54,6 +54,12 @@ def foreground_allowed() -> bool:
     return _FOREGROUND_OK and not os.environ.get("SEOMU_NO_FOREGROUND")
 
 
+def copy_allowed() -> bool:
+    """전체 선택·복사(Ctrl+A/C)는 창을 잠깐(1~2초) 앞으로 가져온 뒤 원래 보던 창으로 되돌린다.
+    글자 인식(OCR)보다 정확하므로 OCR 전에 시도한다. 검증·테스트(SEOMU_NO_FOREGROUND)에서만 막는다."""
+    return not os.environ.get("SEOMU_NO_FOREGROUND")
+
+
 # ---------------------------------------------------------------- Win32 (ctypes)
 if IS_WIN:
     import ctypes
@@ -356,6 +362,40 @@ def get_clipboard() -> str:
         return ""
     finally:
         user32.CloseClipboard()
+
+
+def get_clipboard_html() -> str:
+    """클립보드의 HTML 조각 (웹·전자문서 뷰어에서 복사하면 붙임 링크가 들어 있다). 없으면 ""."""
+    if not IS_WIN:
+        return ""
+    for _ in range(10):
+        if user32.OpenClipboard(0):
+            break
+        time.sleep(0.05)
+    else:
+        return ""
+    try:
+        fmt = user32.RegisterClipboardFormatW("HTML Format")
+        h = user32.GetClipboardData(fmt) if fmt else None
+        if not h:
+            return ""
+        p = kernel32.GlobalLock(h)
+        try:
+            raw = ctypes.string_at(p, kernel32.GlobalSize(h)) if p else b""
+        finally:
+            kernel32.GlobalUnlock(h)
+        head = raw.split(b"\x00", 1)[0].decode("utf-8", "ignore")
+        m = re.search(r"SourceURL:(\S+)", head)
+        i = head.find("<")
+        html = head[i:] if i >= 0 else ""
+        return (f"<!--source:{m.group(1)}-->" if m else "") + html
+    finally:
+        user32.CloseClipboard()
+
+
+def html_source_url(html: str) -> str:
+    m = re.match(r"<!--source:(\S+?)-->", html or "")
+    return m.group(1) if m else ""
 
 
 def set_clipboard(text: str) -> None:
@@ -1408,8 +1448,9 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
                  trace: list | None = None, found: dict | None = None) -> tuple[str, str]:
     """(본문, 사용한 방법). trace에 단계별 기록을 남긴다.
 
-    뷰어(본문복사 버튼이 있는 창)가 아니어도 끝까지 시도한다:
-    본문복사 → 화면 글자 정보 → 편집 칸 → 창에 열린 문서 파일 → 화면 넘김 글자 인식 → (허용 시) 전체 선택·복사.
+    글자를 그대로 가져오는 방법부터, 글자 인식(OCR)은 마지막에 시도한다:
+    본문복사 → 창에 열린 문서 파일 → 화면 글자 정보 → 편집 칸 → 문서 파일 찾기 → 전체 선택·복사 → 화면 넘김 글자 인식.
+    found["html"]에는 복사한 HTML(붙임 링크 포함)을 넣어 준다 (있을 때).
     어느 방법도 충분하지 않으면 그중 가장 긴 결과라도 돌려준다 (빈손으로 끝내지 않는다).
     found["document"]에는 창에 열려 있던 문서 파일 경로를 넣어 준다 (찾았을 때)."""
     trace = trace if trace is not None else []
@@ -1473,35 +1514,57 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
             if len(t) > 80:
                 return t, how
             keep(t, how)
-        # ⑥ 창 화면을 그려 받아(PrintWindow, 가려져 있어도 됨) 글자 인식 — 화면을 넘겨 가며 끝까지
+        # ⑥ 전체 선택·복사 (Ctrl+A, Ctrl+C) — 글자를 그대로 가져오므로 OCR보다 정확하다.
+        #    창을 잠깐 앞으로 가져왔다가 원래 보던 창으로 되돌린다. 복사된 HTML(붙임 링크)도 함께 받아 둔다
+        if copy_allowed():
+            log("문서를 전체 선택·복사하는 중… (잠깐 그 창이 앞에 뜹니다)")
+            t, html = copy_all(hwnd, trace, fresh, marker)
+            if html:
+                found["html"] = html
+            if len(t) > 80 and _prose_lines(t) >= 2:
+                return t, "전체 선택·복사"
+            keep(t, "전체 선택·복사 (일부)")
+        else:
+            trace.append("전체 선택·복사 생략 (검증 모드)")
+        # ⑦ 마지막: 창 화면을 그려 받아(PrintWindow, 가려져 있어도 됨) 글자 인식 — 화면을 넘겨 가며 끝까지
         log("화면 글자 인식(OCR)으로 본문을 읽는 중…")
         t = scroll_ocr_body(hwnd, log, trace)
         trace.append(f"OCR 본문: {len(t)}자")
         if len(t) > 80:
             return t, "화면 글자 인식(OCR)"
         keep(t, "화면 글자 인식(OCR) (일부)")
-        # ⑦ 최후 수단: 창을 앞으로 가져와 전체 선택·복사 (설정에서 허용했을 때만)
-        if not foreground_allowed():
-            trace.append("전체 선택·복사 생략: 창을 앞으로 가져오지 않는 설정")
-            return _best(partial, trace)
-        log("문서를 전체 선택·복사하는 중…")
-        set_clipboard(marker)
-        trace.append(f"창 맨 앞으로: {activate(hwnd)}")
-        doc = _largest_child(hwnd) or hwnd
-        l, t, r, b = _rect(doc)
-        if r - l > 50 and b - t > 50:
-            real_click((l + r) // 2, t + (b - t) // 3)
-            time.sleep(0.2)
-        _hotkey(VK_CONTROL, 0x41)
-        time.sleep(0.3)
-        _hotkey(VK_CONTROL, 0x43)
-        if _wait(lambda: bool(fresh()), 2.5):
-            return fresh(), "전체 선택·복사"
-        trace.append(f"전체 선택·복사 실패 (문서 영역 클래스: {_class(doc)})")
         return _best(partial, trace)
     finally:
         if previous:
             set_clipboard(previous)
+
+
+def copy_all(hwnd: int, trace: list, fresh: Callable[[], str], marker: str) -> tuple[str, str]:
+    """창을 잠깐 앞으로 가져와 전체 선택·복사하고, 원래 앞에 있던 창으로 되돌린다. (글자, HTML)"""
+    prev = int(user32.GetForegroundWindow() or 0)
+    set_clipboard(marker)
+    try:
+        trace.append(f"전체 선택·복사: 창 맨 앞으로 {activate(hwnd)}")
+        _hotkey(VK_CONTROL, 0x41)                     # 먼저 클릭 없이 (링크를 잘못 누르지 않게)
+        time.sleep(0.3)
+        _hotkey(VK_CONTROL, 0x43)
+        if not _wait(lambda: bool(fresh()), 1.5):
+            doc = _largest_child(hwnd) or hwnd          # 글자 영역에 초점이 없으면 왼쪽 여백을 눌러 초점을 준다
+            l, t, r, b = _rect(doc)
+            if r - l > 50 and b - t > 50:
+                real_click(l + 6, t + (b - t) // 2)
+                time.sleep(0.2)
+                _hotkey(VK_CONTROL, 0x41)
+                time.sleep(0.3)
+                _hotkey(VK_CONTROL, 0x43)
+                _wait(lambda: bool(fresh()), 2.0)
+        text = fresh()
+        html = get_clipboard_html() if text else ""
+        trace.append(f"전체 선택·복사: 글자 {len(text)}자, HTML {'있음' if html else '없음'}")
+        return text, html
+    finally:
+        if prev and prev != int(hwnd) and user32.IsWindow(prev):
+            activate(prev)                                # 보던 창으로 되돌린다
 
 
 def _best(partial: list[tuple[str, str]], trace: list) -> tuple[str, str]:

@@ -258,6 +258,8 @@ select.input { appearance: none; padding-right: 30px; background-image: url("dat
 @keyframes fadein { from { opacity: 0; } }
 .sheet { width: min(860px, 92vw); max-height: 88vh; background: var(--surface); border-radius: 16px; box-shadow: var(--shadow-lg); display: flex; flex-direction: column; animation: pop .25s cubic-bezier(.2,.9,.3,1.2); border: 1px solid var(--line); }
 @keyframes pop { from { transform: scale(.96); opacity: 0; } }
+.sheet.narrow { width: min(620px, 92vw); }
+#drop-upload { margin-top: 12px; }
 .sheet-head { display: flex; justify-content: space-between; align-items: flex-start; padding: 20px 22px 12px; gap: 12px; border-bottom: 1px solid var(--line); }
 .sheet-head h2 { margin: 0; font-size: 20px; letter-spacing: -0.02em; }
 .sheet-body { padding: 18px 22px; overflow: auto; }

@@ -22,8 +22,9 @@ from typing import Callable
 
 from . import APP_NAME, __version__
 from .analyzer import analyze, summary_markdown
-from .collector import (BrowserWorker, Captured, clean_title, collect_from_files, collect_from_text, collect_from_url,
-                        expand_archives, make_notice_folder, safe_name, save_body, unique_path)
+from .collector import (BrowserWorker, Captured, analyze_html, checked_download, clean_title, collect_from_files,
+                        collect_from_text, collect_from_url, download_url, expand_archives, make_notice_folder,
+                        safe_name, save_body, unique_path)
 from .config import Config
 from .deadlines import dday
 from .notice_text import short_task, tidy_text
@@ -53,12 +54,6 @@ def _has_open_program(ext: str) -> bool:
         return hr == 0 and bool(buf.value)
     except Exception:
         return True
-
-
-# 이름으로 캐시 폴더를 가릴 수 없는 일반 프로그램 (브라우저·탐색기·문서 편집기 등)
-GENERIC_PROCESSES = {"explorer.exe", "msedge.exe", "chrome.exe", "whale.exe", "firefox.exe", "iexplore.exe",
-                     "notepad.exe", "hwp.exe", "hword.exe", "winword.exe", "excel.exe", "acrord32.exe", "acrobat.exe",
-                     "python.exe", "pythonw.exe", "seomuai.exe", "applicationframehost.exe"}
 
 
 class Job:
@@ -1036,6 +1031,15 @@ class Api:
                 except OSError as e:
                     trace.append(f"문서 원본 보관 실패: {e}")
 
+            # 전체 선택·복사로 받은 HTML의 붙임 링크 (이름은 붙임 목록에, 주소는 내려받기에 쓴다)
+            links: list[dict] = []
+            if found.get("html"):
+                try:
+                    html = found["html"]
+                    links = analyze_html(html, winwindow.html_source_url(html))["attachments"][:15]
+                    trace.append(f"복사한 본문의 붙임 링크 {len(links)}개: {[a['name'] for a in links]}")
+                except Exception as e:
+                    trace.append(f"붙임 링크 해석 오류: {e}")
             # ---- 붙임: 본문의 '붙임/첨부' 목록으로 모아야 할 파일을 먼저 알아낸다
             expected = attach.expected_attachments(text)
             trace.append(f"본문의 붙임 목록 {len(expected)}개: {expected}")
@@ -1045,6 +1049,9 @@ class Api:
             if screen_names:
                 expected = attach.merge_names(expected, screen_names)
                 trace.append(f"화면의 붙임 이름을 더한 붙임 목록 {len(expected)}개: {expected}")
+            link_names = [a["name"] for a in links if a.get("name") and attach.file_names_in(a["name"])]
+            if link_names:
+                expected = attach.merge_names(expected, link_names)
             got: dict[str, dict] = {}          # 붙임 이름 → 모은 파일
             extras: list[dict] = []            # 목록과 이름이 안 맞지만 새로 생긴 파일
             hashes: set[str] = set()
@@ -1074,12 +1081,21 @@ class Api:
             def missing() -> list[str]:
                 return [e for e in expected if e not in got]
 
+            # 지금 다른 창(한글·PDF 등)에 열려 있는 문서는 사용자가 작업 중인 파일이지 이 공문의 붙임이 아니다
+            open_docs = [n for n in (attach.name_from_title(w["title"]) for w in winwindow.list_windows()
+                                     if w["hwnd"] != hwnd_) if n] if winwindow.available() else []
+
+            def not_open_elsewhere(f: dict) -> bool:
+                return not any(attach.name_score(f["name"], o) >= 0.9 for o in open_docs)
+
             def harvest(since: float, budget: float = 8.0) -> None:
                 if not missing():
                     return
                 files = attach.candidate_files(since, exclude=folder, budget=budget,
                                                extra=attach.recent_documents() if winwindow.available() else [])
-                for e, f in attach.match_files(missing(), files).items():
+                files = [f for f in files if not_open_elsewhere(f)]
+                # 이름이 충분히 비슷할 때만 (앞부분 '2026년 …'만 같은 다른 문서를 붙임으로 잘못 모으지 않게)
+                for e, f in attach.match_files(missing(), files, threshold=0.6, strict=True).items():
                     if take(f["path"], e):
                         trace.append(f"'{e}' ← PC 안의 파일 {f['path']} (일치도 {f['score']})")
 
@@ -1106,21 +1122,38 @@ class Api:
             # ① 이미 PC에 있는 파일 (뷰어가 열 때 내려받은 임시·캐시 파일, 최근 문서 등)
             say("PC에 이미 내려받아진 붙임파일을 찾는 중…")
             harvest(started - 3 * 3600)
-            if not expected and win["process"].lower() not in GENERIC_PROCESSES:
-                # 붙임 이름을 전혀 알 수 없을 때: 뷰어가 공문을 열면서 붙임을 받아 둔 캐시 폴더(경로에 프로그램 이름)에서
-                # 최근 30분 안에 생긴 문서만 가져온다 (그림·글자 파일은 뷰어 설정·아이콘일 수 있어 뺀다)
-                for f in attach.viewer_files(win["process"], started - 1800, exclude=folder)[:10]:
-                    if Path(f["path"]).suffix.lower() in (".txt", ".png", ".jpg", ".jpeg", ".csv"):
-                        continue
-                    if take(f["path"], None):
-                        trace.append(f"뷰어 캐시 폴더의 최근 파일: {f['path']}")
-            # ② 저장/다운로드 버튼
+            # ①-2 복사한 본문(HTML)에 붙임 링크가 있으면 바로 내려받는다 (로그인이 필요 없는 주소일 때)
+            for a in links:
+                if not missing() and expected:
+                    break
+                if not a.get("url", "").lower().startswith(("http://", "https://")):
+                    continue
+                say(f"붙임 내려받는 중: {a['name'][:40]}")
+                try:
+                    fp = download_url(a["url"], dest, a["name"], timeout=30)
+                    item = checked_download(fp, a["name"])
+                except Exception as e:                  # 세션이 필요한 주소 등 → 다음 방법으로
+                    trace.append(f"붙임 링크 내려받기 실패 {a['name']}: {e}")
+                    continue
+                if not item.get("ok"):
+                    trace.append(f"붙임 링크 '{a['name']}': {item.get('error', '')[:80]}")
+                    continue
+                try:
+                    hashes.add(attach.file_hash(item["path"]))
+                except OSError:
+                    pass
+                i, sc = attach.best_match(item["name"], missing()) if missing() else (-1, 0)
+                if i < 0 and missing():
+                    i, sc = attach.best_match(a["name"], missing())
+                if i >= 0:
+                    got[missing()[i]] = item
+                else:
+                    extras.append(item)
+                trace.append(f"'{item['name']}' ← 본문의 붙임 링크 내려받기")
+            # ② 뷰어의 'PC저장' 버튼 (버튼 메시지·UI Automation으로 누르고, 뜨는 저장 창에 공문 폴더를 지정한다)
+            #    받아야 할 붙임 이름을 알 때만 누른다 (이름 없이 누르면 본문 파일까지 붙임으로 저장될 수 있다)
             state = ""
-            # 'PC저장'을 누르면 뷰어가 띄운 저장 창이 화면 맨 앞에 뜬다 (뷰어 프로그램이 하는 일이라 막을 수 없다)
-            # → 창을 앞으로 가져와도 된다고 설정했을 때만 자동으로 누르고, 아니면 PC 안 파일 찾기·폴더 감시로 모은다
-            if (missing() or not expected) and not winwindow.foreground_allowed():
-                trace.append("PC저장 자동 누르기 생략: 저장 창이 화면 앞에 뜨므로 (설정에서 허용하면 자동으로 누름)")
-            elif missing() or not expected:
+            if missing():
                 try:
                     state = winwindow.try_save_attachments(hwnd_, dest, say, trace)
                 except Exception as e:          # 뷰어마다 화면이 달라 실패할 수 있다 → 다음 단계로
@@ -1193,6 +1226,10 @@ class Api:
             result = self._finish_capture(job, cap, use_ai)
             result["capture_method"] = how
             result["attach_summary"] = {"expected": len(expected), "found": len(got), "extra": len(extras)}
+            # 끝내 받지 못한 붙임: 화면에서 '붙임 문서를 받아 올려 주세요' 창을 띄운다
+            result["need_upload"] = missing()
+            result["maybe_attach"] = (not expected and not got and not extras
+                                      and bool(re.search(r"(붙\s*임|첨\s*부)", text or "")))
             return result
         return self._run_job("capture_window", work)
 
@@ -1204,6 +1241,27 @@ class Api:
         if n:
             n = self._rescan_attachments(n)
             n["tasks"] = [t for t in self._store.list_tasks() if t.get("notice_id") == n["id"]]
+        return n
+
+    def add_notice_attachments(self, notice_id: int, paths: list[str]) -> dict:
+        """받지 못한 붙임을 사용자가 직접 올린다: 공문 폴더의 '붙임'에 복사하고 이름이 맞는 '받지 못함' 칸을 채운다.
+        올린 원본 파일은 그대로 둔다."""
+        n = self._store.get_notice(int(notice_id))
+        if not n:
+            raise ValueError("공문을 찾을 수 없습니다")
+        dest = Path(n["folder"]) / "붙임"
+        dest.mkdir(parents=True, exist_ok=True)
+        added = 0
+        for p in paths or []:
+            src = Path(p)
+            if not src.is_file():
+                continue
+            shutil.copy2(src, unique_path(dest / safe_name(src.name, 150)))
+            added += 1
+        if not added:
+            raise ValueError("올릴 파일을 고르세요")
+        n = self.get_notice(n["id"]) or n                 # 붙임 폴더를 다시 살펴 목록에 반영
+        n["added_files"] = added
         return n
 
     def _rescan_attachments(self, n: dict) -> dict:
