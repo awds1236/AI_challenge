@@ -197,15 +197,42 @@ def _split_attach(s: str) -> list[str]:
     return out
 
 
+_CONTACT_WORDS = re.compile(r"(문의|담당|연락|☎|전화|메일|e-?mail|주무관|사무관|팀장)", re.I)
+_PERSON_WORDS = re.compile(r"(문의|담당|주무관|사무관|주사|팀장|과장|계장)")
+# 홈페이지·문서 꼬리말: 우편번호+주소, 대표전화, 팩스, 저작권 — 담당자 연락처가 따로 있으면 뺀다
+_FOOTER = re.compile(r"(?:^|\s)\d{5}\s+\S+(?:시|도)\s|대표\s*전화|FAX|팩스|copyright|ⓒ|©|사업자\s*등록", re.I)
+
+
+def tidy_contact(line: str) -> str:
+    """'연락처042-724-3213' → '연락처 042-724-3213', '☎043-000-1234' → '☎ 043-000-1234', 공백·쌍점 정리."""
+    s = re.sub(r"\s+", " ", line or "").strip(" □○-·")
+    s = re.sub(r"([가-힣A-Za-z)])(?=0\d{1,2}[-) .]?\d{3,4})", r"\1 ", s)     # 이름·항목과 전화번호 사이
+    s = re.sub(r"(☎|☏|TEL\.?|Tel\.?)\s*(?=\d)", r"\1 ", s)
+    s = re.sub(r"\s*([:：])\s*", ": ", s)
+    s = re.sub(r"\(\s+", "(", re.sub(r"\s+\)", ")", s))
+    return s.strip()
+
+
+def clean_contact_text(s: str) -> str:
+    """AI·항목에서 받은 문의처 글: 줄마다 정리하고, 담당자 연락처가 있으면 꼬리말(주소·대표전화·팩스)은 뺀다."""
+    parts = [tidy_contact(x) for x in re.split(r"\n|\s+/\s+", s or "") if x.strip()]
+    if any(_PERSON_WORDS.search(x) and not _FOOTER.search(x) for x in parts):
+        parts = [x for x in parts if not _FOOTER.search(x)]
+    return "\n".join(dict.fromkeys(parts))
+
+
 def find_contacts(text: str) -> list[str]:
     out = []
     for l in text.splitlines():
         if PHONE.search(l) or EMAIL.search(l):
-            if re.search(r"(문의|담당|연락|☎|전화|메일|e-?mail|주무관|사무관|팀장)", l, re.I) or len(l) < 80:
-                out.append(l.strip(" □○-·")[:160])
+            if _CONTACT_WORDS.search(l) or len(l) < 80:
+                out.append(tidy_contact(l)[:160])
+    # 담당자·문의처 줄이 있으면 꼬리말(주소·대표전화·팩스) 줄은 문의처로 쓰지 않는다
+    if any(_PERSON_WORDS.search(o) and not _FOOTER.search(o) for o in out):
+        out = [o for o in out if not _FOOTER.search(o)]
     seen, uniq = set(), []
     for o in out:
-        if o not in seen:
+        if o and o not in seen:
             seen.add(o)
             uniq.append(o)
     return uniq[:6]

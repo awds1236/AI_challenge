@@ -325,3 +325,27 @@ def test_attachments_from_ocr_text_and_screen_list():
     assert screen == ["자체점검표(공중이용시설).hwpx", "2026년 하반기 점검계획.pdf"]
     merged = attach.merge_names(["자체점검표(공중이용시설)"], screen)
     assert merged == ["자체점검표(공중이용시설).hwpx", "2026년 하반기 점검계획.pdf"]
+
+
+def test_meaningless_names_and_content_match():
+    from seomu import attach
+    assert attach.meaningless_name("15684_AT_db6840f3cbd3435fb84962add454f41c.pdf")
+    assert attach.meaningless_name("tmp1234.hwp") and attach.meaningless_name("20261109_123456.pdf")
+    assert not attach.meaningless_name("자체점검표(공중이용시설).hwpx") and not attach.meaningless_name("budget_plan.xlsx")
+    names = ["중대재해 예방을 위한 2026년 하반기 안전보건 확보의무 이행사항 점검계획",
+             "2026년 하반기 안전보건 확보의무 이행사항 자체점검표(공중이용시설)", "대전광역시 중대시민재해 적용시설물 현황(9월 기준)"]
+    assert attach.match_by_content("대전광역시 중대시민재해 적용시설물 현황 (9월 기준)\n연번 시설명 ...", names) == 2
+    assert attach.match_by_content("2026년 하반기 안전보건 확보의무 이행사항 자체점검표 (공중이용시설)\n시설명", names) == 1
+    assert attach.match_by_content("전혀 다른 내용의 문서입니다. 회의록", names) == -1
+
+
+def test_attachment_doc_own_label_is_not_attachment_list():
+    """'붙임1. ○○ 안내서'로 시작하는 붙임 문서 자체를 가져오면, 그 아래 본문을 붙임 목록으로 읽지 않는다."""
+    from seomu import attach
+    doc = ("붙임1. 2026년 공공 AI 대전환 챌린지(AI경진) 참가 안내서\n< 한눈에 보기 >\n구분\n- 세션 1 -\n"
+           "AI 정부 실험실 챔피언십\n세션 2\nAI 미션 경진대회\n" + "제출 서류 규격 미준수 시 심사에서 제외될 수 있음\n" * 10)
+    assert attach.expected_attachments(doc) == []
+    # '끝.'이 없는 붙임 목록: 붙임 항목처럼 생긴 줄까지만
+    assert attach.expected_attachments("제출 바랍니다.\n붙임  1. 현황표 서식 1부\n      2. 작성 요령 1부\n"
+                                       "3. 문의처: 재무과\n구분\n세션 1") == ["현황표 서식", "작성 요령"]
+    assert attach.expected_attachments("제출 바랍니다.\n붙임 자체점검표 1부\n문의: 총무과") == ["자체점검표"]

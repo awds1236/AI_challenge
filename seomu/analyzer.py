@@ -5,7 +5,7 @@ import re
 from datetime import date, datetime
 from pathlib import Path
 
-from .deadlines import best_deadlines, find_contacts, find_methods, find_submissions
+from .deadlines import clean_contact_text, find_dates, best_deadlines, find_contacts, find_methods, find_submissions
 from .llm import LLMError, OllamaClient, extract_json
 from .notice_text import clean_body, clean_what, extract_fields, item_names, object_phrase, rule_summary, _get
 from .parsers import READABLE_EXT, ParseError, parse_file
@@ -62,16 +62,23 @@ PROMPT = """오늘 날짜: {today}
 _HINT_KEYS = ("제출기한", "회신기한", "신청기한", "제출서류", "회신자료", "제출자료")
 
 
-def ai_schema(base: dict) -> dict:
-    """규칙으로 이미 찾은 문의처·행사 정보는 빼고, AI가 채워야 할 항목만 담은 스키마."""
+def ai_schema(base: dict, body: str = "", title: str = "") -> dict:
+    """AI가 꼭 채워야 할 항목만 담은 스키마 (생성하는 글자 수 = CPU에서 걸리는 시간).
+    문의처·할 일 목록은 규칙으로 만들고, 행사 정보는 행사·교육 공문일 때만, 폴더 이름은 제목이 길 때만 묻는다."""
     props = dict(SCHEMA["properties"])
-    if base.get("contact"):
-        props.pop("contact", None)
+    props.pop("contact", None)                    # 규칙이 더 정확하다 (AI는 꼬리말 주소까지 넣는다)
+    props.pop("actions", None)                    # 기한·제출물에서 만든다
     ev = base.get("event") or {}
-    if ev.get("name") and ev.get("date"):
+    if (ev.get("name") and ev.get("date")) or not re.search(r"(행사|교육|연수|설명회|간담회|회의|대회|축제|개최|일시)", body):
         props.pop("event", None)
+    if title and len(title) <= 30 and not re.search(r"^(?:\[|붙임|제목)", title):
+        props.pop("folder_name", None)
     return {"type": "object", "properties": props,
             "required": [k for k in SCHEMA["required"] if k in props]}
+
+
+# AI에게 붙임 내용을 줄 때는 글자로 된 문서만 (그림·스캔 PDF는 글자 인식에 수십 초가 걸린다)
+_FAST_ATTACH_EXT = {".hwp", ".hwpx", ".docx", ".txt", ".xlsx", ".odt"}
 
 
 def read_attachments(files: list[dict], max_files: int = 2, max_chars: int = 700) -> list[dict]:
@@ -80,7 +87,7 @@ def read_attachments(files: list[dict], max_files: int = 2, max_chars: int = 700
         if not f.get("ok") or not f.get("path"):
             continue
         p = Path(f["path"])
-        if p.suffix.lower() not in READABLE_EXT:
+        if p.suffix.lower() not in READABLE_EXT or p.suffix.lower() not in _FAST_ATTACH_EXT:
             continue
         try:
             t = parse_file(p)
@@ -217,7 +224,7 @@ def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | N
     actions = [f"{d['what']} ({int(d['date'][5:7])}/{int(d['date'][8:10])}까지)" for d in deadlines][:5]
     if method:
         actions.append(method if re.search(r"(제출|회신|신청|접수|등록)\s*$", method) else f"제출 방법: {method}")
-    contacts = [c for c in find_contacts(clean) if not re.search(r"(회신|제출|신청)\s*방\s*법", c)]
+    contacts = [c for c in find_contacts(body) if not re.search(r"(회신|제출|신청)\s*방\s*법", c)]
     _ql, ask = _get(fields, "문의처", "문의", "담당자", "연락처")
     return {
         "folder_name": title,
@@ -226,7 +233,7 @@ def rule_analysis(title: str, body: str, attach_texts: list[dict], ref: date | N
         "deadlines": deadlines,
         "submissions": subs,
         "actions": actions,
-        "contact": ask or " / ".join(contacts[:2]),
+        "contact": clean_contact_text(ask) if ask else "\n".join(contacts[:2]),
         "methods": [method] if method else find_methods(clean),
         "fields": fields,
         "attachments_read": [a["name"] for a in attach_texts],
@@ -309,7 +316,9 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
     if client is None:
         # 규칙 분석은 붙임 내용을 쓰지 않는다 → 붙임(스캔 PDF는 글자 인식에 수십 초)을 읽지 않아 수집이 바로 끝난다
         return rule_analysis(title, body, [], ref)
-    attach = read_attachments(files)
+    clean = clean_body(body, title)
+    # 본문이 짧을 때만 붙임 발췌를 함께 준다 (입력이 길수록 CPU에서 오래 걸린다)
+    attach = read_attachments(files, max_files=1, max_chars=600) if len(clean) < 800 else []
     base = rule_analysis(title, body, attach, ref)
     try:
         model = client.pick_chat_model(chat_model)
@@ -319,10 +328,10 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
         fields = base.get("fields", {})
         hints = "\n".join([f"- {k}: {v}" for k, v in fields.items() if k in _HINT_KEYS][:4] +
                           [f"- 기한 후보: {d['date']} {d['what']}" for d in base["deadlines"][:5]]) or "(없음)"
-        prompt = PROMPT.format(today=ref.isoformat(), body=trim_body(clean_body(body, title), 3000),
-                               attach=attach_txt[:1400], hints=hints)
+        prompt = PROMPT.format(today=ref.isoformat(), body=trim_body(clean, 1800),
+                               attach=attach_txt[:600], hints=hints)
         raw = client.chat([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}], model,
-                          temperature=0.1, num_ctx=num_ctx, fmt=ai_schema(base), max_tokens=700)
+                          temperature=0.1, num_ctx=num_ctx, fmt=ai_schema(base, clean, title), max_tokens=400)
         data = extract_json(raw)
         if not isinstance(data, dict):
             raise LLMError("AI 응답을 해석할 수 없습니다")
@@ -333,9 +342,8 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
     result = dict(base)
     result["mode"] = "llm"
     result["model"] = model
-    for k in ("summary", "contact"):
-        if isinstance(data.get(k), str) and data[k].strip():
-            result[k] = data[k].strip()
+    if isinstance(data.get("summary"), str) and data["summary"].strip():
+        result["summary"] = data["summary"].strip()
     result["summary"] = tidy_ai_summary(result["summary"])
     fn = data.get("folder_name")
     if isinstance(fn, str) and 2 <= len(fn.strip()) <= 40 and _shares_word(fn, title) and _keeps_subject(fn, title):
@@ -344,11 +352,12 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
     if isinstance(data.get("event"), dict):
         result["event"] = {k: str(v) for k, v in data["event"].items() if v}
     llm_dl = []
+    in_body = {x["date"] for x in find_dates(body, ref)} | {x["end_date"] for x in find_dates(body, ref) if x.get("end_date")}
     for d in data.get("deadlines") or []:
         if not isinstance(d, dict):
             continue
         nd = _norm_date(str(d.get("date", "")))
-        if not nd:
+        if not nd or nd not in in_body:          # 본문에 없는 날짜(오늘 날짜 등)를 기한으로 지어내지 않게
             continue
         llm_dl.append({"date": nd, "time": str(d.get("time") or "")[:5], "what": str(d.get("what") or "")[:160],
                        "source": "AI"})
@@ -371,6 +380,9 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
     if subs:
         result["submissions"] = subs
     acts = [tidy_ai_action(str(a))[:160] for a in (data.get("actions") or []) if str(a).strip()]
+    if not acts:          # 할 일은 기한에서 만든다 (AI에게 따로 쓰게 하면 시간만 더 든다)
+        acts = [f"{d['what']} ({int(d['date'][5:7])}/{int(d['date'][8:10])}까지)" for d in result["deadlines"] if d.get("what")][:5]
+        acts += [a for a in base.get("actions", []) if not re.search(r"\(\d{1,2}/\d{1,2}까지\)$", a)]
     acts = [a for i, a in enumerate(acts) if a and a not in acts[:i]]
     if acts:
         result["actions"] = acts
