@@ -258,3 +258,12 @@ def test_engine_not_found_message_lists_seen_files(server, tmp_path, monkeypatch
     with pytest.raises(LLMError) as e:
         downloader.install_engine(tmp_path / "engine")
     assert "찾은 파일: llama-b2-bin-win-cuda-12.4-x64.zip" in str(e.value)
+
+
+def test_engine_asset_names_without_bin():
+    """llama.cpp 배포 파일 이름에 'bin'이 빠져도(새 이름 규칙) Windows CPU 빌드를 찾는다."""
+    from seomu.downloader import engine_asset_score as score
+    assert score("llama-v0.9.0-win-cpu-x64.zip", "win", "x64") is not None
+    assert score("llama-b6000-bin-win-cpu-x64.zip", "win", "x64") is not None
+    assert score("llama-v0.9.0-win-cuda-12.4-x64.zip", "win", "x64") is None
+    assert score("llama-v0.9.0-source.zip", "win", "x64") is None

@@ -46,10 +46,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest" `
-            -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "SeomuAI-build" }
-          $asset = $rel.assets | Where-Object { $_.name -match "bin-win-cpu-x64\.zip$" } | Select-Object -First 1
-          if (-not $asset) { throw "llama.cpp Windows CPU 빌드를 찾지 못했습니다 ($($rel.tag_name))" }
+          # 최근 릴리스를 차례로 살펴 Windows CPU 빌드(zip)를 찾는다 (파일 이름 규칙이 바뀌어도: bin-win-cpu-x64 / win-cpu-x64 / win-avx2-x64)
+          $hdr = @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "SeomuAI-build" }
+          $rels = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=15" -Headers $hdr
+          $gpu = "cuda|cudart|vulkan|sycl|hip|rocm|opencl|kompute|arm64|openvino|musa|cann"
+          $rel = $null; $asset = $null
+          foreach ($r in $rels) {
+            if ($r.draft) { continue }
+            $win = $r.assets | Where-Object { $_.name -match "win" -and $_.name -match "\.zip$" }
+            Write-Host "$($r.tag_name): $(($win | ForEach-Object { $_.name }) -join ', ')"
+            $pick = $win | Where-Object { $_.name -match "(cpu|avx2|noavx|x64)" -and $_.name -match "x64" -and $_.name -notmatch $gpu } |
+              Sort-Object { if ($_.name -match "cpu") { 0 } elseif ($_.name -match "avx2") { 1 } else { 2 } } | Select-Object -First 1
+            if ($pick) { $rel = $r; $asset = $pick; break }
+          }
+          if (-not $asset) { throw "최근 llama.cpp 릴리스에서 Windows CPU 빌드를 찾지 못했습니다" }
           Write-Host "엔진: $($rel.tag_name) / $($asset.name)"
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile llama.zip
           Expand-Archive llama.zip -DestinationPath engine_tmp -Force

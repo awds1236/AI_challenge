@@ -582,6 +582,15 @@ def uia_available() -> bool:
     return IS_WIN and _uia() is not None
 
 
+def _live_window(hwnd: int) -> bool:
+    """창이 아직 살아 있는지. UI Automation에 닫힌 창이나 잘못된 번호를 넘기면 프로그램이 통째로 꺼진다
+    (uiautomation 라이브러리의 접근 위반) → UI Automation을 쓰기 전에 항상 확인한다."""
+    try:
+        return bool(IS_WIN and hwnd and user32.IsWindow(int(hwnd)))
+    except Exception:
+        return False
+
+
 def _find_control(auto, root, names: tuple[str, ...]):
     for name in names:
         for kind in ("ButtonControl", "MenuItemControl", "SplitButtonControl", "ListItemControl", "Control"):
@@ -618,6 +627,8 @@ def _press(control, timeout: float = 4.0) -> bool:
 
 
 def click_named(hwnd: int, names: tuple[str, ...]) -> bool:
+    if not _live_window(hwnd):
+        return False
     auto = _uia()
     if not auto:
         return False
@@ -639,6 +650,8 @@ def uia_text(hwnd: int, limit: int = 20000) -> str:
 
 def uia_text_ex(hwnd: int, limit: int = 20000) -> tuple[str, str]:
     """(글자, 종류). 종류: 'doc'(문서·편집 영역 전체 글자) / 'labels'(글자 조각을 이어 붙임) / ''."""
+    if not _live_window(hwnd):
+        return "", ""
     auto = _uia()
     if not auto:
         return "", ""
@@ -675,6 +688,8 @@ def uia_text_ex(hwnd: int, limit: int = 20000) -> tuple[str, str]:
 
 def attachment_names(hwnd: int) -> list[str]:
     """뷰어의 '붙임목록' 같은 목록 항목 이름 (확장자가 있거나 '붙임' 영역 항목)."""
+    if not _live_window(hwnd):
+        return []
     auto = _uia()
     if not auto:
         return []
@@ -1142,6 +1157,8 @@ BROWSER_PROCS = ("msedge.exe", "chrome.exe", "whale.exe", "brave.exe", "firefox.
 
 def browser_url(hwnd: int, limit: int = 400) -> str:
     """브라우저 창 주소창의 주소 (UI Automation). 화면에 띄운 PDF·문서 파일의 실제 위치를 알아낼 때 쓴다."""
+    if not _live_window(hwnd):
+        return ""
     auto = _uia()
     if not auto:
         return ""
