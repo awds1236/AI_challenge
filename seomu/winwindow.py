@@ -12,6 +12,7 @@ Windows 전용 기능이다. 다른 OS에서는 available()이 False를 돌려�
 """
 from __future__ import annotations
 
+import ntpath
 import os
 import re
 import shutil
@@ -178,6 +179,8 @@ def _pid(hwnd) -> int:
 
 
 def _process_name(pid: int) -> str:
+    if not IS_WIN:
+        return ""
     h = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
     if not h:
         return ""
@@ -619,6 +622,37 @@ def attachment_names(hwnd: int) -> list[str]:
     return list(dict.fromkeys(n for n in names if n))[:30]
 
 
+def screen_attachment_names(hwnd: int, trace: list | None = None, use_ocr: bool = True) -> list[str]:
+    """뷰어 화면의 '붙임목록'·'첨부파일' 칸에 보이는 문서 이름 (확장자가 있는 이름만).
+
+    본문 영역만 읽는 본문 글자 인식은 옆·위 패널의 붙임 목록을 빼 버리므로, 창 전체를 따로 살핀다.
+    ① UI Automation 목록 항목 → ② 창 전체 글자 인식(OCR, 창을 앞으로 가져오지 않음) 순서."""
+    from . import attach
+    trace = trace if trace is not None else []
+    if not IS_WIN:
+        return []
+    names: list[str] = []
+    try:
+        listed = attachment_names(hwnd)
+        names = attach.file_names_in("\n".join(listed))
+        if listed:
+            trace.append(f"화면 목록 항목 {len(listed)}개 중 문서 이름 {len(names)}개: {names}")
+    except Exception as e:
+        trace.append(f"화면 목록 항목 읽기 오류: {e}")
+    if use_ocr:
+        try:
+            import tempfile
+            img = Path(tempfile.gettempdir()) / "seomu_attach_list.png"
+            # 확대는 글자 인식 쪽(OCR 스크립트)에 맡긴다 (큰 창을 파이썬으로 키우면 느리다)
+            lines = ocr_image(img, timeout=90, scale=2) if save_window_image(hwnd, img) else []
+            found = attach.file_names_in("\n".join(l.get("text", "") for l in lines))
+            trace.append(f"창 전체 글자 인식 {len(lines)}줄 중 문서 이름 {len(found)}개: {found}")
+            names = attach.merge_names(names, found)
+        except Exception as e:
+            trace.append(f"창 전체 글자 인식 오류: {e}")
+    return names
+
+
 # ---------------------------------------------------------------- 일반 Win32 컨트롤 (추가 패키지 불필요)
 def _norm(s: str) -> str:
     return "".join(ch for ch in (s or "") if not ch.isspace() and ch not in "&.…").lower()
@@ -1017,7 +1051,8 @@ def _stem_key(s: str) -> str:
 
 def _title_mentions(title: str, path: str) -> bool:
     """창 제목에 파일 이름(확장자 없이도)이 들어 있는지. 예: '공문 - Word', '공문.hwpx - 한글'."""
-    stem = _stem_key(Path(path).stem)
+    # 창에 열린 문서 경로는 Windows 경로다: 어느 OS에서 실행해도(테스트 포함) Windows 규칙으로 나눈다
+    stem = _stem_key(ntpath.splitext(ntpath.basename(path or ""))[0])
     return len(stem) >= 2 and stem in _stem_key(title)
 
 
@@ -1059,7 +1094,7 @@ def _path_from_url(url: str) -> str:
         u = u.lstrip("/") if re.match(r"^/[A-Za-z]:", u) else u
     elif not re.match(r"^[A-Za-z]:[\\/]", u):
         return ""
-    return os.path.normpath(u.split("#")[0].split("?")[0])
+    return ntpath.normpath(u.split("#")[0].split("?")[0])
 
 
 def window_document(hwnd: int, title: str | None = None, trace: list | None = None,
@@ -1669,10 +1704,8 @@ class FileWatcher:
         self.dest.mkdir(parents=True, exist_ok=True)
         target = unique_path(self.dest / safe_name(src.name, 150))
         try:
-            if src.parent.name.lower() == "downloads":
-                shutil.move(str(src), target)  # 다운로드 폴더 파일은 옮겨서 정리
-            else:
-                shutil.copy2(src, target)       # 바탕화면·문서·임시 폴더 파일은 복사
+            # 원본 보호: 사용자 PC의 파일은 옮기거나 지우지 않고 복사만 한다 (공문 폴더에 사본을 모은다)
+            shutil.copy2(src, target)
         except OSError as e:
             return {"name": src.name, "path": "", "ok": False, "error": str(e)[:200]}
         item = {"name": target.name, "path": str(target), "ok": True, "from": str(src.parent)}

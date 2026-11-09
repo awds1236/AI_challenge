@@ -35,6 +35,32 @@ _JOIN_TIGHT = re.compile(r"^(?:은|는|이|가|을|를|의|에|에서|에게|께
                          r"[가-힣]{1,2}(?=[.,)」』]))")
 
 
+_TITLE_END = re.compile(r"(요청|알림|안내|협조|통보|개최|계획|결과|공고|제출|조사|회신|모집|신청)\s*$")
+# 홀로 쓰이는 한 글자 낱말 (줄 끝에 있어도 끊긴 단어 조각이 아니다)
+_SOLO = set("및등각약총위본그이한전후중시건부개명회차년월일것수바때곳분장원또더새옛순겸즉단곧")
+
+
+def _join_broken_words(lines: list[str]) -> list[str]:
+    """단어 중간에서 끊긴 줄을 붙인다 (화면 글자 인식·좁은 뷰어 칸에서 흔하다).
+    '…자체점검표를 작' + '성하여 제출…' → '…작성하여 제출…',  '…제출 요' + '청' → '…제출 요청'.
+    줄 폭이 일정하지 않아 '일정한 폭에서 끊긴 줄 잇기'가 동작하지 않을 때도 이 두 경우는 확실하다."""
+    out: list[str] = []
+    for l in lines:
+        prev = out[-1] if out else ""
+        cur = l.strip()
+        if prev.strip() and cur and not re.search(r"[.。!?:：」』)\]]\s*$", prev) and re.match(r"^[가-힣]", cur):
+            # 끊긴 조각 앞 어절은 두 글자 이상이어야 한다 ('○ ○ 도 교 육 청'처럼 글자마다 띄운 줄 제외)
+            dangling = re.search(r"[^\s]{2,}\s([가-힣])$", prev.rstrip())
+            alone = re.fullmatch(r"[가-힣]{1,2}", cur) and cur not in ("끝", "이상") and len(prev.strip()) >= 10 \
+                and re.search(r"[가-힣]$", prev.rstrip())
+            if (dangling and dangling.group(1) not in _SOLO and len(prev.strip()) >= 4 and not _ENUM_START.match(cur)) \
+                    or alone:
+                out[-1] = prev.rstrip() + cur
+                continue
+        out.append(l)
+    return out
+
+
 def _fix_label_spacing(line: str) -> str:
     """'제   목    ○○' → '제목  ○○' (양식 칸 맞춤용 글자 사이 공백 제거)."""
     m = _LABEL_SPACED.match(line)
@@ -88,6 +114,10 @@ def tidy_text(text: str) -> str:
             skip_next = True
             continue
         lines.append(l)
+    # 화면 글자 인식(OCR)이 줄 머리의 '○'를 '0'·'o'로 읽은 것: '0 기간: …' → '○ 기간: …'
+    # ('○ 방법. 관리기관 제출'처럼 쌍점을 마침표로 읽은 항목 이름도 바로잡는다)
+    lines = [re.sub(r"^(\s*)(?:0|o|O)\s+(?=[가-힣])", r"\1○ ", l) for l in lines]
+    lines = [re.sub(r"^(\s*[○◦•·□\-]\s*[가-힣]{2,6})\s*\.\s+(?=\S)", r"\1: ", l) for l in lines]
     # 빈 줄이 거의 모든 줄 사이에 끼어 있으면(웹 복사) 한 줄 빈 줄은 없앤다
     nonblank = [l for l in lines if l.strip()]
     singles = sum(1 for i in range(1, len(lines) - 1)
@@ -100,6 +130,9 @@ def tidy_text(text: str) -> str:
         joined: list[str] = []
         for l in lines:
             prev = joined[-1] if joined else ""
+            if len(joined) == 1 and _TITLE_END.search(prev):        # 본문 맨 위의 공문 제목 줄은 본문 문장과 잇지 않는다
+                joined.append(l)
+                continue
             if (prev and l.strip() and len(prev) >= width * 0.8 and not re.search(r"[.。!?:：」』)]\s*$", prev)
                     and not _ENUM_START.match(l) and not re.match(r"^\s*[가-힣 ]{1,12}\s*[:：]", l)):
                 # 한글끼리 이어질 때: 줄 끝 어절이 한 글자 조각('실'·'제')이거나 다음 줄이 어미·조사로 시작하면 붙여 쓴다
@@ -109,6 +142,8 @@ def tidy_text(text: str) -> str:
             else:
                 joined.append(l)
         lines = joined
+    else:                     # 폭이 일정하지 않은 본문(화면 글자 인식 등)에서도 확실히 끊긴 단어만 붙인다
+        lines = _join_broken_words(lines)
     out: list[str] = []
     for l in lines:
         if out and l.strip() and l == out[-1]:          # 같은 줄이 연달아 나오면 하나만
@@ -404,7 +439,7 @@ def _last_obj_verb(s: str) -> str:
     return f"{objs[-1]} {v.group(1)}" if objs else ""
 
 
-_STOP_WORD = re.compile(r"(?:에서는|에서|께서는|께서|는|은|하여|하고|위해|위하여|따라|관련하여|대하여|및|"
+_STOP_WORD = re.compile(r"(?:에서는|에서|께서는|께서|는|은|하여|하고|위해|위하여|따라|관련하여|대하여|및|^후|^뒤|이후|"
                         r"\d|[.)(:~∼])$|^\d")
 
 
@@ -478,7 +513,9 @@ def clean_what(context: str, raw_date: str, fields: dict, title: str, heading: s
     for pat in DATE_PATTERNS:
         s = pat.sub(" ", s)
     s = re.sub(r"\(\s*[월화수목금토일]\s*\)|\b\d{1,2}:\d{2}\b|[~∼～]", " ", s)
-    s = re.sub(r"^\s*(까지|한)\b", "", re.sub(r"(?<=\s)(까지|한)(?=\s|$)", "", s))
+    s = re.sub(r"^\s*(까지|한)\b", "", re.sub(r"(?<=[\s(])(까지|한)(?=[\s)]|$)", "", s))
+    s = re.sub(r"\(\s*\)", " ", s)                      # 날짜를 뺀 빈 괄호 '( )'
+    s = re.sub(r"^\s*(?:방법|기간|일정|기한|대상|장소|내용|시기)\s*[:：.]\s*", "", s)
     s = re.sub(r"\t+", " · ", s)
     s = re.sub(r"\s{2,}", " ", s).strip(" ·.,:")
     if not s and prev:       # 날짜만 있는 줄: 바로 위의 짧은 항목 이름 ('마. 접수 마감' → '접수 마감')

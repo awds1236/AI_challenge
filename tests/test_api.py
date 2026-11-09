@@ -212,7 +212,7 @@ def test_capture_window_simulated(api, tmp_path, monkeypatch):
     folder = Path(n["folder"])
     assert folder.name.endswith("2026년도 회계마감에 따른 협조사항 알림")
     assert (folder / "붙임" / "계약심의위원회 운영 내규.hwp").exists()
-    assert not (dl / "계약심의위원회 운영 내규.hwp").exists()   # 다운로드 폴더에서 옮겨 정리
+    assert (dl / "계약심의위원회 운영 내규.hwp").exists()       # 원본 보호: 다운로드 폴더의 원본은 그대로 둔다
     assert [d["date"] for d in n["analysis"]["deadlines"]] == ["2026-11-13", "2026-11-27", "2026-12-28"]
     assert n["capture_method"] == "본문복사 버튼"
     assert (folder / "수집기록.txt").exists()
@@ -243,6 +243,62 @@ def test_capture_window_harvests_existing_attachment(api, tmp_path, monkeypatch)
     assert n["analysis"]["deadlines"][0]["what"] == "조사표 회신" or n["analysis"]["deadlines"][0]["date"] == "2026-11-13"
 
 
+def test_capture_window_uses_screen_attachment_list(api, tmp_path, monkeypatch):
+    """본문을 화면 글자 인식으로 읽어 붙임 표기가 없어도(본문 단만 읽음), 뷰어 화면의 붙임 목록 칸에 보이는
+    파일 이름으로 붙임을 알아내 뷰어가 받아 둔 파일을 모은다."""
+    from seomu import attach, winwindow
+    cache = tmp_path / "AppData" / "XSAppr" / "temp"
+    cache.mkdir(parents=True)
+    (cache / "자체점검표(공중이용시설).hwpx").write_bytes(b"form")
+    body = ("중대재해처벌법에 따라 2026년도 하반기 안전·보건 의무 이행사항에 대하여 점검 실시\n"
+            "해당 관리기관에서는 자체점검 후 자체점검표(공중이용시설)를 작\n성하여 제출하여 주시기 바랍니다.\n"
+            "□ 점검개요\n0 기간: 2026. 11. 9.(월) ~ 11. 20.(금)\n0 방법: 관리기관 제출 (11월 11일(수)까지)")
+    win = {"hwnd": 9, "title": "2026년 하반기 중대시민재해 점검계획 알림 및 자체점검표 제출 요청",
+           "process": "XSAppr.exe", "cls": "X", "pid": 1}
+    monkeypatch.setattr(winwindow, "available", lambda: True)
+    monkeypatch.setattr(winwindow, "list_windows", lambda: [win])
+    monkeypatch.setattr(winwindow, "extract_text", lambda h, log=None, trace=None, found=None: (body, "화면 글자 인식(OCR)"))
+    monkeypatch.setattr(winwindow, "save_window_image", lambda h, p, **k: False)
+    monkeypatch.setattr(winwindow, "screen_attachment_names",
+                        lambda h, trace=None, use_ocr=True: ["자체점검표(공중이용시설).hwpx"])
+    monkeypatch.setattr(winwindow, "get_clipboard", lambda: "")
+    monkeypatch.setattr(winwindow, "watch_dirs", lambda extra=None: [tmp_path / "none"])
+    monkeypatch.setattr(attach, "search_roots", lambda: [(tmp_path / "AppData", 4)])
+    monkeypatch.setattr(attach, "recent_documents", lambda *a, **k: [])
+    n = wait(api, api.capture_window(9, "", False, 60))
+    assert n["attach_summary"] == {"expected": 1, "found": 1, "extra": 0}
+    assert (Path(n["folder"]) / "붙임" / "자체점검표(공중이용시설).hwpx").exists()
+
+
+def test_capture_window_takes_viewer_cache_when_no_names(api, tmp_path, monkeypatch):
+    """붙임 이름을 전혀 알 수 없으면, 뷰어 프로그램 이름이 든 캐시 폴더에 방금 생긴 문서를 붙임으로 모은다."""
+    from seomu import attach, winwindow
+    cache = tmp_path / "AppData" / "XSAppr" / "temp"
+    cache.mkdir(parents=True)
+    (cache / "점검표.hwp").write_bytes(b"form")
+    (cache / "viewer.log.txt").write_bytes(b"log")             # 설정·기록 파일은 빼야 한다
+    other = tmp_path / "AppData" / "Other"
+    other.mkdir()
+    (other / "상관없는 문서.hwp").write_bytes(b"x")
+    body = "자체점검 후 결과를 제출하여 주시기 바랍니다. 기한: 2026. 11. 20.(금)까지 회신 바랍니다. 담당자 확인 요망."
+    win = {"hwnd": 10, "title": "점검 요청", "process": "XSAppr.exe", "cls": "X", "pid": 1}
+    monkeypatch.setattr(winwindow, "available", lambda: True)
+    monkeypatch.setattr(winwindow, "list_windows", lambda: [win])
+    monkeypatch.setattr(winwindow, "extract_text", lambda h, log=None, trace=None, found=None: (body, "화면 글자 인식(OCR)"))
+    monkeypatch.setattr(winwindow, "save_window_image", lambda h, p, **k: False)
+    monkeypatch.setattr(winwindow, "screen_attachment_names", lambda h, trace=None, use_ocr=True: [])
+    monkeypatch.setattr(winwindow, "get_clipboard", lambda: "")
+    monkeypatch.setattr(winwindow, "watch_dirs", lambda extra=None: [tmp_path / "none"])
+    monkeypatch.setattr(attach, "search_roots", lambda: [(tmp_path / "AppData", 4)])
+    monkeypatch.setattr(attach, "recent_documents", lambda *a, **k: [])
+    job = api.capture_window(10, "", False, 20)
+    time.sleep(1.0)
+    api.job_signal(job["job_id"], "done")
+    n = wait(api, job)
+    names = sorted(p.name for p in (Path(n["folder"]) / "붙임").iterdir())
+    assert names == ["점검표.hwp"]
+
+
 def test_recollecting_same_notice_does_not_duplicate(api, tmp_path):
     """같은 공문을 다시 수집하면 공문·할 일이 겹쳐 생기지 않고, 완료 표시는 남고, 새 붙임만 더해진다."""
     body = ("제목 청사 소방시설 점검 협조\n1. 청사 소방시설 정기 점검을 실시하오니 협조하여 주시기 바랍니다.\n"
@@ -271,8 +327,10 @@ def test_recollecting_same_notice_does_not_duplicate(api, tmp_path):
 def test_open_mail_uses_shell_and_drops_long_body(api, monkeypatch):
     """[메일 앱으로]: 앱 안에서 mailto:로 연다. 한글 본문이 길면 주소 길이 제한 때문에 제목만 넘긴다. (실제 창은 열지 않음)"""
     import os
+    import seomu.api as api_mod
     opened = []
     monkeypatch.setattr(os, "startfile", lambda u: opened.append(u), raising=False)
+    monkeypatch.setattr(api_mod.sys, "platform", "win32")        # Windows 방식(ShellExecute)을 흉내 낸다
     assert api.open_mail("[회신] 점검", "짧은 본문")["with_body"]
     assert opened[-1].startswith("mailto:?subject=") and "&body=" in opened[-1]
     assert not api.open_mail("[회신] 점검", "가" * 500)["with_body"]

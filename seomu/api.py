@@ -27,10 +27,10 @@ from .collector import (BrowserWorker, Captured, clean_title, collect_from_files
 from .config import Config
 from .deadlines import dday
 from .notice_text import short_task, tidy_text
-from .engine import LocalClient, LocalEngine, add_model_file, ollama_model_blob
+from .engine import ENGINE_MISSING, LocalClient, LocalEngine, add_model_file, ollama_model_blob
 from .llm import LLMError, OllamaClient
 from . import models as model_catalog
-from . import attach, downloader, winwindow
+from . import attach, downloader, forms as forms_mod, guide as guide_mod, winwindow
 from .mail import DEFAULT_TEMPLATES, POLISH_PROMPT, VARIABLES, build_variables, clean_polished, render, tasks_to_ics
 from .parsers import READABLE_EXT
 from .rag import RAGEngine
@@ -55,6 +55,12 @@ def _has_open_program(ext: str) -> bool:
         return True
 
 
+# 이름으로 캐시 폴더를 가릴 수 없는 일반 프로그램 (브라우저·탐색기·문서 편집기 등)
+GENERIC_PROCESSES = {"explorer.exe", "msedge.exe", "chrome.exe", "whale.exe", "firefox.exe", "iexplore.exe",
+                     "notepad.exe", "hwp.exe", "hword.exe", "winword.exe", "excel.exe", "acrord32.exe", "acrobat.exe",
+                     "python.exe", "pythonw.exe", "seomuai.exe", "applicationframehost.exe"}
+
+
 class Job:
     def __init__(self, kind: str):
         self.id = uuid.uuid4().hex[:12]
@@ -76,6 +82,8 @@ class Api:
     def __init__(self, home: Path | None = None):
         self._cfg = Config(home)
         self._engine = LocalEngine(self._cfg.home)
+        self._engine_install: dict = {"state": "", "message": ""}    # 엔진 자동 받기 상태 (화면 표시용)
+        self._engine_install_lock = threading.Lock()
         self._store = Store(self._cfg.db_path)
         self._rag = RAGEngine(self._store, self._client, lambda: self._cfg.settings)
         self._jobs: dict[str, Job] = {}
@@ -113,7 +121,9 @@ class Api:
     def engine_info(self) -> dict:
         return {"kind": self._engine_kind(), "setting": self._cfg.settings.engine,
                 "server": self._engine.server_path(), "models": list(self._engine.models()),
-                "model_dir": str(self._engine.writable_model_dir()), "running": self._engine.running()}
+                "model_dir": str(self._engine.writable_model_dir()), "running": self._engine.running(),
+                "engine_dir": str(self._engine.writable_engine_dir()),
+                "need_engine": self._engine.missing_engine(), "install": dict(self._engine_install)}
 
     def _run_job(self, kind: str, fn: Callable[[Job], object]) -> dict:
         job = Job(kind)
@@ -193,6 +203,15 @@ class Api:
             st["embed_model"] = c.pick_embed_model(s.embed_model)
         st["local_only"] = not s.allow_remote_llm or self._engine_kind() == "builtin"
         st["engine"] = self._engine_kind()
+        # 모델 파일은 있는데 실행 엔진(llama-server)만 없다 → '모델 없음'이 아니라 '엔진 없음'으로 알린다
+        st["need_engine"] = not st["ok"] and s.engine != "ollama" and self._engine.missing_engine()
+        st["engine_install"] = dict(self._engine_install)
+        if st["need_engine"]:
+            st["error"] = ENGINE_MISSING
+            if self._engine_install["state"] == "running":
+                st["error"] = "모델 파일은 있고, AI 실행 엔진(llama-server)을 받는 중입니다. 잠시 뒤 자동으로 AI 분석을 씁니다."
+            elif self._engine_install["state"] == "error":
+                st["error"] = ENGINE_MISSING + f" (자동 받기 실패: {self._engine_install['message']})"
         if not st["ok"] and st["engine"] == "ollama" and self._engine.available():
             # Ollama를 골랐는데 꺼져 있다: 이 PC에는 내장 엔진·모델이 있으니 받을 필요 없이 바꾸기만 하면 된다
             st["error"] = ("Ollama가 실행 중이 아닙니다. 이 PC에는 내장 AI 엔진과 모델이 이미 있으니, 설정 → AI 엔진을 "
@@ -283,6 +302,7 @@ class Api:
             if not self._engine.server_path():
                 job.message = "AI 엔진 받는 중…"
                 downloader.install_engine(self._engine.writable_engine_dir(), cb)
+                self._engine.forget_server()
             path = downloader.download_model(m["dl"], self._engine.writable_model_dir(), cb)
             values = {"embed_model" if m["kind"] == "embed" else "chat_model": path.stem}
             if self._cfg.settings.engine == "ollama":
@@ -320,6 +340,49 @@ class Api:
             add_model_file(self._engine, str(blob), src_name.replace(":", "-"), self._progress(job))
             return self.model_catalog()
         return self._run_job("import", work)
+
+    def install_engine(self) -> dict:
+        """[AI 엔진 받기]: 모델 파일은 그대로 두고 실행 엔진(llama.cpp llama-server)만 받는다."""
+        def work(job: Job):
+            job.message = "AI 엔진 받는 중…"
+            self._install_engine_now(self._progress(job))
+            return self.model_catalog()
+        return self._run_job("engine", work)
+
+    def import_engine(self, path: str) -> dict:
+        """[엔진 파일 지정]: 받아 둔 llama.cpp 압축 파일(.zip)이나 llama-server.exe로 엔진을 넣는다 (인터넷 불필요)."""
+        if not (path or "").strip():
+            raise ValueError("llama.cpp 압축 파일(.zip)이나 llama-server.exe를 지정하세요")
+
+        def work(job: Job):
+            job.message = "AI 엔진 파일을 넣는 중…"
+            self._engine.stop()
+            downloader.install_engine_from(path, self._engine.writable_engine_dir())
+            self._engine.forget_server()
+            self._engine_install = {"state": "done", "message": ""}
+            if self._cfg.settings.engine == "ollama":
+                self.save_settings({"engine": "auto"})
+            return self.model_catalog()
+        return self._run_job("engine", work)
+
+    def _install_engine_now(self, on_progress=None) -> None:
+        with self._engine_install_lock:
+            self._engine.forget_server()
+            if self._engine.server_path():
+                self._engine_install = {"state": "done", "message": ""}
+                return
+            self._engine_install = {"state": "running", "message": ""}
+            try:
+                self._engine.stop()
+                downloader.install_engine(self._engine.writable_engine_dir(), on_progress)
+            except Exception as e:
+                self._engine_install = {"state": "error", "message": (str(e) or e.__class__.__name__)[:300]}
+                raise
+            finally:
+                self._engine.forget_server()
+            self._engine_install = {"state": "done", "message": ""}
+            if self._cfg.settings.engine == "ollama":
+                self.save_settings({"engine": "auto"})
 
     def set_engine(self, kind: str) -> dict:
         if kind not in ("auto", "builtin", "ollama"):
@@ -428,9 +491,81 @@ class Api:
                 "hint": "" if not err else "이 형식은 내용을 미리 볼 수 없습니다. [파일 열기]로 PC의 프로그램에서 열어 보세요."}
 
     # ------------------------------------------------------------ 규정 저장소 (RAG)
+    REG_CATEGORIES = ("법령", "조례", "내규", "지침", "서식", "기타")
+
+    def _managed_reg_dir(self) -> Path:
+        """화면에서 추가한 규정의 사본을 두는 프로그램 전용 폴더 (여기 있는 사본만 삭제한다)."""
+        d = self._cfg.home / "regulations"
+        d.mkdir(parents=True, exist_ok=True)
+        if str(d) not in self._cfg.settings.regulation_dirs:
+            self.save_settings({"regulation_dirs": [str(d)] + list(self._cfg.settings.regulation_dirs)})
+        return d
+
+    def _is_managed(self, path: str | Path) -> bool:
+        try:
+            Path(path).resolve().relative_to((self._cfg.home / "regulations").resolve())
+            return True
+        except ValueError:
+            return False
+
     def list_documents(self) -> dict:
-        return {"documents": self._store.list_documents(), "dirs": self._cfg.settings.regulation_dirs,
-                "progress": self._rag.progress}
+        docs = self._store.list_documents()
+        for d in docs:
+            d["managed"] = self._is_managed(d["path"])
+        excluded = [{"path": p, "name": Path(p).name, "exists": Path(p).exists()}
+                    for p in self._cfg.settings.excluded_docs]
+        return {"documents": docs, "dirs": self._cfg.settings.regulation_dirs, "progress": self._rag.progress,
+                "excluded": excluded, "categories": list(self.REG_CATEGORIES),
+                "managed_dir": str(self._cfg.home / "regulations")}
+
+    def delete_regulation(self, path: str) -> dict:
+        """규정을 저장소에서 뺀다. 화면에서 추가한 사본은 지우고, 연결한 폴더의 원본 파일은 지우지 않고 제외 목록에 넣는다."""
+        p = Path(path or "")
+        key = str(p.resolve()) if str(path or "").strip() else ""
+        if not key or not self._store.get_document(key) and not p.exists():
+            raise ValueError("저장소에 없는 규정입니다")
+        if self._is_managed(p):
+            p.unlink(missing_ok=True)
+            mode = "deleted"
+        else:
+            ex = [x for x in self._cfg.settings.excluded_docs if x != key] + [key]
+            self.save_settings({"excluded_docs": ex})
+            mode = "excluded"
+        cats = dict(self._cfg.settings.doc_categories or {})
+        if mode == "deleted" and cats.pop(key, None) is not None:     # 제외만 한 규정은 다시 넣을 때 분류를 되살린다
+            self.save_settings({"doc_categories": cats})
+        self._store.delete_document(key)
+        self._rag.invalidate()
+        return {"mode": mode, "name": p.name}
+
+    def restore_regulation(self, path: str) -> dict:
+        """제외했던 규정을 다시 저장소에 넣는다 (다시 색인)."""
+        ex = [x for x in self._cfg.settings.excluded_docs if x != path]
+        self.save_settings({"excluded_docs": ex})
+        return self.reindex(False)
+
+    def set_regulation_category(self, path: str, category: str) -> bool:
+        if category not in self.REG_CATEGORIES:
+            raise ValueError("분류는 " + "·".join(self.REG_CATEGORIES) + " 중에서 고르세요")
+        key = str(Path(path).resolve())
+        cats = dict(self._cfg.settings.doc_categories or {})
+        cats[key] = category
+        self.save_settings({"doc_categories": cats})
+        self._store.set_document_category(key, category)
+        self._rag.invalidate()
+        return True
+
+    def replace_regulation(self, path: str, new_file: str) -> dict:
+        """개정된 규정으로 바꾼다: 새 파일을 추가하고 예전 규정은 저장소에서 뺀다."""
+        src = Path(new_file or "")
+        if not src.is_file() or src.suffix.lower() not in READABLE_EXT:
+            raise ValueError("규정 파일(HWP·HWPX·PDF·DOCX·XLSX·TXT 등)을 고르세요")
+        old = Path(path)
+        if old.resolve() != src.resolve():
+            same_place = self._is_managed(old) and old.name == src.name
+            if not same_place:                 # 같은 이름이면 사본을 덮어쓰므로 지우지 않는다
+                self.delete_regulation(path)
+        return self.import_regulations([str(src)])
 
     def add_regulation_dir(self, path: str) -> dict:
         if not path or not Path(path).exists():
@@ -445,10 +580,8 @@ class Api:
         return self.save_settings({"regulation_dirs": dirs})
 
     def import_regulations(self, paths: list[str]) -> dict:
-        """파일을 기본 규정 폴더로 복사한 뒤 색인."""
-        target = Path(self._cfg.settings.regulation_dirs[0]) if self._cfg.settings.regulation_dirs \
-            else self._cfg.home / "regulations"
-        target.mkdir(parents=True, exist_ok=True)
+        """파일을 프로그램 전용 규정 폴더로 복사한 뒤 색인 (원본은 그대로 둔다)."""
+        target = self._managed_reg_dir()
         copied = []
         for p in paths or []:
             src = Path(p)
@@ -457,6 +590,9 @@ class Api:
                 if src.resolve() != dest.resolve():
                     shutil.copy2(src, dest)
                 copied.append(dest.name)
+                key = str(dest.resolve())          # 예전에 뺐던 같은 규정을 다시 넣으면 제외 목록에서 푼다
+                if key in self._cfg.settings.excluded_docs:
+                    self.save_settings({"excluded_docs": [x for x in self._cfg.settings.excluded_docs if x != key]})
         return {"copied": copied, **self.reindex(False)}
 
     def reindex(self, force: bool = False) -> dict:
@@ -491,6 +627,126 @@ class Api:
     def clear_chat(self) -> bool:
         self._store.clear_chat()
         return True
+
+    # ------------------------------------------------------------ 상황 안내 (서무비서)
+    def guide(self, situation: str, use_ai: bool = True) -> dict:
+        """상황을 말하면 규정으로 절차·서식 초안·다음 할 일을 안내한다 (AI가 없어도 규칙으로 동작)."""
+        situation = (situation or "").strip()
+        if len(situation) < 2:
+            raise ValueError("상황을 입력하세요 (예: 다음 주 수요일 대전으로 출장 가요)")
+
+        def work(job: Job):
+            job.message = "관련 규정을 찾는 중…"
+            client, model = None, ""
+            if use_ai:
+                try:
+                    c = self._client()
+                    if c.status().get("ok"):
+                        client, model = c, c.pick_chat_model(self._cfg.settings.chat_model)
+                except LLMError:
+                    client = None
+            if client is not None:
+                job.message = "절차를 정리하고 로컬 AI가 서식 초안을 다듬는 중…"
+            res = guide_mod.make_guide(situation, lambda q: self._rag.search(q), client, model,
+                                       num_ctx=self._cfg.settings.num_ctx)
+            self._match_org_forms(res)
+            res["id"] = self._store.add_guide(situation, res)
+            return res
+        return self._run_job("guide", work)
+
+    # ---- 기관 서식 (올려 둔 서식 그대로 채우기)
+    def _forms(self) -> forms_mod.FormStore:
+        return forms_mod.FormStore(self._cfg.home / "forms")
+
+    def _match_org_forms(self, res: dict) -> None:
+        store = self._forms()
+        for f in res.get("forms") or []:
+            f["template"] = store.match(f["name"])
+
+    def list_forms(self) -> dict:
+        return {"forms": self._forms().list(), "folder": str(self._cfg.home / "forms")}
+
+    def add_forms(self, paths: list[str]) -> dict:
+        """기관 서식(HWPX·DOCX·TXT)을 올린다. 원본은 그대로 두고 프로그램 폴더에 사본을 둔다."""
+        added = self._forms().add(paths)
+        return dict(self.list_forms(), added=added)
+
+    def delete_form(self, name: str) -> dict:
+        self._forms().delete(name)
+        return self.list_forms()
+
+    def fill_guide_form(self, guide_id: int, form_index: int, body: str = "", template: str = "") -> dict:
+        """상황 안내의 서식 초안을 올려 둔 기관 서식에 채워 새 파일로 저장한다."""
+        g = self._store.get_guide(int(guide_id))
+        if not g:
+            raise ValueError("안내 기록을 찾을 수 없습니다. 상황 안내를 다시 받아 주세요.")
+        res = g["result"]
+        drafts = res.get("forms") or []
+        draft = drafts[int(form_index)] if 0 <= int(form_index) < len(drafts) else {"name": "서식", "body": ""}
+        name = (template or draft.get("template") or "").strip()
+        path = self._forms().path(name) if name else None
+        if not path:
+            raise ValueError("채울 기관 서식을 고르세요 (상황 안내 화면의 '기관 서식'에서 서식 파일을 올릴 수 있습니다)")
+        s = self._cfg.settings
+        profile = {"user_name": s.user_name, "user_dept": s.user_dept, "user_phone": s.user_phone}
+        vals = forms_mod.Values(forms_mod.situation_values(res.get("situation") or {}, profile),
+                                forms_mod.body_values(body or draft.get("body", "")))
+        folder = s.resolved_download_root() / "서식 초안"
+        folder.mkdir(parents=True, exist_ok=True)
+        out = unique_path(folder / f"{safe_name(path.stem, 60)}_{datetime.now().strftime('%Y%m%d')}{path.suffix.lower()}")
+        r = forms_mod.fill_file(path, vals, out)
+        return {"path": str(out), "folder": str(folder), "template": path.stem, **r}
+
+    def guide_history(self) -> list[dict]:
+        return [{"id": g["id"], "situation": g["situation"], "created_at": g["created_at"],
+                 "kind": (g["result"].get("situation") or {}).get("kind", "")} for g in self._store.list_guides(20)]
+
+    def get_guide(self, guide_id: int) -> dict | None:
+        g = self._store.get_guide(int(guide_id))
+        if not g:
+            return None
+        return dict(g["result"], id=g["id"])
+
+    def delete_guide(self, guide_id: int) -> bool:
+        self._store.delete_guide(int(guide_id))
+        return True
+
+    def guide_add_tasks(self, tasks: list[dict]) -> dict:
+        """안내의 '다음 할 일'을 할 일 목록에 넣는다 (같은 제목·기한이 이미 있으면 건너뛴다)."""
+        have = {(t["title"], t.get("due") or "") for t in self._store.list_tasks(True)}
+        added = 0
+        for t in tasks or []:
+            title = (t.get("title") or "").strip()
+            due = (t.get("due") or "").strip()
+            if not title or (title, due) in have:
+                continue
+            if due and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", due):
+                due = ""
+            self._store.add_task(title, t.get("detail") or "", due or None)
+            have.add((title, due))
+            added += 1
+        return {"added": added}
+
+    def save_guide_form(self, name: str, body: str, fmt: str = "txt") -> dict:
+        """서식 초안을 파일로 저장한다 (txt 또는 한글 hwpx). 저장한 경로를 돌려준다."""
+        body = (body or "").strip()
+        if not body:
+            raise ValueError("저장할 초안 내용이 없습니다")
+        folder = self._cfg.settings.resolved_download_root() / "서식 초안"
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = safe_name((name or "서식 초안").strip(), 60) + "_" + datetime.now().strftime("%Y%m%d")
+        if fmt == "hwpx":
+            tpath = report_mod.builtin_template()
+            if not tpath:
+                raise ValueError("한글 양식 파일이 없어 hwpx로 저장할 수 없습니다. txt로 저장해 주세요.")
+            tpl = report_mod.load_template(tpath)
+            outline = report_mod.outline_from_text(body, name or "")
+            out = unique_path(folder / f"{stem}.hwpx")
+            out.write_bytes(report_mod.fill(tpl, outline, dept=self._cfg.settings.user_dept))
+        else:
+            out = unique_path(folder / f"{stem}.txt")
+            out.write_text(body + "\n", encoding="utf-8")
+        return {"path": str(out), "folder": str(folder)}
 
     # ------------------------------------------------------------ 공문 수집
     def _browser_worker(self) -> BrowserWorker:
@@ -625,6 +881,11 @@ class Api:
             return
         s = self._cfg.settings
         started = time.time()
+        if s.engine != "ollama" and self._engine.missing_engine() and self._engine_install["state"] != "error":
+            try:                       # 모델은 있는데 엔진만 없다 → 엔진을 받고 이어서 AI 분석 (받는 중이면 기다린다)
+                self._install_engine_now()
+            except Exception:
+                pass
         a = analyze(n["title"], n["body"], n["attachments"], self._client(), s.chat_model, s.num_ctx)
         if a.get("mode") == "llm":
             a["ai_status"] = "done"
@@ -647,6 +908,14 @@ class Api:
     def preload_model(self) -> None:
         """앱 시작 시 답변 모델을 미리 메모리에 올려 첫 질문·분석을 빠르게 한다."""
         def run():
+            # 모델 파일은 있는데 엔진만 없으면(엔진 폴더를 빠뜨리고 복사·백신이 지움 등) 엔진을 알아서 받아 둔다
+            if self._cfg.settings.engine != "ollama" and self._engine.missing_engine():
+                try:
+                    self._install_engine_now()
+                    logging.getLogger("seomu").info("AI 엔진을 자동으로 받았습니다: %s", self._engine.server_path())
+                except Exception as e:          # 인터넷이 안 되는 PC 등: 화면에서 [엔진 파일 지정]을 안내
+                    logging.getLogger("seomu").warning("AI 엔진 자동 받기 실패: %s", e)
+                    return
             try:
                 c = self._client()
                 c.preload(c.pick_chat_model(self._cfg.settings.chat_model))
@@ -742,6 +1011,13 @@ class Api:
             with winwindow.capturable(hwnd_, trace):            # 최소화된 창도 화면 밖에서 펼쳐 읽는다
                 text, how = winwindow.extract_text(hwnd_, say, trace, found)
                 shot = winwindow.capture_png(hwnd_)
+                # 뷰어의 '붙임목록'·'첨부파일' 칸 (본문 글자 인식은 본문 단만 읽어 옆·위 패널의 붙임 이름을 놓친다)
+                say("화면에서 붙임 목록을 찾는 중…")
+                try:
+                    screen_names = winwindow.screen_attachment_names(hwnd_, trace)
+                except Exception as e:             # 화면 읽기 실패가 수집을 막지 않게
+                    trace.append(f"화면 붙임 목록 오류: {e}")
+                    screen_names = []
             text = (text or "").replace("\r\n", "\n").replace("\r", "\n")   # 프로그램마다 줄 구분이 다르다
             win_title = clean_title(win["title"])
             # 폴더 이름: 직접 입력 > 본문의 '제목' 줄 > 창 제목
@@ -763,6 +1039,12 @@ class Api:
             # ---- 붙임: 본문의 '붙임/첨부' 목록으로 모아야 할 파일을 먼저 알아낸다
             expected = attach.expected_attachments(text)
             trace.append(f"본문의 붙임 목록 {len(expected)}개: {expected}")
+            # 창 제목·창에 열린 문서 자체(한글로 연 공문 등)는 붙임이 아니다
+            own = [x for x in (attach.name_from_title(win["title"]), Path(found.get("document") or "").name) if x]
+            screen_names = [n for n in screen_names if not any(attach.name_score(n, o) >= 1.0 for o in own)]
+            if screen_names:
+                expected = attach.merge_names(expected, screen_names)
+                trace.append(f"화면의 붙임 이름을 더한 붙임 목록 {len(expected)}개: {expected}")
             got: dict[str, dict] = {}          # 붙임 이름 → 모은 파일
             extras: list[dict] = []            # 목록과 이름이 안 맞지만 새로 생긴 파일
             hashes: set[str] = set()
@@ -824,6 +1106,14 @@ class Api:
             # ① 이미 PC에 있는 파일 (뷰어가 열 때 내려받은 임시·캐시 파일, 최근 문서 등)
             say("PC에 이미 내려받아진 붙임파일을 찾는 중…")
             harvest(started - 3 * 3600)
+            if not expected and win["process"].lower() not in GENERIC_PROCESSES:
+                # 붙임 이름을 전혀 알 수 없을 때: 뷰어가 공문을 열면서 붙임을 받아 둔 캐시 폴더(경로에 프로그램 이름)에서
+                # 최근 30분 안에 생긴 문서만 가져온다 (그림·글자 파일은 뷰어 설정·아이콘일 수 있어 뺀다)
+                for f in attach.viewer_files(win["process"], started - 1800, exclude=folder)[:10]:
+                    if Path(f["path"]).suffix.lower() in (".txt", ".png", ".jpg", ".jpeg", ".csv"):
+                        continue
+                    if take(f["path"], None):
+                        trace.append(f"뷰어 캐시 폴더의 최근 파일: {f['path']}")
             # ② 저장/다운로드 버튼
             state = ""
             # 'PC저장'을 누르면 뷰어가 띄운 저장 창이 화면 맨 앞에 뜬다 (뷰어 프로그램이 하는 일이라 막을 수 없다)
@@ -878,6 +1168,8 @@ class Api:
                 left = missing()
                 hint = (f"붙임 {len(got)}/{len(expected)}개를 모았습니다. 남은 붙임은 그 창에서 저장하면 자동으로 모읍니다."
                         if expected else "새로 저장되는 붙임파일을 기다리는 중…")
+                if left and not winwindow.foreground_allowed():
+                    hint += " ('PC저장 자동 누르기'를 켜면 뷰어의 저장 버튼을 대신 누릅니다)"
                 hint += f" (최대 {max(0, int(deadline - time.time()))}초 더 기다림 · [붙임 수집 완료]를 누르면 바로 정리)"
                 if not text:
                     hint += " 본문을 읽지 못했습니다. 그 창에서 본문을 복사(Ctrl+A, Ctrl+C 또는 [본문복사])하면 바로 받습니다."

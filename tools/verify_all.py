@@ -364,6 +364,11 @@ def main() -> int:
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--report", default=str(ROOT / "docs" / "검증결과.md"))
     args = ap.parse_args()
+    if not sys.platform.startswith("win"):
+        # 예시 그림(PowerShell)·화면 글자 인식(Windows OCR)·PDF 변환(Edge)·모의 데스크톱 뷰어가 Windows 기능이다
+        print("종합 검증은 Windows에서만 실행할 수 있습니다 (PowerShell·Windows OCR·Edge 사용). "
+              "다른 OS에서는 python -m pytest -q 로 단위·통합 테스트를 실행하세요.")
+        return 2
 
     print("예시 만드는 중…")
     s = build_samples()

@@ -309,3 +309,19 @@ def test_ai_folder_name_must_keep_title_subject():
     assert _keeps_subject("송년 행사 참석 조사", "2026년 송년 행사 참석 조사")
     assert _keeps_subject("집행잔액 현황표 제출", "2026회계연도 집행잔액 현황 제출 요청")
     assert _keeps_subject("청렴 교육 이수 결과 보고", "청렴 교육 이수 및 결과 보고 요청")
+
+
+def test_attachments_from_ocr_text_and_screen_list():
+    """화면 글자 인식(OCR) 본문: '○'가 '0'으로, '붙임'이 '붙 임'으로 읽혀도 붙임 목록을 찾는다.
+    본문에 붙임 표기가 없으면 뷰어의 붙임 목록 칸에 보이는 파일 이름으로 붙임을 알아낸다."""
+    from seomu import attach
+    ocr = ("관리기관에서는 자체점검 후 자체점검표를 작\n성하여 제출하여 주시기 바랍니다.\n"
+           "0 붙 임 1. 자체점검표(공중이용시설) 1부.\n2. 점검계획 1부. 끝.")
+    assert attach.expected_attachments(ocr) == ["자체점검표(공중이용시설)", "점검계획"]
+    assert attach.expected_attachments("제출 바랍니다. 붙임 1. 자체점검표 1부. 2. 계획서 1부. 끝.") == ["자체점검표", "계획서"]
+    assert attach.expected_attachments("기간: 11. 9. ~ 11. 20.\n대상: 공중이용시설") == []
+    screen = attach.file_names_in("첨부파일 (2)\n1. 자체점검표(공중이용시설).hwpx (35KB)\n"
+                                  "2026년 하반기 점검계획 .pdf\n본문.html 공문 보기")
+    assert screen == ["자체점검표(공중이용시설).hwpx", "2026년 하반기 점검계획.pdf"]
+    merged = attach.merge_names(["자체점검표(공중이용시설)"], screen)
+    assert merged == ["자체점검표(공중이용시설).hwpx", "2026년 하반기 점검계획.pdf"]

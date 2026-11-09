@@ -25,7 +25,15 @@ SKIP_DIRS = {"microsoft", "google", "mozilla", "packages", "nvidia", "intel", "a
 
 
 # ---------------------------------------------------------------- 붙임 목록 해석
-_ATTACH_HEAD = re.compile(r"(?:^|\n)[ \t□○·\-]*(?:붙[ \t]*임|첨[ \t]*부)(?![가-힣])[ \t]*[:：]?")
+# 줄 머리 기호: 화면 글자 인식(OCR)은 '○'를 '0·o·ㅇ'로, '·'를 '•·ㆍ'로 읽기도 한다.
+# '붙임'도 OCR에서 '붙 임'·'붙입'·'불임'으로 읽히는 일이 있다 (공문 본문에 '불임'이 쓰일 일은 거의 없다)
+_ATTACH_HEAD = re.compile(r"(?:^|\n)[ \t□■○●◯◦•·ㆍ∙※*\-–0oOㅇ]{0,4}"
+                          r"(?:[붙불][ \t]*[임입]|첨[ \t]*부(?:[ \t]*(?:파[ \t]*일|문[ \t]*서))?)"
+                          r"(?![가-힣])[ \t]*[:：]?")
+# 붙임 목록이 문장 뒤에 이어 붙은 경우 (OCR·본문복사가 줄을 합친 경우): '…바랍니다. 붙임 1. ○○ 1부. 끝.'
+_ATTACH_INLINE = re.compile(r"(?<=[.。])[ \t]+(?:붙[ \t]*임|첨[ \t]*부)[ \t]*[:：]?(?=[ \t]*(?:\d{1,2}\s*[.)]|[①②③④⑤⑥⑦⑧⑨⑩]|[^\n]{2,80}?\d+\s*부))")
+DOC_NAME = re.compile(r"([^\\/:*?\"<>|\n\t]{1,120}?)\s?\.\s?(hwpx|hwp|pdf|docx|doc|xlsx|xls|pptx|ppt|zip|hwt|cell|show|odt|ods|txt|jpg|jpeg|png|gul|egg|7z)(?![A-Za-z0-9])",
+                      re.I)
 _COUNT_TAIL = re.compile(r"\s*(?:각\s*)?\d+\s*(?:부|매|권|장|건|식|개)\s*\.?\s*$")
 
 
@@ -34,6 +42,9 @@ def expected_attachments(body: str) -> list[str]:
     m = None
     for m in _ATTACH_HEAD.finditer(body or ""):
         pass                       # 보통 마지막 '붙임'이 실제 붙임 목록
+    if not m:
+        for m in _ATTACH_INLINE.finditer(body or ""):
+            pass
     if not m:
         return []
     tail = body[m.end():]
@@ -52,6 +63,33 @@ def expected_attachments(body: str) -> list[str]:
             if len(line) >= 2 and not re.fullmatch(r"[\d\s.]+", line):
                 names.append(line)
     return list(dict.fromkeys(names))[:20]
+
+
+def file_names_in(text: str) -> list[str]:
+    """글자(화면 글자 인식·목록 항목)에서 '파일이름.hwpx' 꼴의 문서 이름을 뽑는다.
+    뷰어의 '붙임목록'·'첨부파일' 칸에 보이는 이름처럼, 본문에 붙임 표기가 없을 때도 붙임을 알아낼 수 있다."""
+    out: list[str] = []
+    for line in (text or "").splitlines():
+        for m in DOC_NAME.finditer(line):
+            stem = re.sub(r"^\s*(?:[□○●◦•·ㆍ\-]|\d{1,2}\s*[.)]|붙\s*임\s*\d*\s*[.:]?|첨\s*부\s*[:：]?)\s*", "", m.group(1)).strip(" .,:;·")
+            stem = re.sub(r"\s*\(\s*\d+(?:\.\d+)?\s*(?:[KMG]B|bytes?|바이트)\s*\)\s*$", "", stem, flags=re.I)
+            if len(re.sub(r"[\W_]", "", stem)) < 2:
+                continue
+            out.append(f"{stem}.{m.group(2).lower()}")
+    return list(dict.fromkeys(out))[:30]
+
+
+def merge_names(base: list[str], more: list[str], same: float = 0.8) -> list[str]:
+    """붙임 이름 목록에 다른 곳(화면 목록 등)에서 찾은 이름을 겹치지 않게 더한다.
+    같은 붙임으로 보이면(이름이 비슷하면) 확장자까지 있는 쪽(화면 목록 이름)을 쓴다."""
+    out = list(base)
+    for n in more:
+        hit = next((i for i, b in enumerate(out) if name_score(b, n) >= same), -1)
+        if hit < 0:
+            out.append(n)
+        elif not re.search(r"\.[A-Za-z0-9]{2,5}$", out[hit]):
+            out[hit] = n
+    return out[:30]
 
 
 # ---------------------------------------------------------------- 이름 비슷한 정도
@@ -170,6 +208,16 @@ def candidate_files(since: float, roots: list[tuple[Path, int]] | None = None, b
         except OSError:
             continue
     return sorted(found.values(), key=lambda f: -f["mtime"])
+
+
+def viewer_files(process: str, since: float, budget: float = 6.0, exclude: Path | None = None) -> list[dict]:
+    """뷰어 프로그램이 공문을 열 때 붙임을 받아 두는 캐시·임시 폴더(경로에 프로그램 이름이 든 폴더)의 최근 문서.
+    본문에 붙임 표기가 없거나 이름을 못 읽었을 때 쓰는 마지막 방법이다."""
+    key = re.sub(r"\.exe$", "", (process or "").lower()).strip()
+    if len(key) < 3:
+        return []
+    files = candidate_files(since, budget=budget, exclude=exclude)
+    return [f for f in files if key in os.path.normcase(f["path"]).lower()]
 
 
 def match_files(expected: list[str], files: list[dict], threshold: float = 0.45) -> dict[str, dict]:

@@ -25,6 +25,8 @@ from .llm import PREFERRED_CHAT, PREFERRED_EMBED, LLMError
 
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 EMBED_HINTS = ("embed", "bge", "e5-", "gte-")
+ENGINE_MISSING = ("모델 파일은 있지만 AI 실행 엔진(llama-server.exe)이 없습니다. 설정 → AI 모델에서 [AI 엔진 받기]를 누르거나 "
+                  "[엔진 파일 지정]으로 llama.cpp 압축 파일(.zip)·llama-server.exe를 지정하세요.")
 
 
 def app_dir() -> Path:
@@ -121,15 +123,73 @@ class LocalEngine:
 
     # ---------- 위치 ----------
     def server_path(self) -> str:
+        """llama-server 실행 파일 위치. 못 찾으면 "".
+
+        압축을 푼 모양이 PC마다 달라(engine\\llama-b1234-bin-win-cpu-x64\\llama-server.exe,
+        프로그램 폴더 바로 아래의 llama-… 폴더, 모델 폴더 옆 등) 몇 단계 아래까지 찾는다."""
         exe = "llama-server.exe" if sys.platform.startswith("win") else "llama-server"
-        for d in (app_dir() / "engine", self.home / "engine", app_dir()):
-            p = d / exe
-            if p.exists():
+        cached = getattr(self, "_server_cache", "")
+        if cached and os.path.isfile(cached):
+            return cached
+        found = self._find_server(exe)
+        self._server_cache = found
+        return found
+
+    def engine_dirs(self) -> list[Path]:
+        """엔진을 찾아볼 폴더 (앞쪽이 우선)."""
+        dirs = [app_dir() / "engine", self.home / "engine"]
+        for d in self.model_dirs():               # 모델 폴더 옆 engine (models만 다른 곳에 둔 경우)
+            dirs.append(d.parent / "engine")
+        env = os.environ.get("SEOMU_ENGINE_DIR")
+        if env:
+            dirs.insert(0, Path(env))
+        return list(dict.fromkeys(dirs))
+
+    def _find_server(self, exe: str) -> str:
+        def deep(d: Path, depth: int) -> str:
+            try:
+                if not d.is_dir():
+                    return ""
+                p = d / exe
+                if p.is_file():
+                    return str(p)
+                if depth <= 0:
+                    return ""
+                for sub in sorted(d.iterdir()):
+                    if sub.is_dir() and not sub.name.startswith("."):
+                        r = deep(sub, depth - 1)
+                        if r:
+                            return r
+            except OSError:
+                pass
+            return ""
+
+        for d in self.engine_dirs():
+            r = deep(d, 3)
+            if r:
+                return r
+        # 프로그램 폴더(또는 모델 폴더의 상위)에 llama.cpp 압축을 그대로 푼 경우: llama-b6000-bin-win-cpu-x64 등
+        for base in dict.fromkeys([app_dir(), *(d.parent for d in self.model_dirs())]):
+            p = base / exe
+            if p.is_file():
                 return str(p)
-            if d.exists():                     # 압축을 풀면 하위 폴더에 들어가는 경우
-                for sub in d.glob(f"*/{exe}"):
-                    return str(sub)
+            try:
+                subs = sorted(x for x in base.iterdir() if x.is_dir() and x.name.lower().startswith(("llama", "engine")))
+            except OSError:
+                subs = []
+            for sub in subs:
+                r = deep(sub, 2)
+                if r:
+                    return r
         return shutil.which("llama-server") or ""
+
+    def forget_server(self) -> None:
+        """엔진을 새로 받거나 지정한 뒤 다시 찾게 한다."""
+        self._server_cache = ""
+
+    def missing_engine(self) -> bool:
+        """모델 파일은 있는데 엔진 실행 파일만 없는 상태 (엔진만 받으면 바로 쓸 수 있다)."""
+        return bool(self.models()) and not self.server_path()
 
     def model_dirs(self) -> list[Path]:
         return [app_dir() / "models", self.home / "models"]
@@ -200,7 +260,7 @@ class LocalEngine:
             self.stop(kind)
             server = self.server_path()
             if not server:
-                raise LLMError("내장 AI 엔진(engine\\llama-server.exe)이 없습니다. 설치 안내를 확인하세요.")
+                raise LLMError(ENGINE_MISSING)
             path = self.models().get(model)
             if not path:
                 raise LLMError(f"모델 파일을 찾을 수 없습니다: {model}.gguf (models 폴더 확인)")
@@ -312,8 +372,8 @@ class LocalClient:
 
     def status(self) -> dict:
         if not self.engine.server_path():
-            return {"ok": False, "models": self.list_models(), "engine": "builtin",
-                    "error": "내장 AI 엔진 파일(engine\\llama-server.exe)이 없습니다."}
+            return {"ok": False, "models": self.list_models(), "engine": "builtin", "need_engine": True,
+                    "error": ENGINE_MISSING}
         models = self.list_models()
         if not models:
             return {"ok": False, "models": [], "engine": "builtin",

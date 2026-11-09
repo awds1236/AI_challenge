@@ -178,8 +178,193 @@ const state = { settings: {}, info: {}, notices: [], templates: [], tasks: [], c
 function go(page) {
   $$(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
   $$(".page").forEach((p) => p.classList.toggle("active", p.id === "page-" + page));
-  const loaders = { home: loadHome, ask: loadChat, collect: loadNotices, tasks: loadTasks, mail: loadMail, report: loadReport, library: loadLibrary, settings: loadSettings };
+  const loaders = { home: loadHome, ask: loadChat, guide: loadGuide, collect: loadNotices, tasks: loadTasks, mail: loadMail, report: loadReport, library: loadLibrary, settings: loadSettings };
   return loaders[page] ? loaders[page]() : Promise.resolve();
+}
+
+// ------------------------------------------------------------------ 상황 안내 (서무비서)
+let guideCur = null, orgForms = [];
+async function loadForms() {
+  try {
+    const r = await api("list_forms");
+    orgForms = r.forms || [];
+    $("#form-list").innerHTML = orgForms.length ? orgForms.map((f) => `<li>
+      <div class="t">${esc(f.name)} <span class="badge">${esc(f.ext.toUpperCase())}</span></div>
+      <div class="muted small row tight"><span>${f.fields.length ? `채울 칸: ${esc(f.fields.slice(0, 5).join(", "))}${f.fields.length > 5 ? " 등" : ""}` : "채울 칸을 찾지 못함"}</span>
+        <span class="spacer"></span><button class="btn ghost sm" data-open="${esc(f.path)}">열기</button>
+        <button class="btn ghost sm danger" data-fdel="${esc(f.name)}" title="서식 삭제">${svg("trash")}</button></div></li>`).join("")
+      : `<li class="muted small">올린 기관 서식이 없습니다.</li>`;
+  } catch (e) { $("#form-list").innerHTML = `<li class="muted small">${esc(e.message)}</li>`; }
+}
+async function addForms(paths) {
+  if (!paths || !paths.length) return;
+  try {
+    const r = await api("add_forms", paths);
+    toast(`기관 서식 ${r.added.length}개를 올렸습니다`, "ok");
+    await loadForms();
+    if (guideCur) renderGuide(guideCur);
+  } catch (e) { toast(e.message, "err", 8000); }
+}
+async function loadGuide() {
+  loadForms();
+  try {
+    const h = await api("guide_history");
+    $("#guide-hist").innerHTML = h.length ? h.map((g) => `<li data-gid="${g.id}" class="${guideCur && guideCur.id === g.id ? "on" : ""}">
+      <div class="t">${esc(g.situation)}</div>
+      <div class="muted small row tight">${g.kind ? `<span class="badge">${esc(g.kind)}</span>` : ""}<span>${esc(relTime(g.created_at))}</span>
+        <span class="spacer"></span><button class="btn ghost sm danger" data-gdel="${g.id}" title="삭제">${svg("trash")}</button></div></li>`).join("")
+      : `<li class="muted small">아직 받은 안내가 없습니다.</li>`;
+  } catch (e) { $("#guide-hist").innerHTML = `<li class="muted small">${esc(e.message)}</li>`; }
+}
+async function askGuide(text) {
+  text = (text || $("#guide-input").value).trim();
+  if (!text) return toast("상황을 입력하세요", "info");
+  $("#guide-input").value = text;
+  const btn = $("#guide-go");
+  btn.disabled = true;
+  $("#guide-result").innerHTML = `<div class="card muted" id="guide-wait">관련 규정을 찾는 중…</div>`;
+  try {
+    const r = await runJob("guide", [text, $("#guide-ai").checked], (st) => {
+      const w = $("#guide-wait");
+      if (w) w.textContent = st.message || "안내를 만드는 중…";
+    });
+    guideCur = r;
+    renderGuide(r);
+    loadGuide();
+  } catch (e) {
+    $("#guide-result").innerHTML = `<div class="card muted">${esc(e.message)}</div>`;
+    toast(e.message, "err");
+  } finally { btn.disabled = false; }
+}
+function guideDate(sit) {
+  if (!sit.start) return "";
+  return sit.end && sit.end !== sit.start ? `${fmtDate(sit.start)} ~ ${fmtDate(sit.end)}` : fmtDate(sit.start);
+}
+function renderGuide(r) {
+  const sit = r.situation || {};
+  const facts = [["업무", sit.kind || "일반"], ["날짜", guideDate(sit)], ["장소", sit.place], ["목적", sit.purpose],
+    ["품목", sit.item], ["금액", sit.amount ? sit.amount.toLocaleString() + "원" : ""]]
+    .filter((f) => f[1]).map((f) => `<span class="badge">${esc(f[0])}: ${esc(f[1])}</span>`).join(" ");
+  const steps = (r.steps || []).map((st, i) => `
+    <li class="${st.skip ? "skip" : ""}">
+      <div class="num">${i + 1}</div>
+      <div class="body"><div class="t">${esc(st.title)}</div>
+        <div class="muted small">${esc(st.basis)}${st.due_text ? ` · 규정: ${esc(st.due_text)}` : ""}</div>
+        ${st.skip ? `<div class="small skip-note">${esc(st.skip)}</div>` : ""}</div>
+      <div class="due">${st.due ? `<b>${esc(fmtDate(st.due))}</b>${st.late ? '<span class="badge red">기한 지남</span>' : ""}` : ""}</div>
+    </li>`).join("");
+  const checks = (r.checks || []).map((c) => `<li>${esc(c.text)} <span class="muted small">— ${esc(c.basis)}</span></li>`).join("");
+  const forms = (r.forms || []).map((f, i) => `
+    <div class="guide-draft">
+      <div class="row tight wrap"><b>${esc(f.name)}</b>${f.blanks ? `<span class="badge orange">채울 칸 ${f.blanks}곳(○○)</span>` : ""}<span class="spacer"></span>
+        <button class="btn sm" data-fcopy="${i}">${svg("copy")} 복사</button>
+        <button class="btn sm" data-fsave="${i}" data-fmt="txt">${svg("download")} txt 저장</button>
+        <button class="btn sm" data-fsave="${i}" data-fmt="hwpx">${svg("doc")} 한글(hwpx) 저장</button></div>
+      ${orgForms.length ? `<div class="row tight wrap org-form-row"><span class="muted small">기관 서식</span>
+        <select class="input sm" data-ftpl="${i}"><option value="">고르세요</option>${orgForms.map((o) =>
+          `<option ${o.name === f.template ? "selected" : ""}>${esc(o.name)}</option>`).join("")}</select>
+        <button class="btn primary sm" data-ffill="${i}">${svg("doc")} 기관 서식으로 작성</button>
+        ${f.template ? '<span class="badge green">이름이 맞는 서식을 골라 두었습니다</span>' : ""}</div>` : ""}
+      <textarea class="input mono" rows="${Math.min(24, f.body.split("\n").length + 1)}" data-fbody="${i}">${esc(f.body)}</textarea>
+    </div>`).join("");
+  const tasks = (r.tasks || []).map((t, i) => `
+    <label class="guide-task"><input type="checkbox" data-tk="${i}" checked>
+      <span class="t">${esc(t.title)}</span><span class="spacer"></span>${t.due ? `<span class="badge blue">${esc(fmtDate(t.due))}</span>` : '<span class="badge">기한 없음</span>'}</label>`).join("");
+  const src = (r.sources || []).map((h) => `<li><b>「${esc(h.title)}」 ${esc(h.heading || "")}</b>
+    <div class="muted small">${esc((h.text || "").slice(0, 260))}${(h.text || "").length > 260 ? "…" : ""}</div></li>`).join("");
+  $("#guide-result").innerHTML = `
+    <div class="card">
+      <div class="card-head"><h3>상황 정리</h3><span class="muted small">${r.mode === "llm" ? `로컬 AI 보완 · ${esc(r.model || "")}` : "규칙 기반"}</span></div>
+      <p class="guide-summary">${esc(r.summary)}</p>
+      <div class="row wrap tight">${facts}</div>
+      ${r.notice ? `<div class="engine-notice warn-notice" style="margin-top:10px">${esc(r.notice)}</div>` : ""}
+      ${(r.tips || []).length ? `<ul class="guide-tips">${r.tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>① 절차 확인</h3><span class="muted small">규정의 의무 조항 · 기한은 상황 날짜로 계산</span></div>
+      ${steps ? `<ol class="guide-steps">${steps}</ol>` : `<div class="muted small">규정에서 이 상황의 절차 조항을 찾지 못했습니다. 규정 저장소에 해당 규정·지침을 추가해 보세요.</div>`}
+      ${checks ? `<div class="guide-sub">확인할 제한·기준</div><ul class="guide-checks">${checks}</ul>` : ""}
+      ${(r.prep || []).length ? `<div class="guide-sub">준비·첨부 서류</div><div class="row wrap tight">${r.prep.map((p) => `<span class="badge green">${esc(p)}</span>`).join(" ")}</div>` : ""}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>② 서식 초안</h3><span class="muted small">○○ 칸을 채워 쓰세요 · 고친 내용 그대로 복사·저장</span></div>
+      ${forms || '<div class="muted small">만들 서식이 없습니다.</div>'}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>③ 다음 할 일</h3><button class="btn primary sm" id="guide-addtasks">${svg("plus")} 선택한 일을 할 일로 등록</button></div>
+      ${tasks || '<div class="muted small">등록할 할 일이 없습니다.</div>'}
+    </div>
+    ${src ? `<div class="card"><div class="card-head"><h3>근거 조문</h3></div><ul class="guide-src">${src}</ul></div>` : ""}`;
+}
+function bindForms() {
+  $("#form-add").addEventListener("click", async () => {
+    if (!state.info.native) return toast("브라우저 모드에서는 서식 파일을 끌어다 놓아 주세요", "info");
+    addForms(await pickFiles(true));
+  });
+  setupDrop($("#drop-forms"), addForms);
+  $("#form-list").addEventListener("click", async (e) => {
+    const d = e.target.closest("[data-fdel]");
+    if (!d || !confirm(`'${d.dataset.fdel}' 서식을 지울까요? (처음 올린 원본 파일은 그대로 있습니다)`)) return;
+    try { await api("delete_form", d.dataset.fdel); } catch (er) { toast(er.message, "err"); }
+    await loadForms();
+    if (guideCur) renderGuide(guideCur);
+  });
+}
+function bindGuide() {
+  bindForms();
+  $("#guide-form").addEventListener("submit", (e) => { e.preventDefault(); askGuide(); });
+  $("#guide-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); askGuide(); }
+  });
+  $("#guide-suggest").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (c) askGuide(c.textContent); });
+  $("#guide-hist").addEventListener("click", async (e) => {
+    const del = e.target.closest("[data-gdel]");
+    if (del) {
+      e.stopPropagation();
+      const id = Number(del.dataset.gdel);
+      try { await api("delete_guide", id); } catch (er) { return toast(er.message, "err"); }
+      if (guideCur && guideCur.id === id) { guideCur = null; $("#guide-result").innerHTML = ""; }
+      return loadGuide();
+    }
+    const li = e.target.closest("[data-gid]");
+    if (!li) return;
+    try {
+      const g = await api("get_guide", Number(li.dataset.gid));
+      if (g) { guideCur = g; $("#guide-input").value = (g.situation || {}).text || ""; renderGuide(g); loadGuide(); }
+    } catch (er) { toast(er.message, "err"); }
+  });
+  $("#guide-result").addEventListener("click", async (e) => {
+    const cp = e.target.closest("[data-fcopy]"), sv = e.target.closest("[data-fsave]"), fl = e.target.closest("[data-ffill]");
+    if (fl) {
+      const i = fl.dataset.ffill, tpl = $(`[data-ftpl="${i}"]`).value;
+      if (!tpl) return toast("채울 기관 서식을 고르세요", "info");
+      try {
+        const r = await api("fill_guide_form", guideCur.id, Number(i), $(`[data-fbody="${i}"]`).value, tpl);
+        toast(`'${r.template}' 서식에 ${r.filled.length}칸을 채웠습니다` + (r.missing.length ? ` · 비워 둔 칸: ${r.missing.slice(0, 4).join(", ")}` : ""), "ok", 7000);
+        openPath(r.folder);
+      } catch (er) { toast(er.message, "err", 8000); }
+      return;
+    }
+    if (cp) { await copyText($(`[data-fbody="${cp.dataset.fcopy}"]`).value); return toast("초안을 복사했습니다", "ok"); }
+    if (sv) {
+      const f = guideCur.forms[Number(sv.dataset.fsave)];
+      try {
+        const r = await api("save_guide_form", f.name, $(`[data-fbody="${sv.dataset.fsave}"]`).value, sv.dataset.fmt);
+        toast(`저장했습니다: ${baseName(r.path)}`, "ok", 5000);
+        openPath(r.folder);
+      } catch (er) { toast(er.message, "err"); }
+      return;
+    }
+    if (e.target.closest("#guide-addtasks")) {
+      const picked = $$("[data-tk]").filter((c) => c.checked).map((c) => guideCur.tasks[Number(c.dataset.tk)]);
+      if (!picked.length) return toast("등록할 일을 고르세요", "info");
+      try {
+        const r = await api("guide_add_tasks", picked);
+        toast(r.added ? `할 일 ${r.added}개를 등록했습니다` : "이미 등록된 할 일입니다", r.added ? "ok" : "info");
+        loadTasks().catch(() => {});          // 할 일 목록·메뉴 배지 갱신
+      } catch (er) { toast(er.message, "err"); }
+    }
+  });
 }
 
 // ------------------------------------------------------------------ AI 상태
@@ -191,7 +376,9 @@ async function refreshAI() {
     chip.classList.toggle("bad", !(st.ok && st.chat_model));
     $(".ai-chip-text", chip).textContent = st.ok && st.chat_model
       ? `${st.engine === "builtin" ? "내장 AI" : "로컬 AI"} · ${st.chat_model}`
-      : (st.engine === "builtin" ? "모델 파일 없음 (검색 모드)" : "AI 엔진 미연결 (검색 모드)");
+      : st.need_engine
+        ? ((st.engine_install || {}).state === "running" ? "AI 엔진 받는 중… (검색 모드)" : "AI 엔진 파일 없음 (검색 모드)")
+        : (st.engine === "builtin" ? "모델 파일 없음 (검색 모드)" : "AI 엔진 미연결 (검색 모드)");
     chip.title = st.ok ? `모델: ${st.models.join(", ") || "없음"}` : st.error || "";
     const dl = $("#model-list");
     dl.innerHTML = (st.models || []).map((m) => `<option value="${esc(m)}">`).join("");
@@ -604,10 +791,20 @@ async function loadLibrary() {
     <button class="btn ghost sm" data-open="${esc(d)}">열기</button>${r.dirs.length > 1 ? `<button class="btn ghost sm danger" data-rmdir="${esc(d)}">${svg("trash")}</button>` : ""}</li>`).join("");
   $("#lib-count").textContent = `${r.documents.length}건`;
   const catBadge = (c) => `<span class="badge ${c === "법령" ? "purple" : c === "조례" ? "blue" : c === "내규" ? "green" : ""}">${esc(c)}</span>`;
-  $("#lib-docs").innerHTML = r.documents.length ? r.documents.map((d) => `<tr><td><b>${esc(d.title)}</b></td><td>${catBadge(d.category)}</td>
+  const cats = r.categories || [];
+  $("#lib-docs").innerHTML = r.documents.length ? r.documents.map((d) => `<tr><td><b>${esc(d.title)}</b>
+      <div class="muted small">${d.managed ? "화면에서 추가한 규정" : "연결한 폴더의 원본"}</div></td>
+    <td><select class="input sm lib-cat" data-cat="${esc(d.path)}" title="분류 바꾸기">${(cats.includes(d.category) ? cats : [d.category, ...cats])
+      .map((c) => `<option ${c === d.category ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></td>
     <td>${d.n_chunks}</td><td class="muted">${esc(d.indexed_at.replace("T", " ").slice(0, 16))}</td>
-    <td><button class="btn ghost sm" data-open="${esc(d.path)}">열기</button></td></tr>`).join("")
+    <td class="nowrap"><button class="btn ghost sm" data-open="${esc(d.path)}">열기</button>
+      <button class="btn ghost sm" data-replace="${esc(d.path)}" title="개정된 규정 파일로 바꾸기">교체</button>
+      <button class="btn ghost sm danger" data-rmdoc="${esc(d.path)}" data-managed="${d.managed ? 1 : 0}" title="저장소에서 빼기">${svg("trash")}</button></td></tr>`).join("")
     : `<tr><td colspan="5" class="empty-state">아직 색인된 문서가 없습니다. 파일을 추가하고 '색인 갱신'을 누르세요.</td></tr>`;
+  const ex = r.excluded || [];
+  $("#lib-excluded").innerHTML = ex.length ? `<div class="guide-sub">저장소에서 뺀 규정 (원본 파일은 그대로 있음)</div>
+    <ul class="list">${ex.map((x) => `<li><div class="main-col"><div class="t">${esc(x.name)}</div><div class="s">${esc(x.path)}${x.exists ? "" : " · 파일 없음"}</div></div>
+      <button class="btn ghost sm" data-restore="${esc(x.path)}">다시 포함</button></li>`).join("")}</ul>` : "";
   showProgress(r.progress);
 }
 function showProgress(p) {
@@ -683,17 +880,32 @@ async function loadModels() {
   const eng = c.engine || {};
   state.engine = eng.kind;
   $$("#engine-seg button").forEach((b) => b.classList.toggle("on", b.dataset.v === (eng.setting || "auto")));
-  $("#engine-status").innerHTML = eng.kind === "builtin"
+  $("#engine-status").innerHTML = eng.need_engine && (eng.setting || "auto") !== "ollama"
+    ? `<span style="color:var(--orange)">내장 엔진 · 실행 엔진 파일(llama-server.exe) 없음</span> · 모델 폴더: <a data-open="${esc(eng.model_dir)}">${esc(eng.model_dir)}</a>`
+    : eng.kind === "builtin"
     ? `내장 엔진 사용 중 (Ollama 불필요·인터넷 불필요) · 모델 폴더: <a data-open="${esc(eng.model_dir)}">${esc(eng.model_dir)}</a>`
     : `Ollama 사용 중` + (eng.server ? "" : " · 내장 엔진 없음 — 모델 카드의 [받기]를 누르면 엔진과 모델을 함께 받아 Ollama 없이 동작합니다");
   const builtin = eng.kind === "builtin";
   // 내장 엔진을 쓰거나 Ollama가 꺼져 있으면: [받기]로 엔진+모델 파일을 자동으로 받는다
   const dlMode = builtin || !c.engine_ok;
   const hasBuiltin = !!eng.server && (eng.models || []).length > 0;
-  const notice = !c.engine_ok && !builtin
+  // 모델 파일은 있는데 실행 엔진(llama-server)만 없다: 엔진만 받거나 지정하면 바로 동작
+  const inst = eng.install || {};
+  const engineNotice = eng.need_engine && (eng.setting || "auto") !== "ollama"
+    ? `<div class="engine-notice warn-notice"><b>모델 파일은 있지만 AI 실행 엔진(llama-server.exe)이 없어 AI를 쓰지 못하고 있습니다.</b><br>
+        ${inst.state === "running" ? "AI 엔진을 자동으로 받는 중입니다… 끝나면 바로 AI 분석을 씁니다." :
+          `인터넷이 되면 [AI 엔진 받기](약 30MB)를, 업무망 PC라면 다른 PC에서 받은 llama.cpp 압축 파일(이름에 bin-win-cpu-x64)이나 llama-server.exe를 [엔진 파일 지정]으로 넣어 주세요.
+           ${inst.state === "error" ? `<div class="small" style="color:var(--orange);margin-top:4px">자동 받기 실패: ${esc(inst.message)}</div>` : ""}`}
+        <div class="row tight" style="margin-top:8px">
+          <button class="btn primary sm" data-engine-dl ${inst.state === "running" ? "disabled" : ""}>${svg("download")} AI 엔진 받기</button>
+          <button class="btn sm" data-engine-pick>엔진 파일 지정</button>
+          <span class="muted small">넣을 폴더: <a data-open="${esc(eng.engine_dir || "")}">${esc(eng.engine_dir || "")}</a></span>
+        </div></div>`
+    : "";
+  const notice = engineNotice || (!c.engine_ok && !builtin
     ? (hasBuiltin
       ? `<div class="engine-notice">Ollama가 실행 중이 아닙니다. 이 PC에는 내장 엔진과 모델이 이미 있으니 위에서 <b>[자동]</b> 또는 <b>[내장 엔진]</b>을 고르면 바로 쓸 수 있습니다.</div>`
-      : `<div class="engine-notice">Ollama가 실행 중이 아닙니다. 쓰실 모델의 <b>[받기]</b>를 누르면 Ollama 없이 동작하는 내장 엔진과 모델을 자동으로 받습니다.</div>`) : "";
+      : `<div class="engine-notice">Ollama가 실행 중이 아닙니다. 쓰실 모델의 <b>[받기]</b>를 누르면 Ollama 없이 동작하는 내장 엔진과 모델을 자동으로 받습니다.</div>`) : "");
   state.catalog = c.models;
   $("#model-grid").innerHTML = notice + c.models.map((m) => {
     const installed = dlMode ? (builtin && m.installed) : m.installed;
@@ -704,7 +916,7 @@ async function loadModels() {
         ${m.id === rec.model ? '<span class="badge green">내 PC 추천</span>' : ""}<span class="badge ${m.kind === "embed" ? "purple" : "blue"}">${esc(m.badge)}</span></div>
       <div class="desc">${esc(m.desc)}</div>
       <div class="meta"><span class="badge">약 ${gb}GB</span><span class="badge">RAM ${m.min_ram_gb}GB+</span>
-        <span class="badge">${esc(m.license)}</span><span class="badge">${esc(m.korean)}</span>${m.variant ? `<span class="badge green">${esc(m.variant)}</span>` : ""}
+        <span class="badge">${esc(m.license)}</span><span class="badge">${esc(m.korean)}</span>${m.variant ? `<span class="badge green">${esc(m.variant)}</span>` : ""}${m.gov ? '<span class="badge blue" title="행정안전부 AI 공통기반 지원(또는 지원 예정) 모델 계열">공통기반 지원</span>' : ""}
         ${m.installed && m.installed_id !== m.id && m.installed_id !== m.id + ":latest" ? `<span class="badge">설치됨: ${esc(m.installed_id)}</span>` : ""}</div>
       ${m.fits ? "" : '<div class="warn">⚠ 이 PC 메모리로는 느리거나 실행되지 않을 수 있습니다</div>'}
       <div class="actions">
@@ -984,9 +1196,50 @@ function bind() {
   $("#lib-reindex-force").addEventListener("click", () => reindex(true));
   $("#lib-dir-add").addEventListener("click", async () => { try { await api("add_regulation_dir", $("#lib-dir-input").value.trim()); $("#lib-dir-input").value = ""; loadLibrary(); toast("폴더를 추가했습니다. '색인 갱신'을 눌러 주세요.", "ok"); } catch (e) { toast(e.message, "err"); } });
   $("#lib-dir-pick").addEventListener("click", async () => { if (!state.info.native) return toast("브라우저 모드에서는 경로를 직접 입력해 주세요", "info"); const p = await api("pick_folder"); if (p) $("#lib-dir-input").value = p; });
+  $("#lib-docs").addEventListener("change", async (e) => {
+    const sel = e.target.closest("[data-cat]");
+    if (!sel) return;
+    try { await api("set_regulation_category", sel.dataset.cat, sel.value); toast(`분류를 '${sel.value}'(으)로 바꿨습니다`, "ok"); }
+    catch (er) { toast(er.message, "err"); loadLibrary(); }
+  });
+  $("#lib-docs").addEventListener("click", async (e) => {
+    const rm = e.target.closest("[data-rmdoc]"), rp = e.target.closest("[data-replace]");
+    if (rm) {
+      const managed = rm.dataset.managed === "1";
+      const name = baseName(rm.dataset.rmdoc);
+      if (!confirm(managed ? `'${name}' 규정을 저장소에서 삭제할까요?\n(프로그램 폴더의 사본만 지우며 처음 추가한 원본 파일은 그대로 있습니다)`
+        : `'${name}' 규정을 저장소에서 뺄까요?\n(연결한 폴더의 원본 파일은 지우지 않고 검색·안내에서만 제외합니다. 아래 목록에서 다시 포함할 수 있습니다)`)) return;
+      try {
+        const r = await api("delete_regulation", rm.dataset.rmdoc);
+        toast(r.mode === "deleted" ? `'${r.name}'을(를) 삭제했습니다` : `'${r.name}'을(를) 저장소에서 뺐습니다`, "ok");
+      } catch (er) { toast(er.message, "err"); }
+      return loadLibrary();
+    }
+    if (rp) {
+      let p = "";
+      if (state.info.native) { const r = await api("pick_files", false); p = r && r[0]; }
+      else p = prompt("개정된 규정 파일의 경로를 입력하세요", "") || "";
+      if (!p) return;
+      try {
+        await runJob("replace_regulation", [rp.dataset.replace, p], async () => { const r = await api("list_documents"); showProgress(r.progress); });
+        showProgress(null);
+        toast(`'${baseName(p)}'(으)로 바꿨습니다`, "ok");
+      } catch (er) { toast(er.message, "err"); showProgress(null); }
+      return loadLibrary();
+    }
+  });
+  $("#lib-excluded").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-restore]");
+    if (!b) return;
+    try { await runJob("restore_regulation", [b.dataset.restore]); toast("다시 저장소에 넣었습니다", "ok"); }
+    catch (er) { toast(er.message, "err"); }
+    loadLibrary();
+  });
   $("#lib-dirs").addEventListener("click", async (e) => { const b = e.target.closest("[data-rmdir]"); if (b && confirm("저장소 목록에서 제거할까요? (파일은 삭제되지 않습니다)")) { await api("remove_regulation_dir", b.dataset.rmdir); reindex(false); } });
   setupDrop($("#drop-lib"), importLibFiles);
   $("#lib-pick-files").addEventListener("click", async () => importLibFiles(await pickFiles(true)));
+
+  bindGuide();
 
   // 설정
   // 테마는 누르면 바로 바뀌어 보이므로 바로 저장한다 (저장 버튼을 안 누르고 나가면 다음 실행 때 되돌아가던 문제)
@@ -999,6 +1252,17 @@ function bind() {
   $("#model-grid").addEventListener("click", async (e) => {
     const u = e.target.closest("[data-use]"), p = e.target.closest("[data-pull]"), d = e.target.closest("[data-mdel]"), g = e.target.closest("[data-gguf]");
     const oi = e.target.closest("[data-oimport]"), dl = e.target.closest("[data-dl]");
+    if (e.target.closest("[data-engine-dl]")) {
+      if (!confirm("AI 실행 엔진(llama.cpp, 약 30MB)을 인터넷에서 받습니다. 받아 둔 모델 파일은 그대로 씁니다.")) return;
+      return modelJob("install_engine", [], "AI 엔진을 넣었습니다. 이제 AI 분석을 쓸 수 있습니다.");
+    }
+    if (e.target.closest("[data-engine-pick]")) {
+      let p = "";
+      if (state.info.native) { const r = await api("pick_files", false); p = r && r[0]; }
+      else p = prompt("llama.cpp 압축 파일(.zip)이나 llama-server.exe의 경로를 입력하세요", "") || "";
+      if (!p) return;
+      return modelJob("import_engine", [p], "AI 엔진을 넣었습니다. 이제 AI 분석을 쓸 수 있습니다.");
+    }
     if (dl) {
       const m = (state.catalog || []).find((x) => x.id === dl.dataset.dl) || {};
       const size = m.dl ? m.dl.gb : m.download_gb;
