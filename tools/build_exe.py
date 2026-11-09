@@ -103,6 +103,11 @@ def make_zip(folder: Path) -> Path:
 
 
 def main() -> int:
+    for _s in (sys.stdout, sys.stderr):      # 한글 출력이 cp1252 같은 콘솔에서 멈추지 않게
+        try:
+            _s.reconfigure(errors="replace")
+        except Exception:
+            pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-playwright", action="store_true", help="브라우저 연동을 빼고 작게 만든다")
     ap.add_argument("--no-zip", action="store_true")
