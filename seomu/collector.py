@@ -543,6 +543,42 @@ def save_eml_attachments(eml: Path, dest: Path) -> list[dict]:
     return files
 
 
+_BODY_EXT_ORDER = {".pdf": 0, ".hwpx": 1, ".docx": 2, ".hwp": 3, ".html": 4, ".htm": 4, ".txt": 5}
+
+
+def body_text_unreadable(text: str) -> bool:
+    return (text or "").lstrip().startswith("(본문을 읽지 못했습니다") or len(re.sub(r"\s", "", text or "")) < 20
+
+
+def body_from_attachments(files: list[dict], body_name: str = "") -> tuple[str, dict] | None:
+    """본문 파일을 읽지 못했을 때(배포용 HWP 등) 붙임 중 같은 본문의 다른 형식을 찾아 읽는다.
+    공문 시스템은 본문을 '[본문] 제목.pdf'처럼 PDF로도 함께 내려 주는 경우가 많다.
+    이름에 '본문'이 들어 있거나, 본문 파일과 이름(확장자 뺀)이 같은 파일만 본다 — 다른 붙임을 본문으로 오인하지 않게."""
+    from .parsers import ParseError, parse_file
+    stem = Path(body_name).stem.removeprefix("본문_").strip() if body_name else ""
+
+    def key(f: dict) -> str:
+        return re.sub(r"[\s_\-\[\]()]+", "", Path(f.get("name") or "").stem)
+
+    cands = []
+    for f in files or []:
+        p = Path(f.get("path") or "")
+        if not f.get("ok", True) or not p.is_file():
+            continue
+        named = "본문" in Path(f.get("name") or p.name).stem
+        same = bool(stem) and key(f) == re.sub(r"[\s_\-\[\]()]+", "", stem)
+        if named or same:
+            cands.append((0 if named else 1, _BODY_EXT_ORDER.get(p.suffix.lower(), 9), f))
+    for _, _, f in sorted(cands, key=lambda c: (c[0], c[1])):
+        try:
+            text = parse_file(Path(f["path"]))
+        except (ParseError, OSError, Exception):
+            continue
+        if not body_text_unreadable(text):
+            return text, f
+    return None
+
+
 def collect_from_files(paths: list[str], root: Path, title: str = "", body_index: int = 0) -> Captured:
     """로컬 파일들로 공문 폴더 구성. body_index 번째 파일을 본문으로 본다."""
     from .parsers import ParseError, parse_file

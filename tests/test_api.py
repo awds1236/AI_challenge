@@ -536,3 +536,42 @@ def test_unreadable_body_is_not_analyzed_by_ai(api, tmp_path, monkeypatch):
     assert a["deadlines"] == [] and any(f["ok"] and f["name"].endswith(".pdf") for f in n["attachments"])
     assert {m["package"] for m in api.missing_packages()} <= {"olefile", "pypdf", "openpyxl", "lxml"}
     assert "missing_packages" in api.app_info()
+
+
+def test_unreadable_hwp_body_falls_back_to_body_pdf(api, tmp_path, monkeypatch):
+    """배포용(암호화) HWP 본문을 못 읽어도, 붙임에 '[본문] 제목.pdf'(같은 본문의 PDF)가 있으면 그것으로 분석한다.
+    다른 붙임(계획서 등)은 본문으로 쓰지 않는다."""
+    from seomu import parsers
+    doc = tmp_path / "2026년 모의훈련 실시 알림.hwp"
+    doc.write_bytes(b"\xd0\xcf\x11\xe0")
+    body_pdf = tmp_path / "[본문] 2026년 모의훈련 실시 알림.pdf"
+    body_pdf.write_bytes(b"%PDF-1.4 x")
+    plan = tmp_path / "모의훈련 계획(기후부).hwpx"
+    plan.write_bytes(b"PK")
+    body = ("2026년 초미세먼지 재난대응 모의훈련 실시 알림\n1. 관련: 기후부 공문\n"
+            "2. 모의훈련을 실시하니 각 부서는 결과 보고서를 2026. 12. 1.까지 제출하여 주시기 바랍니다.")
+
+    def fake(p, *a, **k):
+        p = str(p)
+        if p.endswith(".hwp"):
+            raise parsers.ParseError("배포용(암호화) HWP 문서는 읽을 수 없습니다")
+        if p.endswith(".pdf"):
+            return body
+        return "모의훈련 세부 계획 " * 10
+    monkeypatch.setattr(parsers, "parse_file", fake)
+    n = wait(api, api.collect_files([str(doc), str(body_pdf), str(plan)], "", 0, False))
+    a = n["analysis"]
+    assert "body_error" not in a and "모의훈련" in n["body"] and "세부 계획" not in n["body"]
+    assert any(d["date"] == "2026-12-01" for d in a["deadlines"])
+
+
+def test_body_from_attachments_ignores_other_files(tmp_path):
+    from seomu.collector import body_from_attachments
+    f = tmp_path / "계획.txt"
+    f.write_text("이것은 다른 붙임 문서입니다. " * 5, encoding="utf-8")
+    assert body_from_attachments([{"name": f.name, "path": str(f), "ok": True}], "공문.hwp") is None
+    g = tmp_path / "공문.txt"
+    g.write_text("같은 본문을 텍스트로 저장한 파일입니다. " * 5, encoding="utf-8")
+    got = body_from_attachments([{"name": f.name, "path": str(f), "ok": True},
+                                 {"name": g.name, "path": str(g), "ok": True}], "본문_공문.hwp")
+    assert got and got[1]["name"] == "공문.txt"
