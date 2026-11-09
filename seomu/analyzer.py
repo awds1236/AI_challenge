@@ -310,6 +310,11 @@ def _shares_word(name: str, title: str) -> bool:
     return any(w in r or r in w for w in words for r in ref)
 
 
+def in_body_dates(body: str, ref: date) -> set[str]:
+    found = find_dates(body or "", ref)
+    return {x["date"] for x in found} | {x["end_date"] for x in found if x.get("end_date")}
+
+
 def analyze(title: str, body: str, files: list[dict], client: OllamaClient | None,
             chat_model: str = "", num_ctx: int = 8192, ref: date | None = None) -> dict:
     ref = ref or date.today()
@@ -342,8 +347,13 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
     result = dict(base)
     result["mode"] = "llm"
     result["model"] = model
-    if isinstance(data.get("summary"), str) and data["summary"].strip():
-        result["summary"] = data["summary"].strip()
+    s_ai = data.get("summary") if isinstance(data.get("summary"), str) else ""
+    s_dates = {x["date"] for x in find_dates(s_ai, ref)}
+    if (s_ai.strip() and not re.search(r"(?<![가-힣A-Za-z])(OO|ＯＯ|○○)", s_ai)
+            and s_dates <= in_body_dates(body, ref)):
+        result["summary"] = s_ai.strip()            # 예시 글('OO 행사')을 베꼈거나 본문에 없는 날짜를 쓴 요약은 버린다
+    elif s_ai.strip():
+        result["ai_note"] = "AI 요약이 본문과 맞지 않아 규칙으로 만든 요약을 보여 줍니다"
     result["summary"] = tidy_ai_summary(result["summary"])
     fn = data.get("folder_name")
     if isinstance(fn, str) and 2 <= len(fn.strip()) <= 40 and _shares_word(fn, title) and _keeps_subject(fn, title):
@@ -352,7 +362,7 @@ def analyze(title: str, body: str, files: list[dict], client: OllamaClient | Non
     if isinstance(data.get("event"), dict):
         result["event"] = {k: str(v) for k, v in data["event"].items() if v}
     llm_dl = []
-    in_body = {x["date"] for x in find_dates(body, ref)} | {x["end_date"] for x in find_dates(body, ref) if x.get("end_date")}
+    in_body = in_body_dates(body, ref)
     for d in data.get("deadlines") or []:
         if not isinstance(d, dict):
             continue
