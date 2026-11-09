@@ -1530,7 +1530,9 @@ def extract_text(hwnd: int, log: Callable[[str], None] = lambda m: None,
         set_clipboard(marker)
         how = click_any(hwnd, BODY_COPY_NAMES, check=lambda: bool(fresh()), log=log, trace=trace)
         if how:
-            return fresh(), f"본문복사 ({how})"
+            got = fresh()
+            dismiss_info_popups(_pid(hwnd), trace, wait=2.0)    # '본문 내용이 복사되었습니다' 창이 뷰어를 막지 않게
+            return got, f"본문복사 ({how})"
         trace.append("본문복사 버튼 없음 → 뷰어가 아닌 일반 프로그램 창으로 보고 다른 방법을 이어서 시도")
         # ② 창 제목·실행 인자에 문서 경로가 있으면 그 파일이 가장 정확하다 (한글·워드·메모장·PDF 프로그램 등)
         t, how = from_document(deep=False)
@@ -1794,6 +1796,49 @@ def _find_edit(hwnd) -> int:
     return 0
 
 
+# 뷰어가 띄우는 알림 창 중 [확인]을 대신 눌러도 되는 것 ('본문 내용이 복사되었습니다', '저장되었습니다' 등)
+_INFO_POPUP = re.compile(r"(복사\s*되었|복사했|저장\s*되었|저장했|완료\s*되었|완료했|완료|다운로드\s*되었|성공)")
+# 결정을 묻는 창은 누르지 않는다 (사용자가 정할 일)
+_ASK_POPUP = re.compile(r"(삭제|지우시겠|취소하시겠|종료하시겠|닫으시겠|결재|반려|발송|전송하시겠|하시겠습니까)")
+_OK_TEXTS = ("확인", "OK", "예", "&OK", "확인(&O)", "확인(O)")
+
+
+def popup_message(dlg: int) -> str:
+    return " ".join(t for t in (_text(c) for c in children(dlg)) if t and not _matches(t, _OK_TEXTS + ("취소", "아니오")))
+
+
+def dismiss_info_popups(pid: int, trace: list | None = None, wait: float = 2.0, skip: set | None = None) -> int:
+    """그 프로그램이 띄운 알림 창('본문 내용이 복사되었습니다' 등)의 [확인]을 누른다. 누른 개수.
+    알림 창이 열려 있으면 뷰어가 다음 버튼(PC저장 등)을 받지 않는다. 결정을 묻는 창은 누르지 않는다."""
+    if not IS_WIN or not pid:
+        return 0
+    done, end = 0, time.time() + wait
+    handled: set[int] = set(skip or ())
+    while time.time() < end:
+        for dlg in _dialogs_of(pid):
+            if dlg in handled or _find_edit(dlg):              # 입력 칸이 있는 창(저장 창 등)은 여기서 다루지 않는다
+                continue
+            handled.add(dlg)
+            msg = popup_message(dlg)
+            if not _INFO_POPUP.search(msg) or _ASK_POPUP.search(msg):
+                if trace is not None:
+                    trace.append(f"뷰어 확인 창을 그대로 둠 (알림이 아님): {msg[:60]}")
+                continue
+            ok = next((c for c in children(dlg) if "button" in _class(c).lower() and _matches(_text(c), _OK_TEXTS)), 0)
+            if ok:
+                user32.PostMessageW(ok, BM_CLICK, 0, 0)
+            else:
+                user32.PostMessageW(dlg, WM_COMMAND, IDOK, 0)
+            done += 1
+            if trace is not None:
+                trace.append(f"뷰어 알림 창 [확인] 누름: {msg[:60]}")
+            time.sleep(0.3)
+        if done:
+            break
+        time.sleep(0.2)
+    return done
+
+
 def try_save_attachments(hwnd: int, folder: Path, log: Callable[[str], None] = lambda m: None,
                          trace: list | None = None) -> str:
     """'PC저장'/'붙임문서' 버튼을 누르고, 저장 대화상자가 뜨면 공문 폴더를 지정한다.
@@ -1803,6 +1848,7 @@ def try_save_attachments(hwnd: int, folder: Path, log: Callable[[str], None] = l
     if not IS_WIN:
         return ""
     pid = _pid(hwnd)
+    dismiss_info_popups(pid, trace, wait=0.5)         # 앞 단계의 알림 창이 남아 있으면 뷰어가 버튼을 받지 않는다
     before = set(_dialogs_of(pid))
     log("뷰어의 'PC저장' 버튼을 누르는 중…")       # 창을 앞으로 가져오지 않고 버튼 메시지·UI Automation으로
     if not click_any(hwnd, SAVE_NAMES, check=lambda: bool(set(_dialogs_of(pid)) - before), log=log, trace=trace):
@@ -1836,6 +1882,8 @@ def try_save_attachments(hwnd: int, folder: Path, log: Callable[[str], None] = l
             msg = " ".join(_text(c) for c in children(dlg))
             if re.search(r"(바꾸시겠|덮어|이미 있|already exists|replace)", msg, re.I):
                 user32.SendMessageW(dlg, WM_COMMAND, 6, 0)          # IDYES: 같은 이름 덮어쓰기 (공문 폴더 안)
+            elif dismiss_info_popups(pid, trace, wait=0.3, skip=handled - {dlg}):
+                pass                                               # '저장되었습니다' 같은 알림 → [확인]
             else:
                 waited_for_user = True
                 log("뷰어가 확인 창을 띄웠습니다. 그 창에서 확인해 주세요.")

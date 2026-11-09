@@ -786,16 +786,48 @@ class Api:
     def _body_key(text: str) -> str:
         return re.sub(r"\s+", "", text or "")
 
-    def _same_notice(self, text: str) -> dict | None:
-        """이미 수집한 공문 중 본문이 똑같은 것 (같은 공문을 다시 수집하면 공문·할 일이 겹쳐 생기던 문제).
+    @staticmethod
+    def _words(text: str) -> set[str]:
+        return set(re.findall(r"[가-힣]{2,}|[A-Za-z]{3,}|\d{2,}", text or ""))
+
+    def _same_notice(self, text: str, title: str = "") -> dict | None:
+        """이미 수집한 같은 공문 (같은 공문을 다시 수집하면 공문·할 일이 겹쳐 생기던 문제).
+        읽는 방법(본문복사·복사 붙여넣기·글자 인식)에 따라 글자가 조금씩 달라도 같은 공문으로 본다:
+        본문 낱말이 70% 이상 겹치거나, 제목이 같고 35% 이상 겹치면 같은 공문.
         본문을 읽지 못했거나 아주 짧으면 다른 공문일 수 있어 비교하지 않는다."""
         key = self._body_key(text)
         if len(key) < 60 or "본문을읽지못했습니다" in key:
             return None
-        for r in self._store.query("SELECT id, body, folder FROM notices ORDER BY id DESC"):
-            if self._body_key(r.get("body")) == key and Path(r.get("folder") or "").is_dir():
+        mine = self._words(text)
+        tkey = self._body_key(clean_title(title or ""))
+        from .deadlines import find_dates
+
+        def dates(t: str) -> set[str]:
+            return {d["date"] for d in find_dates(t or "")}
+        my_dates = dates(text)
+        for r in self._store.query("SELECT id, title, body, folder FROM notices ORDER BY id DESC LIMIT 300"):
+            if not Path(r.get("folder") or "").is_dir():
+                continue
+            if self._body_key(r.get("body")) == key:
+                return r
+            theirs = self._words(r.get("body"))
+            if not mine or not theirs:
+                continue
+            sim = len(mine & theirs) / len(mine | theirs)
+            same_title = bool(tkey) and len(tkey) >= 6 and self._body_key(clean_title(r.get("title") or "")) == tkey
+            if sim >= 0.7 or (same_title and sim >= 0.35):
+                # 날짜가 서로 다르면 기한이 바뀐 다른(정정) 공문이다 (한쪽이 날짜 일부를 놓친 경우는 같은 공문)
+                their_dates = dates(r.get("body"))
+                if my_dates and their_dates and not (my_dates <= their_dates or their_dates <= my_dates):
+                    continue
                 return r
         return None
+
+    @staticmethod
+    def _prose_score(text: str) -> int:
+        """본문다운 줄(문장)의 수 — 글자 인식으로 읽어 도구모음 글자가 섞인 본문보다 깨끗한 본문이 크다."""
+        return sum(1 for l in (text or "").splitlines()
+                   if len(l.strip()) >= 15 and re.search(r"(다\.|니다|바랍니다|함\.|임\.|요\.)\s*$", l.strip()))
 
     def _merge_into(self, job: Job, dup: dict, cap: Captured) -> dict:
         """같은 공문을 다시 수집했을 때: 새 공문을 만들지 않고, 이번에 새로 받은 붙임만 기존 공문 폴더에 더한다.
@@ -833,9 +865,24 @@ class Api:
                 shutil.rmtree(cap.folder, ignore_errors=True)
         except OSError:
             pass
+        old = self._store.get_notice(dup["id"]) or {}
+        better = (cap.text and self._prose_score(cap.text) > self._prose_score(old.get("body", ""))
+                  and len(cap.text) >= len(old.get("body", "")) * 0.5)
+        if better:
+            # 예전에 글자 인식으로 읽어 잡글자가 섞였던 본문 → 이번에 본문복사로 읽은 깨끗한 본문으로 (할 일은 그대로)
+            self._store.update_notice_body(dup["id"], cap.text)
+            folder = Path(dup["folder"])
+            if folder.is_dir():
+                save_body(folder, old.get("title") or cap.title, cap.text, "", cap.url)
+            a = analyze(old.get("title") or cap.title, cap.text, old.get("attachments") or [], None)
+            prev = old.get("analysis") or {}
+            a["folder_name"] = prev.get("folder_name") or a.get("folder_name")
+            a["ai_status"] = "off"
+            self._store.update_notice_analysis(dup["id"], a)
         n = self.get_notice(dup["id"]) or {}            # 새로 넣은 붙임을 목록에 반영
         n["duplicate"] = True
         n["added_files"] = added
+        n["body_updated"] = bool(better)
         job.message = "완료"
         return n
 
@@ -848,7 +895,7 @@ class Api:
             cap.text = tidy
             save_body(cap.folder, cap.title, tidy, "", cap.url)
         cap.title = clean_title(cap.title)
-        dup = self._same_notice(cap.text)
+        dup = self._same_notice(cap.text, cap.title)
         if dup:
             return self._merge_into(job, dup, cap)
         cap.files = expand_archives(cap.files)          # zip 붙임은 풀어서 함께 읽는다
@@ -1000,6 +1047,8 @@ class Api:
     def capture_window(self, hwnd: int, title: str = "", use_ai: bool = True, wait_seconds: int = 180) -> dict:
         if not winwindow.available():
             raise RuntimeError("열린 창 수집은 Windows에서만 사용할 수 있습니다.")
+        if any(j.kind == "capture_window" and j.status == "running" for j in self._jobs.values()):
+            raise ValueError("지금 공문을 수집하는 중입니다. 끝난 뒤 다시 눌러 주세요 (같은 공문이 두 번 수집되지 않게).")
         root = self._cfg.settings.resolved_download_root()
         picked = int(hwnd)
         real = winwindow.resolve_window(picked)     # 크기 없는 껍데기 창(작업 표시줄 단추용)을 고르면 내용 창으로
