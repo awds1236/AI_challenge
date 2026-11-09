@@ -152,7 +152,10 @@ def engine_asset_score(name: str, plat: str, arch: str) -> int | None:
     """llama.cpp 배포 파일 이름이 이 PC용 CPU 빌드인지 점수로 판단 (아니면 None).
     파일 이름 규칙이 바뀌어도 찾을 수 있게 운영체제·CPU 종류·GPU 전용 여부로 고른다."""
     n = name.lower()
-    if not (n.endswith(".zip") or n.endswith(".tar.gz")) or "bin" not in n:
+    # 실행 파일 묶음: 예전 이름은 'llama-b6000-bin-win-cpu-x64.zip', 새 이름은 'bin'이 빠질 수 있다
+    if not (n.endswith(".zip") or n.endswith(".tar.gz")) or not ("bin" in n or "llama" in n):
+        return None
+    if any(k in n for k in ("source", "src", "xcframework", "symbols", "pdb")):
         return None
     if plat == "win" and ("win" not in n or not n.endswith(".zip")):
         return None
