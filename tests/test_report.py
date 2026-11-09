@@ -283,3 +283,25 @@ def test_ai_deadline_must_be_a_date_in_body_and_prompt_is_short():
     assert len(prompt) < 2300 and calls[0][1]["max_tokens"] <= 400       # 본문 1,800자 안, 생성 400토큰 안
     assert "actions" not in calls[0][1]["fmt"]["properties"] and "contact" not in calls[0][1]["fmt"]["properties"]
     assert a["contact"] == "담당: 생활체육팀 홍길동 연락처 042-724-3213"
+
+
+def test_ai_summary_copying_prompt_example_or_inventing_dates_is_rejected():
+    """본문을 거의 못 읽었을 때 AI가 지시문의 예시('OO 행사')나 본문에 없는 날짜로 요약을 지어내면 버린다."""
+    from datetime import date
+    from seomu.analyzer import analyze
+
+    class C:
+        def __init__(self, summary):
+            self.summary = summary
+
+        def pick_chat_model(self, c=""):
+            return "m"
+
+        def chat(self, messages, model, **kw):
+            return json.dumps({"summary": self.summary, "deadlines": [], "submissions": []}, ensure_ascii=False)
+    body = "대전시 공사·공단 합동 AI 역량강화 교육을 아래와 같이 실시하오니 참석하여 주시기 바랍니다.\n일시: 2026. 11. 17.(화) 14:00"
+    a = analyze("AI 역량강화 교육안내", body, [], C("OO 행사에 대한 참여를 요청합니다. 관련 서류는 2026년 12월 15일까지 제출해야 합니다."),
+                ref=date(2026, 11, 9))
+    assert "OO" not in a["summary"] and "12월 15일" not in a["summary"] and a.get("ai_note")
+    b = analyze("AI 역량강화 교육안내", body, [], C("11월 17일 14시 AI 역량강화 교육에 참석해야 합니다."), ref=date(2026, 11, 9))
+    assert b["summary"].startswith("11월 17일 14시 AI 역량강화 교육")

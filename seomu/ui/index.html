@@ -159,19 +159,17 @@
     <!-- 공문 수집 -->
     <section class="page" id="page-collect">
       <header class="page-head">
-        <div><div class="eyebrow">본문 · 붙임 자동 다운로드 → 폴더 정리 → 기한 분석</div><h1>공문 수집</h1></div>
+        <div><div class="eyebrow">본문 · 붙임 파일 올리기 → 폴더 정리 → 기한 분석</div><h1>공문 수집</h1></div>
         <button class="btn" id="open-root"><i data-icon="folder"></i>다운로드 폴더</button>
       </header>
 
       <div class="card">
-        <div class="segmented wide" id="collect-mode">
-          <button class="on" data-v="window"><i data-icon="tray"></i>열린 창에서 수집</button>
-          <button data-v="url"><i data-icon="link"></i>주소로 수집</button>
-          <button data-v="file"><i data-icon="doc"></i>파일 가져오기</button>
-          <button data-v="paste"><i data-icon="copy"></i>본문 붙여넣기</button>
+        <!-- 수집 방식은 파일 올리기 하나 (열린 창·주소·붙여넣기 수집은 화면에서 뺐다) -->
+        <div class="segmented wide hidden" id="collect-mode">
+          <button class="on" data-v="file"><i data-icon="doc"></i>파일 올리기</button>
         </div>
 
-        <div class="mode-pane on" data-mode="window">
+        <div class="mode-pane" data-mode="window">
           <ol class="steps">
             <li><b>공문 열기</b> — 업무 프로그램(전자문서 뷰어, 브라우저 등)에서 수집할 공문을 화면에 띄웁니다.</li>
             <li><b>창 선택</b> — 아래 목록에서 그 창을 고르고 <b>[이 창 수집]</b>을 누릅니다.</li>
@@ -218,14 +216,29 @@
           </div>
         </div>
 
-        <div class="mode-pane" data-mode="file">
-          <div class="dropzone" id="drop-notice">
-            <i data-icon="doc"></i>
-            <div><b>공문 본문과 붙임 파일을 여기로 끌어다 놓으세요</b></div>
-            <div class="muted small">첫 번째 파일을 본문으로 사용합니다 · HWP·HWPX·PDF·DOCX·ODT·HTML·MHT(웹 저장)·EML(메일)·TXT·사진/스캔(글자 읽기) · ZIP 붙임은 자동으로 풉니다</div>
-            <button class="btn sm" id="pick-notice-files">파일 선택</button>
+        <div class="mode-pane on" data-mode="file">
+          <ol class="steps">
+            <li><b>본문</b> — 공문 본문 파일(전자문서 뷰어에서 'PC저장'한 HWP·PDF 등)을 왼쪽에 올립니다.</li>
+            <li><b>붙임</b> — 붙임 파일들을 오른쪽에 올립니다 (없으면 비워 둡니다).</li>
+            <li><b>정리 및 분석</b> — 공문 폴더로 정리하고 기한·제출물·할 일을 분석합니다.</li>
+          </ol>
+          <div class="upload-grid">
+            <div class="dropzone" id="drop-body">
+              <i data-icon="doc"></i>
+              <div><b>본문 파일 (1개)</b></div>
+              <div class="muted small">HWP·HWPX·PDF·DOCX·ODT·HTML·MHT·EML·TXT·사진/스캔</div>
+              <div class="body-file" id="body-file"></div>
+              <button class="btn sm" id="pick-body">본문 파일 선택</button>
+            </div>
+            <div class="dropzone" id="drop-notice">
+              <i data-icon="tray"></i>
+              <div><b>붙임 파일 (여러 개)</b></div>
+              <div class="muted small">어떤 형식이든 됩니다 · ZIP은 자동으로 풉니다</div>
+              <ul class="file-list" id="notice-files"></ul>
+              <button class="btn sm" id="pick-notice-files">붙임 파일 선택</button>
+            </div>
           </div>
-          <ul class="file-list" id="notice-files"></ul>
+          <div class="pkg-hint" id="pkg-hint"></div>
           <div class="row end"><button class="btn primary" id="file-collect" disabled><i data-icon="download"></i>정리 및 분석</button></div>
         </div>
 

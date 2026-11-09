@@ -514,3 +514,25 @@ def test_capture_window_twice_while_running_is_refused(api, monkeypatch):
     with pytest.raises(ValueError, match="수집하는 중"):
         api.capture_window(1, "", False, 20)
     j.status = "done"
+
+
+def test_unreadable_body_is_not_analyzed_by_ai(api, tmp_path, monkeypatch):
+    """본문 파일을 읽지 못하면(HWP에 olefile 없음 등) AI 분석을 하지 않고 이유를 보여 준다 (AI가 내용을 지어내지 않게)."""
+    from seomu import parsers
+    doc = tmp_path / "교육안내.hwp"
+    doc.write_bytes(b"\xd0\xcf\x11\xe0not-really-hwp")
+    att = tmp_path / "교육 추진계획.pdf"
+    att.write_bytes(b"%PDF-1.4 x")
+    real = parsers.parse_file
+
+    def fail(p, *a, **k):
+        if str(p).endswith(".hwp"):
+            raise parsers.ParseError("HWP 파일을 읽으려면 olefile 패키지가 필요합니다 (pip install olefile)")
+        return real(p, *a, **k)
+    monkeypatch.setattr(parsers, "parse_file", fail)
+    n = wait(api, api.collect_files([str(doc), str(att)], "", 0, True))
+    a = n["analysis"]
+    assert a["ai_status"] == "off" and "olefile" in a["body_error"] and a["summary"].startswith("본문을 읽지 못해")
+    assert a["deadlines"] == [] and any(f["ok"] and f["name"].endswith(".pdf") for f in n["attachments"])
+    assert {m["package"] for m in api.missing_packages()} <= {"olefile", "pypdf", "openpyxl", "lxml"}
+    assert "missing_packages" in api.app_info()

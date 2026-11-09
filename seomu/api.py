@@ -166,11 +166,39 @@ class Api:
             subprocess.Popen(["xdg-open", path])
 
     # ------------------------------------------------------------ 상태/설정
+    # 문서를 읽는 데 필요한 패키지: (가져올 이름, 설치 이름, 무엇에 쓰는지)
+    NEEDED_PACKAGES = (("olefile", "olefile", "HWP(한글 5.0) 읽기"), ("pypdf", "pypdf", "PDF 읽기"),
+                       ("openpyxl", "openpyxl", "엑셀(XLSX) 읽기"), ("lxml", "lxml", "보고서·서식 채우기"))
+
+    def missing_packages(self) -> list[dict]:
+        import importlib.util
+        return [{"module": m, "package": p, "use": u} for m, p, u in self.NEEDED_PACKAGES
+                if importlib.util.find_spec(m) is None]
+
     def app_info(self) -> dict:
         return {"name": APP_NAME, "version": __version__, "home": str(self._cfg.home),
                 "browser_available": BrowserWorker.available(),
                 "windows_available": winwindow.available(), "uia_available": winwindow.uia_available(),
-                "native": self._window is not None}
+                "native": self._window is not None, "missing_packages": self.missing_packages()}
+
+    def install_packages(self) -> dict:
+        """빠진 패키지(olefile 등)를 설치한다 (소스로 실행할 때, 인터넷 필요). 설치 파일(exe)에는 이미 들어 있다."""
+        missing = [m["package"] for m in self.missing_packages()]
+        if not missing:
+            return {"job_id": self._run_job("packages", lambda job: {"ok": True, "installed": []})["job_id"]}
+        if getattr(sys, "frozen", False):
+            raise RuntimeError("설치 파일로 설치한 프로그램에는 이미 들어 있어야 합니다. 최신 설치 파일로 다시 설치해 주세요.")
+
+        def work(job: Job):
+            job.message = f"설치 중: {', '.join(missing)} (1분 정도)"
+            r = subprocess.run([sys.executable, "-m", "pip", "install", *missing], capture_output=True, text=True,
+                               timeout=900, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if r.returncode != 0:
+                raise RuntimeError("설치하지 못했습니다 (인터넷 연결 또는 pip 확인): " + (r.stderr or r.stdout)[-300:])
+            import importlib
+            importlib.invalidate_caches()
+            return {"ok": not self.missing_packages(), "installed": missing}
+        return self._run_job("packages", work)
 
     def get_settings(self) -> dict:
         return self._cfg.as_dict()
@@ -899,6 +927,10 @@ class Api:
         if dup:
             return self._merge_into(job, dup, cap)
         cap.files = expand_archives(cap.files)          # zip 붙임은 풀어서 함께 읽는다
+        unreadable = (cap.text or "").lstrip().startswith("(본문을 읽지 못했습니다") or \
+            len(re.sub(r"\s", "", cap.text or "")) < 20
+        if unreadable:
+            use_ai = False                              # 읽은 본문이 없으면 AI가 내용을 지어낸다 → 분석하지 않는다
         if not cap.files:
             # 붙여넣기·주소 수집 등으로 파일이 따라오지 않았어도, 본문에 적힌 붙임은 '받지 못함'으로 알려 준다
             # (나중에 공문 폴더의 '붙임'에 넣으면 이름을 맞춰 자동으로 연결된다)
@@ -907,6 +939,10 @@ class Api:
                          for e in attach.expected_attachments(cap.text)]
         analysis = analyze(cap.title, cap.text, cap.files, None)
         analysis["ai_status"] = "running" if use_ai else "off"
+        if unreadable:
+            m = re.search(r"\(본문을 읽지 못했습니다:?\s*(.*?)\)?\s*$", (cap.text or "").strip().splitlines()[0] if cap.text else "")
+            analysis["body_error"] = (m.group(1).strip() if m and m.group(1) else "") or "본문 파일에서 글자를 읽지 못했습니다"
+            analysis["summary"] = "본문을 읽지 못해 분석하지 않았습니다. " + analysis["body_error"]
         folder = cap.folder
         (folder / "요약.md").write_text(summary_markdown(cap.title, cap.url, analysis, cap.files), encoding="utf-8")
         nid = self._store.add_notice(cap.title, cap.url, str(folder), cap.text, cap.files, analysis)

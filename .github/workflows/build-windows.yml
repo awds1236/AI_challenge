@@ -2,13 +2,16 @@
 #   - SeomuAI.exe (PyInstaller, Python 설치 불필요) + 내장 AI 엔진(llama.cpp 공식 CPU 빌드) + uiautomation
 #   - SeomuAI-Setup.exe (Inno Setup): 설치하고 바로 실행, 관리자 권한 불필요
 #   - 설치·실행 시험 뒤 GitHub Releases에 올린다
-# 실행: Actions → "Windows 설치 파일" → Run workflow (또는 v* 태그를 올리면 자동)
+# 실행: 기본 브랜치에 병합되면 자동 (또는 Actions → "Windows 설치 파일" → Run workflow, v* 태그)
 name: Windows 설치 파일
 
 on:
   workflow_dispatch:
   push:
     tags: ["v*"]
+    # 기본 브랜치에 병합되면 최신 설치 파일을 새로 만든다 (문서만 바뀐 경우는 빼고)
+    branches: ["claude/focused-clarke-fmtkop", "main"]
+    paths-ignore: ["docs/**", "**.md", "sample_data/**"]
 
 permissions:
   contents: write

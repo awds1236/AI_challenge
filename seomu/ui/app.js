@@ -172,7 +172,7 @@ function md(text) {
 }
 
 // ------------------------------------------------------------------ 상태
-const state = { settings: {}, info: {}, notices: [], templates: [], tasks: [], calMonth: new Date(), calSel: null, tplSel: null, pendingFiles: [] };
+const state = { settings: {}, info: {}, notices: [], templates: [], tasks: [], calMonth: new Date(), calSel: null, tplSel: null, pendingFiles: [], bodyFile: "" };
 
 // ------------------------------------------------------------------ 내비게이션
 function go(page) {
@@ -488,7 +488,7 @@ async function loadNotices() {
   state.notices.filter((n) => (n.analysis || {}).ai_status === "running").forEach((n) => watchAI(n.id));
   $("#notice-list").innerHTML = state.notices.length ? state.notices.map(noticeRow).join("")
     : `<li class="empty">아직 수집한 공문이 없습니다. 위에서 공문을 수집해 보세요.</li>`;
-  if ($("#collect-mode button.on")?.dataset.v === "window") loadWindows();
+  renderPkgHint();
   $("#br-hint").textContent = state.info.browser_available ? "" : "※ 브라우저 연동을 쓰려면 Playwright 설치가 필요합니다 (README 참고). 주소 수집과 파일 가져오기는 바로 쓸 수 있습니다.";
 }
 async function doCollect(name, args) {
@@ -537,11 +537,35 @@ async function doCollect(name, args) {
   } catch (e) { hud(false); toast(e.message, "err", 6000); }
 }
 function renderPendingFiles() {
-  const ul = $("#notice-files");
-  ul.innerHTML = state.pendingFiles.map((p, i) => `<li>${i === 0 ? '<span class="tag">본문</span>' : '<span class="tag" style="color:var(--text-2)">붙임</span>'}
+  $("#body-file").innerHTML = state.bodyFile
+    ? `<span class="tag">본문</span> <span>${esc(baseName(state.bodyFile))}</span> <button class="btn ghost sm" data-rm-body>${svg("close")}</button>` : "";
+  $("#notice-files").innerHTML = state.pendingFiles.map((p, i) => `<li><span class="tag" style="color:var(--text-2)">붙임</span>
     <span>${esc(baseName(p))}</span><span class="spacer"></span>
-    ${i ? `<button class="btn ghost sm" data-main="${i}">본문으로</button>` : ""}<button class="btn ghost sm" data-rm="${i}">${svg("close")}</button></li>`).join("");
-  $("#file-collect").disabled = !state.pendingFiles.length;
+    <button class="btn ghost sm" data-main="${i}" title="이 파일을 본문으로">본문으로</button><button class="btn ghost sm" data-rm="${i}">${svg("close")}</button></li>`).join("");
+  $("#file-collect").disabled = !state.bodyFile;
+  $("#file-collect").title = state.bodyFile ? "" : "본문 파일을 먼저 올려 주세요";
+}
+function setBody(paths) {
+  if (!paths || !paths.length) return;
+  if (state.bodyFile) state.pendingFiles.unshift(state.bodyFile);       // 바꾼 예전 본문은 붙임으로
+  state.bodyFile = paths[0];
+  state.pendingFiles = state.pendingFiles.filter((p) => p !== paths[0]).concat(paths.slice(1));   // 여러 개를 놓으면 나머지는 붙임
+  renderPendingFiles();
+}
+function renderPkgHint() {
+  const miss = state.info.missing_packages || [];
+  $("#pkg-hint").innerHTML = miss.length ? `⚠ 문서를 읽는 데 필요한 패키지가 없습니다: <b>${miss.map((m) => `${esc(m.package)}(${esc(m.use)})`).join(", ")}</b>
+    — 없으면 그 형식의 본문을 읽지 못합니다. <button class="btn sm" id="pkg-install">지금 설치</button>` : "";
+  const b = $("#pkg-install");
+  if (b) b.onclick = async () => {
+    b.disabled = true; b.textContent = "설치 중…";
+    try {
+      const r = await runJob("install_packages", []);
+      state.info = await api("app_info");
+      renderPkgHint();
+      toast(r.ok ? "설치했습니다. 이제 그 형식의 본문을 읽을 수 있습니다." : "설치는 했지만 불러오지 못했습니다. 프로그램을 다시 실행해 주세요.", r.ok ? "ok" : "info", 7000);
+    } catch (e) { toast(e.message, "err", 10000); b.disabled = false; b.textContent = "다시 시도"; }
+  };
 }
 
 // 열린 창 목록
@@ -1097,15 +1121,23 @@ function bind() {
   $("#br-pages").addEventListener("focus", refreshPages);
   $("#br-capture").addEventListener("click", () => { const v = $("#br-pages").value; doCollect("capture_browser", [v === "" ? null : Number(v), title(), useAI()]); });
   $("#url-collect").addEventListener("click", () => doCollect("collect_url", [$("#url-input").value, title(), useAI()]));
-  setupDrop($("#drop-notice"), (paths) => { state.pendingFiles.push(...paths); renderPendingFiles(); });
+  setupDrop($("#drop-body"), setBody);
+  $("#pick-body").addEventListener("click", async () => setBody(await pickFiles(false)));
+  $("#body-file").addEventListener("click", (e) => { if (e.target.closest("[data-rm-body]")) { state.bodyFile = ""; renderPendingFiles(); } });
+  setupDrop($("#drop-notice"), (paths) => { state.pendingFiles.push(...paths.filter((p) => p !== state.bodyFile)); renderPendingFiles(); });
   $("#pick-notice-files").addEventListener("click", async () => { state.pendingFiles.push(...(await pickFiles(true))); renderPendingFiles(); });
   $("#notice-files").addEventListener("click", (e) => {
     const rm = e.target.closest("[data-rm]"), mn = e.target.closest("[data-main]");
     if (rm) state.pendingFiles.splice(Number(rm.dataset.rm), 1);
-    if (mn) { const [x] = state.pendingFiles.splice(Number(mn.dataset.main), 1); state.pendingFiles.unshift(x); }
+    if (mn) { const [x] = state.pendingFiles.splice(Number(mn.dataset.main), 1); if (state.bodyFile) state.pendingFiles.unshift(state.bodyFile); state.bodyFile = x; }
     renderPendingFiles();
   });
-  $("#file-collect").addEventListener("click", async () => { const paths = state.pendingFiles.slice(); state.pendingFiles = []; renderPendingFiles(); await doCollect("collect_files", [paths, title(), 0, useAI()]); });
+  $("#file-collect").addEventListener("click", async () => {
+    if (!state.bodyFile) return toast("본문 파일을 먼저 올려 주세요", "info");
+    const paths = [state.bodyFile, ...state.pendingFiles];
+    state.bodyFile = ""; state.pendingFiles = []; renderPendingFiles();
+    await doCollect("collect_files", [paths, title(), 0, useAI()]);
+  });
   // 본문 붙여넣기: 웹 페이지에서 복사하면 HTML(표·붙임 링크)도 함께 받아 둔다
   let pasteHtml = "";
   const pasteInfo = () => {
