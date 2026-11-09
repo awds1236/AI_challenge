@@ -1473,7 +1473,11 @@ class Api:
             job.message = "다시 분석하는 중…"
             s = self._cfg.settings
             if body_text_unreadable(n["body"]):          # 본문을 못 읽은 공문: 붙임의 '[본문] ….pdf' 등으로 다시 시도
-                alt = body_from_attachments(n["attachments"], Path(n.get("source") or "").name)
+                folder = Path(n["folder"])
+                originals = [{"name": "본문", "path": str(f), "ok": True}       # 수집 때 함께 저장한 본문 원본 파일
+                             for f in sorted(folder.glob("본문_*")) if f.is_file()] if folder.is_dir() else []
+                alt = (body_from_attachments(originals) or
+                       body_from_attachments(n["attachments"], Path(n.get("source") or "").name))
                 if not alt:
                     raise ValueError("본문을 읽지 못한 공문입니다. 본문을 PDF로 저장해 [붙임 올리기]로 올린 뒤 다시 분석하세요 "
                                      "(파일 이름에 '본문'을 넣으면 본문으로 읽습니다).")
